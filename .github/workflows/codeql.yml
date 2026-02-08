@@ -27,15 +27,7 @@ jobs:
       uses: github/codeql-action/init@v3
       with:
         languages: python
-        # Using a specialized config to force Python analysis on our tools folder
-        # and ignore the massive Arma .pbo/.cpp files which aren't C++
-        config: |
-          paths:
-            - tools
-            - .uksf_tools
-          paths-ignore:
-            - addons
-            - keys
+        build-mode: none
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
