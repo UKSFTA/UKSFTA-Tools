@@ -12,7 +12,9 @@ def setup_project():
     dirs = [
         "tools",
         ".hemtt/scripts",
-        ".hemtt/hooks",
+        ".hemtt/hooks/pre_build",
+        ".hemtt/hooks/post_build",
+        ".hemtt/hooks/post_release",
         ".github/workflows"
     ]
     for d in dirs:
@@ -33,23 +35,36 @@ def setup_project():
     print(f" Copied: tools/ directory")
 
     # 3. Symlink HEMTT Scripts/Hooks
-    for category in ["scripts", "hooks"]:
-        src_path_abs = os.path.join(tools_dir, "hemtt", category)
-        if not os.path.exists(src_path_abs): continue
-        
-        for item in os.listdir(src_path_abs):
-            src_abs = os.path.join(src_path_abs, item)
-            dst_abs = os.path.join(project_root, ".hemtt", category, item)
+    hemtt_src_dir = os.path.join(tools_dir, "hemtt")
+    if os.path.exists(hemtt_src_dir):
+        for category in os.listdir(hemtt_src_dir):
+            src_path_abs = os.path.join(hemtt_src_dir, category)
+            if not os.path.isdir(src_path_abs): continue
             
-            rel_src = os.path.relpath(src_abs, os.path.dirname(dst_abs))
-            
-            if os.path.exists(dst_abs):
-                if os.path.islink(dst_abs) or os.path.isfile(dst_abs):
-                    os.remove(dst_abs)
-                elif os.path.isdir(dst_abs):
-                    shutil.rmtree(dst_abs)
-            os.symlink(rel_src, dst_abs)
-            print(f" Linked: .hemtt/{category}/{item} -> {rel_src}")
+            for item in os.listdir(src_path_abs):
+                src_abs = os.path.join(src_path_abs, item)
+                dst_abs = os.path.join(project_root, ".hemtt", category, item)
+                
+                # Special handling for nested hooks
+                if os.path.isdir(src_abs):
+                    os.makedirs(dst_abs, exist_ok=True)
+                    for subitem in os.listdir(src_abs):
+                        sub_src_abs = os.path.join(src_abs, subitem)
+                        sub_dst_abs = os.path.join(dst_abs, subitem)
+                        rel_src = os.path.relpath(sub_src_abs, os.path.dirname(sub_dst_abs))
+                        if os.path.exists(sub_dst_abs):
+                            os.remove(sub_dst_abs)
+                        os.symlink(rel_src, sub_dst_abs)
+                        print(f" Linked: .hemtt/{category}/{item}/{subitem} -> {rel_src}")
+                else:
+                    rel_src = os.path.relpath(src_abs, os.path.dirname(dst_abs))
+                    if os.path.exists(dst_abs):
+                        if os.path.islink(dst_abs) or os.path.isfile(dst_abs):
+                            os.remove(dst_abs)
+                        elif os.path.isdir(dst_abs):
+                            shutil.rmtree(dst_abs)
+                    os.symlink(rel_src, dst_abs)
+                    print(f" Linked: .hemtt/{category}/{item} -> {rel_src}")
 
     # 4. Copy GitHub Workflows
     workflow_src_dir = os.path.join(tools_dir, ".github", "workflows")
