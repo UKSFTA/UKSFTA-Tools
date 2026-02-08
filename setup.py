@@ -80,8 +80,8 @@ def setup_project():
             shutil.copy2(src, dst)
             print(f" Copied: .github/workflows/{item}")
 
-    # 5. Templates & Gitignore
-    for template in ["workshop_description.txt", ".env.example"]:
+    # 5. Templates & Scripts
+    for template in ["workshop_description.txt", ".env.example", "build.sh"]:
         dst = os.path.join(project_root, template)
         if not os.path.exists(dst):
             shutil.copy(os.path.join(tools_dir, template), dst)
