@@ -25,6 +25,10 @@ def get_mod_ids_from_file():
             if not clean_line or clean_line.startswith("#"):
                 continue
             
+            # Skip lines that are clearly for ignoring
+            if "ignore=" in clean_line.lower() or "@ignore" in clean_line.lower():
+                continue
+
             match = re.search(r"(?:id=)?(\d{8,})", clean_line)
             if match:
                 mod_id = match.group(1)
@@ -33,6 +37,23 @@ def get_mod_ids_from_file():
                     tag = clean_line.split("#", 1)[1].strip()
                 mods[mod_id] = tag
     return mods
+
+def get_ignored_ids_from_file():
+    ignored = set()
+    if not os.path.exists(MOD_SOURCES_FILE):
+        return ignored
+    
+    with open(MOD_SOURCES_FILE, "r") as f:
+        for line in f:
+            clean_line = line.strip().lower()
+            if not clean_line or clean_line.startswith("#"):
+                continue
+            
+            if "ignore=" in clean_line or "@ignore" in clean_line:
+                matches = re.findall(r"(\d{8,})", clean_line)
+                for mid in matches:
+                    ignored.add(mid)
+    return ignored
 
 def get_workshop_metadata(mod_id):
     url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={mod_id}"
@@ -64,17 +85,26 @@ def get_workshop_metadata(mod_id):
         print(f"Warning: Could not fetch info for mod {mod_id}: {e}")
     return info
 
-def resolve_dependencies(initial_mods):
+def resolve_dependencies(initial_mods, ignored_ids=None):
+    if ignored_ids is None:
+        ignored_ids = set()
+        
     print("--- Resolving Dependencies ---")
+    if ignored_ids:
+        print(f"Ignoring: {', '.join(ignored_ids)}")
+        
     resolved_info = {}
     to_check = list(initial_mods.keys())
-    processed = set()
+    processed = set(ignored_ids)
     
     while to_check:
         mid = to_check.pop(0)
-        if mid in processed:
+        if mid in processed and mid not in initial_mods:
             continue
             
+        if mid in processed and mid in resolved_info:
+            continue
+
         print(f"Checking {mid}...")
         meta = get_workshop_metadata(mid)
         if mid in initial_mods and initial_mods[mid]:
@@ -198,12 +228,14 @@ def sync_hemtt_launch(mod_ids):
 
 if __name__ == "__main__":
     initial_mods = get_mod_ids_from_file()
+    ignored_ids = get_ignored_ids_from_file()
+    
     if not initial_mods:
         print("No mod IDs found in mod_sources.txt")
         sys.exit(0)
     
     try:
-        resolved_info = resolve_dependencies(initial_mods)
+        resolved_info = resolve_dependencies(initial_mods, ignored_ids)
         run_steamcmd(set(resolved_info.keys()))
         sync_mods(resolved_info)
         print("\nSuccess: All mods and dependencies synced.")
