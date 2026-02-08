@@ -79,7 +79,15 @@ def setup_project():
     # 5. Templates & Scripts
     for template in ["workshop_description.txt", ".env.example", "build.sh", "release.sh"]:
         dst = os.path.join(project_root, template)
-        if not os.path.exists(dst):
+        if template in ["build.sh", "release.sh"]:
+            # Always overwrite core scripts
+            if os.path.exists(dst):
+                os.remove(dst)
+            shutil.copy(os.path.join(tools_dir, template), dst)
+            os.chmod(dst, 0o755) # Ensure executable
+            print(f" Updated: {template}")
+        elif not os.path.exists(dst):
+            # Only copy templates if missing
             shutil.copy(os.path.join(tools_dir, template), dst)
             print(f" Copied: {template}")
 
