@@ -147,6 +147,17 @@ def generate_content_list():
     
     return content_list if content_list else "[*] [i]Content list pending update.[/i]"
 
+def generate_changelog(last_tag):
+    try:
+        if last_tag == "HEAD":
+            cmd = ["git", "log", "--oneline", "--no-merges"]
+        else:
+            cmd = ["git", "log", f"{last_tag}..HEAD", "--oneline", "--no-merges"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except:
+        return "Maintenance update."
+
 def create_vdf(app_id, workshop_id, content_path, changelog, preview_image=None):
     description = ""
     if os.path.exists("workshop_description.txt"):
