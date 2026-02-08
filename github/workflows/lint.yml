@@ -1,0 +1,33 @@
+name: Lint
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Validate Config
+        run: python3 tools/config_style_checker.py
+
+      - name: Validate Stringtables
+        run: python3 tools/stringtable_validator.py
+
+      - name: Validate SQF
+        run: python3 tools/sqf_validator.py
+
+      - name: Validate Return Types
+        run: python3 tools/return_checker.py

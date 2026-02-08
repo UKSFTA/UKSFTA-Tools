@@ -12,12 +12,14 @@ def setup_project():
     dirs = [
         "tools",
         ".hemtt/scripts",
-        ".hemtt/hooks"
+        ".hemtt/hooks",
+        ".github/workflows"
     ]
     for d in dirs:
         os.makedirs(os.path.join(project_root, d), exist_ok=True)
 
     # 2. Symlink or Copy Tools
+    # ... (previous logic for tools) ...
     # We use symlinks for the python tools so they update automatically
     python_tools = os.listdir(os.path.join(tools_dir, "tools"))
     for tool in python_tools:
@@ -47,7 +49,21 @@ def setup_project():
             os.symlink(src, dst)
             print(f" Linked: .hemtt/{category}/{item}")
 
-    # 4. Copy templates if missing
+    # 4. Symlink GitHub Workflows
+    workflow_src_dir = os.path.join(tools_dir, "github", "workflows")
+    if os.path.exists(workflow_src_dir):
+        for item in os.listdir(workflow_src_dir):
+            src = os.path.join(workflow_src_dir, item)
+            dst = os.path.join(project_root, ".github", "workflows", item)
+            if os.path.exists(dst):
+                if os.path.islink(dst) or os.path.isfile(dst):
+                    os.remove(dst)
+                elif os.path.isdir(dst):
+                    shutil.rmtree(dst)
+            os.symlink(src, dst)
+            print(f" Linked: .github/workflows/{item}")
+
+    # 5. Copy templates if missing
     for template in ["workshop_description.txt", ".env.example"]:
         dst = os.path.join(project_root, template)
         if not os.path.exists(dst):
