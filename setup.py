@@ -18,23 +18,19 @@ def setup_project():
     for d in dirs:
         os.makedirs(os.path.join(project_root, d), exist_ok=True)
 
-    # 2. Symlink or Copy Tools
-    # We use relative symlinks for the python tools so they work in CI
-    python_tools = os.listdir(os.path.join(tools_dir, "tools"))
-    for tool in python_tools:
-        src_abs = os.path.join(tools_dir, "tools", tool)
-        dst_abs = os.path.join(project_root, "tools", tool)
-        
-        # Calculate relative path
-        rel_src = os.path.relpath(src_abs, os.path.dirname(dst_abs))
-        
-        if os.path.exists(dst_abs):
-            if os.path.islink(dst_abs) or os.path.isfile(dst_abs):
-                os.remove(dst_abs)
-            elif os.path.isdir(dst_abs):
-                shutil.rmtree(dst_abs)
-        os.symlink(rel_src, dst_abs)
-        print(f" Linked: tools/{tool} -> {rel_src}")
+    # 2. Copy Tools
+    # We copy the python tools so they are real files for CI and ease of use
+    python_tools_src = os.path.join(tools_dir, "tools")
+    python_tools_dst = os.path.join(project_root, "tools")
+    
+    if os.path.exists(python_tools_dst):
+        if os.path.islink(python_tools_dst):
+            os.remove(python_tools_dst)
+        else:
+            shutil.rmtree(python_tools_dst)
+    
+    shutil.copytree(python_tools_src, python_tools_dst)
+    print(f" Copied: tools/ directory")
 
     # 3. Symlink HEMTT Scripts/Hooks
     for category in ["scripts", "hooks"]:
