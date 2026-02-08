@@ -14,7 +14,7 @@ Please ensure all necessary dependencies are loaded.
 
 [h2]📡 About UKSFTA[/h2]
 UKSF Task Force Alpha is a tactical realism unit focused on high-quality Arma 3 simulation. 
-[url=https://uksfta.github.io/]Visit our Website[/url]
+
 
 [hr]
 [i]Automated deployment via UKSFTA DevOps Pipeline[/i]
