@@ -88,13 +88,15 @@ def setup_project():
             print(f" Copied: {template}")
 
     gitignore_path = os.path.join(project_root, ".gitignore")
-    ignore_rule = "/releases/*.zip"
+    ignore_rule = "releases/"
     if os.path.exists(gitignore_path):
         with open(gitignore_path, "r") as f:
             content = f.read()
         if ignore_rule not in content:
-            with open(gitignore_path, "a") as f:
-                f.write(f"\n# Added by UKSFTA Tools\n{ignore_rule}\n")
+            # Also clean up the old specific rule if it exists
+            new_content = content.replace("/releases/*.zip", "")
+            with open(gitignore_path, "w") as f:
+                f.write(new_content.strip() + f"\n\n# Added by UKSFTA Tools\n{ignore_rule}\n")
             print(f" Updated: .gitignore")
 
     print("\nSetup complete! Project is now production-ready.")

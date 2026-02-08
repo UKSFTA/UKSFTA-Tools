@@ -17,5 +17,5 @@ hemtt
 hemtt.exe
 
 # Build Artifacts
-/releases/*.zip
+releases/
 /keys/
