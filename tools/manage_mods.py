@@ -182,6 +182,11 @@ def sync_mods(resolved_info):
             sys.exit(1)
 
     os.makedirs(ADDONS_DIR, exist_ok=True)
+    
+    # Aggressively purge keys directory to ensure no external keys leak into the build
+    if os.path.exists(KEYS_DIR):
+        print(f"--- Purging {KEYS_DIR} to remove external keys ---")
+        shutil.rmtree(KEYS_DIR)
     os.makedirs(KEYS_DIR, exist_ok=True)
 
     for mid, info in resolved_info.items():
