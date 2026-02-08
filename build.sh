@@ -1,54 +1,48 @@
 #!/bin/bash
-
-# UKSFTA HEMTT Wrapper
-# This script handles building, timestamp fixing, and manual archiving.
-
+PROJECT_ROOT=$(pwd)
 export SOURCE_DATE_EPOCH=$(date +%s)
 
-# 1. Run HEMTT command
-# We use --no-archive to prevent HEMTT from creating empty zips
-if [[ " $* " == *"release"* ]]; then
+# Identify if we are doing a release
+IS_RELEASE=false
+if [[ " $* " == *" release "* ]]; then
+    IS_RELEASE=true
+fi
+
+if [ "$IS_RELEASE" = true ]; then
+    CLEAN_ARGS=$(echo "$@" | sed 's/release//g')
     echo "HEMTT: Running release (no-archive)..."
-    hemtt release --no-archive "$@"
-    STATUS=$?
+    hemtt release --no-archive $CLEAN_ARGS
 else
     echo "HEMTT: Running '$@'..."
     hemtt "$@"
-    STATUS=$?
 fi
+STATUS=$?
 
 if [ $STATUS -eq 0 ]; then
-    # 2. Fix timestamps in .hemttout
+    # Fix timestamps in .hemttout immediately
     if [ -f "tools/fix_timestamps.py" ]; then
         python3 tools/fix_timestamps.py .hemttout
     fi
 
-    # 3. Manual Archiving for releases
-    if [[ " $* " == *"release"* ]]; then
-        echo "HEMTT: Manually packaging release ZIP..."
+    if [ "$IS_RELEASE" = true ]; then
+        echo "HEMTT: Manually packaging unit-standard ZIP..."
         mkdir -p releases
+        PREFIX=$(grep "prefix =" .hemtt/project.toml | head -n 1 | cut -d'"' -f2 | tr -d '\n\r ')
+        MAJOR=$(grep "#define MAJOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\n\r ')
+        MINOR=$(grep "#define MINOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\n\r ')
+        PATCH=$(grep "#define PATCHLVL" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\n\r ')
         
-        PROJECT_PREFIX=$(grep "prefix =" .hemtt/project.toml | cut -d'"' -f2)
-        MAJOR=$(grep "#define MAJOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\r')
-        MINOR=$(grep "#define MINOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\r')
-        PATCH=$(grep "#define PATCHLVL" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\r')
+        ZIP_NAME="uksf task force alpha - ${PREFIX,,}_${MAJOR}.${MINOR}.${PATCH}.zip"
         
-        ZIP_NAME="uksf task force alpha - ${PROJECT_PREFIX,,}_${MAJOR}.${MINOR}.${PATCH}.zip"
-        LATEST_ZIP="${PROJECT_PREFIX}-latest.zip"
-        
-        # Package the contents of .hemttout/release/
-        # Use a subshell to avoid directory issues
+        # Explicit ZIP using local paths
         (
-            cd .hemttout/release/
-            zip -r "../../releases/$ZIP_NAME" ./*
+            cd .hemttout/release
+            zip -q -r "../../releases/$ZIP_NAME" .
         )
         
-        cp "releases/$ZIP_NAME" "releases/$LATEST_ZIP"
-        
-        # Final timestamp fix on the new ZIPs
+        cp "releases/$ZIP_NAME" "releases/${PREFIX}-latest.zip"
         python3 tools/fix_timestamps.py releases
-        echo "Release packaged successfully: releases/$ZIP_NAME"
+        echo "Release packaged: releases/$ZIP_NAME"
     fi
 fi
-
 exit $STATUS
