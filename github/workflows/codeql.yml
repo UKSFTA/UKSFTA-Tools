@@ -17,22 +17,24 @@ jobs:
       contents: read
       security-events: write
 
-    strategy:
-      fail-fast: false
-      matrix:
-        language: [ 'python' ] # Add 'cpp' if you have C++ extensions
-
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v3
       with:
-        languages: ${{ matrix.language }}
-
-    - name: Autobuild
-      uses: github/codeql-action/autobuild@v3
+        languages: python
+        # Explicitly tell CodeQL where to look and what to ignore
+        config: |
+          paths:
+            - tools
+            - .uksf_tools
+          paths-ignore:
+            - '**/addons'
+            - '**/keys'
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
