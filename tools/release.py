@@ -140,7 +140,7 @@ def generate_content_list():
                 content_list += "\n[list]\n"
                 for dep in deps:
                     dep_url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={dep['id']}"
-                    content_list += f[*] [i]Dependency Included:[/i] [url={dep_url}]{dep['name']}[/url]\n"
+                    content_list += f"[*] [i]Dependency Included:[/i] [url={dep_url}]{dep['name']}[/url]\n"
                 content_list += "[/list]\n"
             else:
                 content_list += "\n"
