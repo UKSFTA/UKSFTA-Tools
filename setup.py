@@ -53,7 +53,10 @@ def setup_project():
                         sub_dst_abs = os.path.join(dst_abs, subitem)
                         rel_src = os.path.relpath(sub_src_abs, os.path.dirname(sub_dst_abs))
                         if os.path.exists(sub_dst_abs):
-                            os.remove(sub_dst_abs)
+                            if os.path.islink(sub_dst_abs) or os.path.isfile(sub_dst_abs):
+                                os.remove(sub_dst_abs)
+                            elif os.path.isdir(sub_dst_abs):
+                                shutil.rmtree(sub_dst_abs)
                         os.symlink(rel_src, sub_dst_abs)
                         print(f" Linked: .hemtt/{category}/{item}/{subitem} -> {rel_src}")
                 else:
