@@ -1,19 +1,21 @@
 #!/bin/bash
 
 # UKSFTA HEMTT Wrapper
-# This script handles building, timestamp fixing, and custom archiving.
+# This script handles building, timestamp fixing, and manual archiving.
 
 export SOURCE_DATE_EPOCH=$(date +%s)
 
 # 1. Run HEMTT command
-echo "HEMTT: Executing '$@'..."
-# We run release with --no-archive since HEMTT's internal zipping is failing
+# We use --no-archive to prevent HEMTT from creating empty zips
 if [[ " $* " == *"release"* ]]; then
+    echo "HEMTT: Running release (no-archive)..."
     hemtt release --no-archive "$@"
+    STATUS=$?
 else
+    echo "HEMTT: Running '$@'..."
     hemtt "$@"
+    STATUS=$?
 fi
-STATUS=$?
 
 if [ $STATUS -eq 0 ]; then
     # 2. Fix timestamps in .hemttout
@@ -21,9 +23,9 @@ if [ $STATUS -eq 0 ]; then
         python3 tools/fix_timestamps.py .hemttout
     fi
 
-    # 3. Handle Archiving manually if it was a release
+    # 3. Manual Archiving for releases
     if [[ " $* " == *"release"* ]]; then
-        echo "HEMTT: Creating unit-standard ZIP archive..."
+        echo "HEMTT: Manually packaging release ZIP..."
         mkdir -p releases
         
         PROJECT_PREFIX=$(grep "prefix =" .hemtt/project.toml | cut -d'"' -f2)
@@ -35,15 +37,17 @@ if [ $STATUS -eq 0 ]; then
         LATEST_ZIP="${PROJECT_PREFIX}-latest.zip"
         
         # Package the contents of .hemttout/release/
-        cd .hemttout/release/
-        zip -r "../../releases/$ZIP_NAME" ./*
-        cd ../..
+        # Use a subshell to avoid directory issues
+        (
+            cd .hemttout/release/
+            zip -r "../../releases/$ZIP_NAME" ./*
+        )
         
         cp "releases/$ZIP_NAME" "releases/$LATEST_ZIP"
         
         # Final timestamp fix on the new ZIPs
         python3 tools/fix_timestamps.py releases
-        echo "Release packaged: releases/$ZIP_NAME"
+        echo "Release packaged successfully: releases/$ZIP_NAME"
     fi
 fi
 
