@@ -10,8 +10,14 @@ echo "=========================================="
 export CURRENT_UNIX_TIME=$(date +%s)
 export SOURCE_DATE_EPOCH=$CURRENT_UNIX_TIME
 
-# Identify the command
-HEMTT_CMD=${1:-build}
+# Check if 'release' is anywhere in the arguments
+IS_RELEASE=false
+for arg in "$@"; do
+    if [[ "$arg" == "release" ]]; then
+        IS_RELEASE=true
+        break
+    fi
+done
 
 if command -v hemtt &> /dev/null; then
     echo "Running: hemtt $@"
@@ -25,7 +31,7 @@ fi
 # Fix timestamps and archive if successful
 if [ $BUILD_STATUS -eq 0 ]; then
     # Hemtt 'release' prepares the files, 'archive' creates the zip.
-    if [[ "$HEMTT_CMD" == "release" ]]; then
+    if [ "$IS_RELEASE" = true ]; then
         echo "Release build successful. Packaging ZIP..."
         hemtt archive
     fi
