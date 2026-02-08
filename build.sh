@@ -1,21 +1,22 @@
 #!/bin/bash
-
-# UKSFTA HEMTT Wrapper
-# This script handles building, timestamp fixing, and manual archiving with unit-standard folder structure.
-
+PROJECT_ROOT=$(pwd)
 export SOURCE_DATE_EPOCH=$(date +%s)
 
-# 1. Run HEMTT command
-echo "HEMTT: Executing '$@'..."
-if [[ " $* " == *"release"* ]]; then
-    echo "HEMTT: Running release (no-archive)..."
-    hemtt release --no-archive "$@"
-    STATUS=$?
+# 1. Prepare HEMTT Command
+# We use a wrapper to ensure we never pass 'release' twice
+if [[ " $* " == *" release "* ]]; then
+    # We strip 'release' from the arguments to avoid duplication
+    # then call hemtt release --no-archive
+    CLEAN_ARGS=$(echo "$@" | sed 's/release//g')
+    echo "HEMTT: Running release (no-archive) $CLEAN_ARGS..."
+    hemtt release --no-archive $CLEAN_ARGS
+    IS_RELEASE=true
 else
     echo "HEMTT: Running '$@'..."
     hemtt "$@"
-    STATUS=$?
+    IS_RELEASE=false
 fi
+STATUS=$?
 
 if [ $STATUS -eq 0 ]; then
     # 2. Fix timestamps in .hemttout immediately
@@ -24,7 +25,7 @@ if [ $STATUS -eq 0 ]; then
     fi
 
     # 3. Manual Archiving for releases
-    if [[ " $* " == *"release"* ]]; then
+    if [ "$IS_RELEASE" = true ]; then
         echo "HEMTT: Manually packaging unit-standard ZIP..."
         mkdir -p releases
         
@@ -35,7 +36,6 @@ if [ $STATUS -eq 0 ]; then
         
         MOD_FOLDER_NAME="@${PREFIX}"
         ZIP_NAME="uksf task force alpha - ${PREFIX,,}_${MAJOR}.${MINOR}.${PATCH}.zip"
-        LATEST_ZIP="${PREFIX}-latest.zip"
         
         # Prepare staging for ZIP
         STAGING_DIR=".hemttout/zip_staging"
@@ -48,17 +48,15 @@ if [ $STATUS -eq 0 ]; then
         # Normalize timestamps in staging
         python3 tools/fix_timestamps.py "$STAGING_DIR"
         
-        # Package from the staging dir so the @Folder is the root of the ZIP
+        # Package the @Folder itself into the root of the ZIP
         (
             cd "$STAGING_DIR"
-            zip -q -r "../../releases/$ZIP_NAME" "$MOD_FOLDER_NAME"
+            zip -q -r "$PROJECT_ROOT/releases/$ZIP_NAME" "$MOD_FOLDER_NAME"
         )
         
-        cp "releases/$ZIP_NAME" "releases/$LATEST_ZIP"
-        
-        # Final timestamp fix on the new ZIP files
+        cp "releases/$ZIP_NAME" "releases/${PREFIX}-latest.zip"
         python3 tools/fix_timestamps.py releases
-        echo "Release packaged successfully: releases/$ZIP_NAME"
+        echo "Release packaged: releases/$ZIP_NAME"
         rm -rf "$STAGING_DIR"
     fi
 fi
