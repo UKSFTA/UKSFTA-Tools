@@ -3,19 +3,16 @@ import shutil
 import sys
 
 def setup_project():
-    # project_root is where the script is called from (the modpack)
     project_root = os.getcwd()
-    # tools_dir is where the script resides (the submodule)
     tools_dir = os.path.dirname(os.path.abspath(__file__))
     
-    # Safety: If we are running from within the tools repo itself, do nothing
     if os.path.abspath(project_root) == os.path.abspath(tools_dir):
         print("Running from within Tools repository. Skipping setup.")
         return
 
     print(f"Setting up UKSFTA Tools in: {project_root}")
     
-    # 1. Create directory structure
+    # 1. Create directory structure (ensure these are REAL directories)
     dirs = [
         "tools",
         ".hemtt/scripts",
@@ -25,22 +22,21 @@ def setup_project():
         ".github/workflows"
     ]
     for d in dirs:
-        os.makedirs(os.path.join(project_root, d), exist_ok=True)
+        d_abs = os.path.join(project_root, d)
+        if os.path.islink(d_abs):
+            print(f" Removing directory symlink: {d}")
+            os.remove(d_abs)
+        os.makedirs(d_abs, exist_ok=True)
 
-    # 2. Copy Tools (Real files for CI compatibility)
+    # 2. Copy Tools
     python_tools_src = os.path.join(tools_dir, "tools")
     python_tools_dst = os.path.join(project_root, "tools")
-    
     if os.path.exists(python_tools_dst):
-        if os.path.islink(python_tools_dst):
-            os.remove(python_tools_dst)
-        else:
-            shutil.rmtree(python_tools_dst)
-    
+        shutil.rmtree(python_tools_dst) if not os.path.islink(python_tools_dst) else os.remove(python_tools_dst)
     shutil.copytree(python_tools_src, python_tools_dst)
     print(f" Copied: tools/ directory")
 
-    # 3. Symlink HEMTT Scripts/Hooks (Relative symlinks)
+    # 3. Symlink HEMTT Scripts/Hooks
     hemtt_src_dir = os.path.join(tools_dir, "hemtt")
     if os.path.exists(hemtt_src_dir):
         for category in os.listdir(hemtt_src_dir):
@@ -51,9 +47,12 @@ def setup_project():
                 src_item_abs = os.path.join(src_cat_abs, item)
                 dst_item_abs = os.path.join(project_root, ".hemtt", category, item)
                 
-                # Special handling for nested directories (hooks/pre_build etc)
                 if os.path.isdir(src_item_abs):
+                    # Destination MUST be a real directory
+                    if os.path.islink(dst_item_abs):
+                        os.remove(dst_item_abs)
                     os.makedirs(dst_item_abs, exist_ok=True)
+                    
                     for subitem in os.listdir(src_item_abs):
                         s_abs = os.path.join(src_item_abs, subitem)
                         d_abs = os.path.join(dst_item_abs, subitem)
