@@ -3,9 +3,16 @@ import shutil
 import sys
 
 def setup_project():
+    # project_root is where the script is called from (the modpack)
     project_root = os.getcwd()
+    # tools_dir is where the script resides (the submodule)
     tools_dir = os.path.dirname(os.path.abspath(__file__))
     
+    # Safety: If we are running from within the tools repo itself, do nothing
+    if os.path.abspath(project_root) == os.path.abspath(tools_dir):
+        print("Running from within Tools repository. Skipping setup.")
+        return
+
     print(f"Setting up UKSFTA Tools in: {project_root}")
     
     # 1. Create directory structure
@@ -20,8 +27,7 @@ def setup_project():
     for d in dirs:
         os.makedirs(os.path.join(project_root, d), exist_ok=True)
 
-    # 2. Copy Tools
-    # We copy the python tools so they are real files for CI and ease of use
+    # 2. Copy Tools (Real files for CI compatibility)
     python_tools_src = os.path.join(tools_dir, "tools")
     python_tools_dst = os.path.join(project_root, "tools")
     
@@ -34,40 +40,35 @@ def setup_project():
     shutil.copytree(python_tools_src, python_tools_dst)
     print(f" Copied: tools/ directory")
 
-    # 3. Symlink HEMTT Scripts/Hooks
+    # 3. Symlink HEMTT Scripts/Hooks (Relative symlinks)
     hemtt_src_dir = os.path.join(tools_dir, "hemtt")
     if os.path.exists(hemtt_src_dir):
         for category in os.listdir(hemtt_src_dir):
-            src_path_abs = os.path.join(hemtt_src_dir, category)
-            if not os.path.isdir(src_path_abs): continue
+            src_cat_abs = os.path.join(hemtt_src_dir, category)
+            if not os.path.isdir(src_cat_abs): continue
             
-            for item in os.listdir(src_path_abs):
-                src_abs = os.path.join(src_path_abs, item)
-                dst_abs = os.path.join(project_root, ".hemtt", category, item)
+            for item in os.listdir(src_cat_abs):
+                src_item_abs = os.path.join(src_cat_abs, item)
+                dst_item_abs = os.path.join(project_root, ".hemtt", category, item)
                 
-                # Special handling for nested hooks
-                if os.path.isdir(src_abs):
-                    os.makedirs(dst_abs, exist_ok=True)
-                    for subitem in os.listdir(src_abs):
-                        sub_src_abs = os.path.join(src_abs, subitem)
-                        sub_dst_abs = os.path.join(dst_abs, subitem)
-                        rel_src = os.path.relpath(sub_src_abs, os.path.dirname(sub_dst_abs))
-                        if os.path.exists(sub_dst_abs):
-                            if os.path.islink(sub_dst_abs) or os.path.isfile(sub_dst_abs):
-                                os.remove(sub_dst_abs)
-                            elif os.path.isdir(sub_dst_abs):
-                                shutil.rmtree(sub_dst_abs)
-                        os.symlink(rel_src, sub_dst_abs)
-                        print(f" Linked: .hemtt/{category}/{item}/{subitem} -> {rel_src}")
+                # Special handling for nested directories (hooks/pre_build etc)
+                if os.path.isdir(src_item_abs):
+                    os.makedirs(dst_item_abs, exist_ok=True)
+                    for subitem in os.listdir(src_item_abs):
+                        s_abs = os.path.join(src_item_abs, subitem)
+                        d_abs = os.path.join(dst_item_abs, subitem)
+                        rel_path = os.path.relpath(s_abs, os.path.dirname(d_abs))
+                        
+                        if os.path.exists(d_abs) or os.path.islink(d_abs):
+                            os.remove(d_abs) if not os.path.isdir(d_abs) or os.path.islink(d_abs) else shutil.rmtree(d_abs)
+                        os.symlink(rel_path, d_abs)
+                        print(f" Linked: .hemtt/{category}/{item}/{subitem}")
                 else:
-                    rel_src = os.path.relpath(src_abs, os.path.dirname(dst_abs))
-                    if os.path.exists(dst_abs):
-                        if os.path.islink(dst_abs) or os.path.isfile(dst_abs):
-                            os.remove(dst_abs)
-                        elif os.path.isdir(dst_abs):
-                            shutil.rmtree(dst_abs)
-                    os.symlink(rel_src, dst_abs)
-                    print(f" Linked: .hemtt/{category}/{item} -> {rel_src}")
+                    rel_path = os.path.relpath(src_item_abs, os.path.dirname(dst_item_abs))
+                    if os.path.exists(dst_item_abs) or os.path.islink(dst_item_abs):
+                        os.remove(dst_item_abs) if not os.path.isdir(dst_item_abs) or os.path.islink(dst_item_abs) else shutil.rmtree(dst_item_abs)
+                    os.symlink(rel_path, dst_item_abs)
+                    print(f" Linked: .hemtt/{category}/{item}")
 
     # 4. Copy GitHub Workflows
     workflow_src_dir = os.path.join(tools_dir, ".github", "workflows")
@@ -75,22 +76,18 @@ def setup_project():
         for item in os.listdir(workflow_src_dir):
             src = os.path.join(workflow_src_dir, item)
             dst = os.path.join(project_root, ".github", "workflows", item)
-            if os.path.exists(dst):
-                if os.path.islink(dst) or os.path.isfile(dst):
-                    os.remove(dst)
-                elif os.path.isdir(dst):
-                    shutil.rmtree(dst)
+            if os.path.exists(dst) or os.path.islink(dst):
+                os.remove(dst) if not os.path.isdir(dst) or os.path.islink(dst) else shutil.rmtree(dst)
             shutil.copy2(src, dst)
             print(f" Copied: .github/workflows/{item}")
 
-    # 5. Copy templates if missing
+    # 5. Templates & Gitignore
     for template in ["workshop_description.txt", ".env.example"]:
         dst = os.path.join(project_root, template)
         if not os.path.exists(dst):
             shutil.copy(os.path.join(tools_dir, template), dst)
             print(f" Copied: {template}")
 
-    # 6. Ensure .gitignore covers releases
     gitignore_path = os.path.join(project_root, ".gitignore")
     ignore_rule = "/releases/*.zip"
     if os.path.exists(gitignore_path):
@@ -99,14 +96,9 @@ def setup_project():
         if ignore_rule not in content:
             with open(gitignore_path, "a") as f:
                 f.write(f"\n# Added by UKSFTA Tools\n{ignore_rule}\n")
-            print(f" Updated: .gitignore (added {ignore_rule})")
-    else:
-        template_src = os.path.join(tools_dir, ".gitignore_template")
-        if os.path.exists(template_src):
-            shutil.copy(template_src, gitignore_path)
-            print(f" Created: .gitignore from template")
+            print(f" Updated: .gitignore")
 
-    print("\nSetup complete! Your project is now linked to UKSFTA-Tools.")
+    print("\nSetup complete! Project is now production-ready.")
 
 if __name__ == "__main__":
     setup_project()
