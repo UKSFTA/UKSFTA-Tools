@@ -28,8 +28,7 @@ if [ $STATUS -eq 0 ]; then
         echo "HEMTT: Manually packaging unit-standard ZIP..."
         mkdir -p releases
         
-        # Robust prefix extraction: find 'prefix =' line, take content between quotes, trim spaces
-        PREFIX=$(grep "prefix =" .hemtt/project.toml | sed -E 's/prefix = "(.*)"/\1/' | xargs)
+        PREFIX=$(grep "prefix =" .hemtt/project.toml | head -n 1 | cut -d'"' -f2 | tr -d '\n\r ')
         MAJOR=$(grep "#define MAJOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\n\r ')
         MINOR=$(grep "#define MINOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\n\r ')
         PATCH=$(grep "#define PATCHLVL" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\n\r ')
