@@ -15,8 +15,8 @@ import multiprocessing
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERSION_FILE = os.path.join(PROJECT_ROOT, "addons", "main", "script_version.hpp")
 HEMTT_OUT = os.path.join(PROJECT_ROOT, ".hemttout")
-RELEASE_DIR = os.path.join(HEMTT_OUT, "release")
-STAGING_DIR = os.path.join(HEMTT_OUT, "upload_staging")
+# Workshop expects the RAW contents (addons, keys etc) at the root
+STAGING_DIR = os.path.join(HEMTT_OUT, "release")
 PROJECT_TOML = os.path.join(PROJECT_ROOT, ".hemtt", "project.toml")
 LOCK_FILE = "mods.lock"
 
@@ -75,14 +75,15 @@ def bump_version(part="patch"):
 
 def get_workshop_config():
     config = {
-        "id": None,
-        "tags": ["Mod", "Map"]
+        "id": "0",
+        "tags": ["Mod", "Addon"]
     }
     if os.path.exists(PROJECT_TOML):
         with open(PROJECT_TOML, "r") as f:
             for line in f:
                 if "workshop_id" in line:
-                    config["id"] = line.split("=")[1].strip().strip('"')
+                    val = line.split("=")[1].strip().strip('"')
+                    if val: config["id"] = val
                 if "workshop_tags" in line:
                     tags_match = re.search(r"\[(.*?)\]", line)
                     if tags_match:
@@ -139,23 +140,12 @@ def generate_content_list():
                 content_list += "\n[list]\n"
                 for dep in deps:
                     dep_url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={dep['id']}"
-                    content_list += f"[*] [i]Dependency Included:[/i] [url={dep_url}]{dep['name']}[/url]\n"
+                    content_list += f[*] [i]Dependency Included:[/i] [url={dep_url}]{dep['name']}[/url]\n"
                 content_list += "[/list]\n"
             else:
                 content_list += "\n"
     
     return content_list if content_list else "[*] [i]Content list pending update.[/i]"
-
-def generate_changelog(last_tag):
-    try:
-        if last_tag == "HEAD":
-            cmd = ["git", "log", "--oneline", "--no-merges"]
-        else:
-            cmd = ["git", "log", f"{last_tag}..HEAD", "--oneline", "--no-merges"]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return result.stdout.strip()
-    except:
-        return "Maintenance update."
 
 def create_vdf(app_id, workshop_id, content_path, changelog, preview_image=None):
     description = ""
@@ -208,10 +198,10 @@ def main():
 
     load_env()
     if not shutil.which("hemtt"):
-        print("Error: 'hemtt' not found in PATH.")
+        print("Error: 'hemtt' not found.")
         sys.exit(1)
     if not shutil.which("steamcmd"):
-        print("Error: 'steamcmd' not found in PATH.")
+        print("Error: 'steamcmd' not found.")
         sys.exit(1)
 
     current_v_str, _ = get_current_version()
@@ -235,33 +225,16 @@ def main():
         subprocess.run(["git", "add", VERSION_FILE], check=True)
         subprocess.run(["git", "commit", "-S", "-m", f"chore: bump version to {new_version}"], check=True)
 
-    print(f"Running HEMTT Release Build with {args.threads} threads...")
-    subprocess.run(["hemtt", "release", "-t", str(args.threads)], check=True)
+    # USE THE ROBUST WRAPPER FOR BUILDING
+    print(f"Running Robust Release Build...")
+    subprocess.run(["bash", "build.sh", "release", "-t", str(args.threads)], check=True)
 
-    # Normalize timestamps in .hemttout after build
-    if os.path.exists(os.path.join(PROJECT_ROOT, "tools", "fix_timestamps.py")):
-        print("Normalizing build timestamps...")
-        subprocess.run([sys.executable, os.path.join(PROJECT_ROOT, "tools", "fix_timestamps.py"), HEMTT_OUT], check=False)
-
-    possible_zips = glob.glob(os.path.join(RELEASE_DIR, "*.zip")) + glob.glob(os.path.join(PROJECT_ROOT, "releases", "*.zip"))
+    # Locate the newly created ZIP for GitHub
+    possible_zips = glob.glob(os.path.join(PROJECT_ROOT, "releases", "*.zip"))
     if not possible_zips:
-        print("Error: No release zip found.")
+        print("Error: No release zip found in releases/ folder.")
         sys.exit(1)
     latest_zip = max(possible_zips, key=os.path.getctime)
-    
-    if os.path.exists(STAGING_DIR):
-        shutil.rmtree(STAGING_DIR)
-    os.makedirs(STAGING_DIR)
-    print(f"Extracting release to staging...")
-    subprocess.run(["unzip", "-q", latest_zip, "-d", STAGING_DIR], check=True)
-    
-    # Update timestamps to prevent weird "1881" dates on Steam
-    print("Normalizing file timestamps...")
-    for root, dirs, files in os.walk(STAGING_DIR):
-        for d in dirs:
-            os.utime(os.path.join(root, d), None)
-        for f in files:
-            os.utime(os.path.join(root, f), None)
     
     ws_config = get_workshop_config()
     workshop_id = ws_config["id"]
@@ -277,6 +250,7 @@ def main():
             last_tag = "HEAD"
         
     changelog = generate_changelog(last_tag)
+    # Upload from .hemttout/release which contains the normalized raw files
     vdf_path = create_vdf("107410", workshop_id, STAGING_DIR, changelog)
     
     print("\n--- Steam Workshop Upload ---")
@@ -292,8 +266,6 @@ def main():
     cmd.extend(["+workshop_build_item", vdf_path, "+quit"])
     
     print(f"Launching SteamCMD for user: {username}...")
-    if not password:
-        print("(You will be prompted for password/2FA if not cached)")
     
     try:
         subprocess.run(cmd, check=True)
