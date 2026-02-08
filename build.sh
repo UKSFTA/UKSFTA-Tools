@@ -6,6 +6,9 @@
 echo "UKSF Taskforce Alpha - HEMTT Wrapper"
 echo "=========================================="
 
+# Export current time for tools that support reproducible builds
+export SOURCE_DATE_EPOCH=$(date +%s)
+
 # Default to 'build' if no command provided
 HEMTT_CMD=${1:-build}
 shift # Remove the command from the arguments list
@@ -29,11 +32,17 @@ if [ $BUILD_STATUS -eq 0 ]; then
 
     if [ -f "tools/fix_timestamps.py" ]; then
         echo "Normalizing output timestamps..."
+        # Fix the uncompressed build output
         python3 tools/fix_timestamps.py .hemttout
-        # Also fix timestamps in releases/ if it exists (for the ZIPs)
+        
+        # Fix the releases folder (ZIP files)
         if [ -d "releases" ]; then
             python3 tools/fix_timestamps.py releases
         fi
+        
+        # Also fix the root project files just in case
+        python3 tools/fix_timestamps.py mod.cpp
+        python3 tools/fix_timestamps.py meta.cpp
     fi
     echo "Task complete and timestamps normalized."
 else

@@ -204,10 +204,12 @@ def sync_mods(resolved_info):
                 if file_lower.endswith((".pbo", ".bisign")):
                     dest_path = os.path.join(ADDONS_DIR, file)
                     shutil.copy2(src_path, dest_path)
+                    os.utime(dest_path, None) # Normalize timestamp
                     current_mods[mid]["files"].append(os.path.relpath(dest_path))
                 elif file_lower.endswith(".bikey"):
                     dest_path = os.path.join(KEYS_DIR, file)
                     shutil.copy2(src_path, dest_path)
+                    os.utime(dest_path, None) # Normalize timestamp
                     current_mods[mid]["files"].append(os.path.relpath(dest_path))
 
     # Cleanup: Remove mods that are no longer in resolved_info
