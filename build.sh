@@ -1,29 +1,32 @@
 #!/bin/bash
 
-# UKSFTA Automated Build Script
-# This script runs HEMTT build and then normalizes file timestamps.
+# UKSFTA Universal HEMTT Wrapper
+# Ensures all builds have corrected timestamps.
 
-echo "UKSF Taskforce Alpha - Automated Build"
-echo "========================================"
+echo "UKSF Taskforce Alpha - HEMTT Wrapper"
+echo "=========================================="
 
-# 1. Run HEMTT build
+# Default to 'build' if no command provided
+HEMTT_CMD=${1:-build}
+shift # Remove the command from the arguments list
+
 if command -v hemtt &> /dev/null; then
-    echo "Running HEMTT build..."
-    hemtt build
+    echo "Running: hemtt $HEMTT_CMD $@"
+    hemtt "$HEMTT_CMD" "$@"
     BUILD_STATUS=$?
 else
     echo "Error: HEMTT not found. Please run .uksf_tools/bootstrap.sh first."
     exit 1
 fi
 
-# 2. Fix timestamps if build succeeded
+# Fix timestamps if successful
 if [ $BUILD_STATUS -eq 0 ]; then
     if [ -f "tools/fix_timestamps.py" ]; then
         echo "Normalizing output timestamps..."
         python3 tools/fix_timestamps.py .hemttout
     fi
-    echo "Build complete and timestamps fixed."
+    echo "Task complete and timestamps normalized."
 else
-    echo "Build failed. Skipping timestamp fix."
+    echo "Task failed. Skipping timestamp fix."
     exit $BUILD_STATUS
 fi
