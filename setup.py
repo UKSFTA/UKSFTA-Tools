@@ -52,7 +52,7 @@ def setup_project():
             print(f" Linked: .hemtt/{category}/{item} -> {rel_src}")
 
     # 4. Copy GitHub Workflows
-    workflow_src_dir = os.path.join(tools_dir, "github", "workflows")
+    workflow_src_dir = os.path.join(tools_dir, ".github", "workflows")
     if os.path.exists(workflow_src_dir):
         for item in os.listdir(workflow_src_dir):
             src = os.path.join(workflow_src_dir, item)
