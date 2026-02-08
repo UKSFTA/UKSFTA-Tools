@@ -1,0 +1,33 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Only run if this is a mod project (has HEMTT config)
+    if: hashFiles('.hemtt/project.toml') != ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup HEMTT
+        uses: arma-actions/hemtt@v1
+        with:
+          annotate: false
+
+      - name: Run HEMTT build
+        run: hemtt build
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-${{ github.sha }}
+          path: .hemttout/build/
+          include-hidden-files: true
