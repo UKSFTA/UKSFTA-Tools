@@ -20,11 +20,22 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v3
       with:
         languages: python
+        # Using a specialized config to force Python analysis on our tools folder
+        # and ignore the massive Arma .pbo/.cpp files which aren't C++
+        config: |
+          paths:
+            - tools
+            - .uksf_tools
+          paths-ignore:
+            - addons
+            - keys
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
