@@ -17,6 +17,11 @@ jobs:
       contents: read
       security-events: write
 
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'python' ]
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -26,15 +31,11 @@ jobs:
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v3
       with:
-        languages: python
-        # Explicitly tell CodeQL where to look and what to ignore
-        config: |
-          paths:
-            - tools
-            - .uksf_tools
-          paths-ignore:
-            - '**/addons'
-            - '**/keys'
+        languages: ${{ matrix.language }}
+        # Removing the 'config' block which might be causing empty SARIF issues
+        # CodeQL will automatically find Python files in the repo and submodules
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:${{matrix.language}}"
