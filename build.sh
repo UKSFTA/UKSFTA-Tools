@@ -1,46 +1,49 @@
 #!/bin/bash
 
 # UKSFTA HEMTT Wrapper
-# This script ensures all build artifacts have corrected timestamps and reliable packaging.
+# This script handles building, timestamp fixing, and custom archiving.
 
 export SOURCE_DATE_EPOCH=$(date +%s)
 
 # 1. Run HEMTT command
 echo "HEMTT: Executing '$@'..."
-hemtt "$@"
+# We run release with --no-archive since HEMTT's internal zipping is failing
+if [[ " $* " == *"release"* ]]; then
+    hemtt release --no-archive "$@"
+else
+    hemtt "$@"
+fi
 STATUS=$?
 
 if [ $STATUS -eq 0 ]; then
-    # Give HEMTT a moment to close file handles
-    sleep 2
-
     # 2. Fix timestamps in .hemttout
     if [ -f "tools/fix_timestamps.py" ]; then
         python3 tools/fix_timestamps.py .hemttout
     fi
 
-    # 3. If it was a release, handle final packaging and timestamps
+    # 3. Handle Archiving manually if it was a release
     if [[ " $* " == *"release"* ]]; then
-        echo "HEMTT: Finalizing release archives..."
+        echo "HEMTT: Creating unit-standard ZIP archive..."
+        mkdir -p releases
         
-        # Normalize existing zip timestamps
-        if [ -d "releases" ]; then
-            python3 tools/fix_timestamps.py releases
-            
-            # Manual Renaming (Standardizing unit names)
-            PROJECT_PREFIX=$(grep "prefix =" .hemtt/project.toml | cut -d'"' -f2)
-            PROJECT_VERSION=$(grep "#define PATCHLVL" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\r')
-            MAJOR=$(grep "#define MAJOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\r')
-            MINOR=$(grep "#define MINOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\r')
-            
-            # Find the long-named zip and rename it if needed
-            # (Matches HEMTT default: PREFIX-MAJOR.MINOR.PATCH.BUILD.zip)
-            find releases -name "${PROJECT_PREFIX}*.zip" -not -name "*-latest.zip" | while read -r zip; do
-                NEW_NAME="uksf task force alpha - ${PROJECT_PREFIX,,}_${MAJOR}.${MINOR}.${PROJECT_VERSION}.zip"
-                mv "$zip" "releases/$NEW_NAME" 2>/dev/null
-                echo "Renamed $zip to $NEW_NAME"
-            done
-        fi
+        PROJECT_PREFIX=$(grep "prefix =" .hemtt/project.toml | cut -d'"' -f2)
+        MAJOR=$(grep "#define MAJOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\r')
+        MINOR=$(grep "#define MINOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\r')
+        PATCH=$(grep "#define PATCHLVL" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\r')
+        
+        ZIP_NAME="uksf task force alpha - ${PROJECT_PREFIX,,}_${MAJOR}.${MINOR}.${PATCH}.zip"
+        LATEST_ZIP="${PROJECT_PREFIX}-latest.zip"
+        
+        # Package the contents of .hemttout/release/
+        cd .hemttout/release/
+        zip -r "../../releases/$ZIP_NAME" ./*
+        cd ../..
+        
+        cp "releases/$ZIP_NAME" "releases/$LATEST_ZIP"
+        
+        # Final timestamp fix on the new ZIPs
+        python3 tools/fix_timestamps.py releases
+        echo "Release packaged: releases/$ZIP_NAME"
     fi
 fi
 
