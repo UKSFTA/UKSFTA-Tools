@@ -48,7 +48,7 @@ if [ $STATUS -eq 0 ]; then
         # Normalize timestamps in staging to be extra sure
         python3 tools/fix_timestamps.py "$STAGING_DIR"
         
-        # Package the @Folder itself into the root of the ZIP
+        # Package from the staging dir so the @Folder is the root of the ZIP
         (
             cd "$STAGING_DIR"
             zip -q -r "../../releases/$ZIP_NAME" "$MOD_FOLDER_NAME"
