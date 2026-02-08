@@ -10,11 +10,11 @@ echo "=========================================="
 export CURRENT_UNIX_TIME=$(date +%s)
 export SOURCE_DATE_EPOCH=$CURRENT_UNIX_TIME
 
-# Check if 'release' is anywhere in the arguments
-IS_RELEASE=false
+# Identify if we are doing a packaging operation
+IS_PACKAGING=false
 for arg in "$@"; do
-    if [[ "$arg" == "release" ]]; then
-        IS_RELEASE=true
+    if [[ "$arg" == "release" || "$arg" == "archive" ]]; then
+        IS_PACKAGING=true
         break
     fi
 done
@@ -31,9 +31,19 @@ fi
 # Fix timestamps and archive if successful
 if [ $BUILD_STATUS -eq 0 ]; then
     # Hemtt 'release' prepares the files, 'archive' creates the zip.
-    if [ "$IS_RELEASE" = true ]; then
-        echo "Release build successful. Packaging ZIP..."
-        hemtt archive
+    if [ "$IS_PACKAGING" = true ]; then
+        echo "Packaging artifacts..."
+        # If we didn't run archive directly, we should trigger it
+        # Actually, let's just make sure the timestamps are fixed FIRST
+        # then let the user run archive if they need specific control
+        # BUT for the wrapper, we want it to be automatic.
+        
+        # If the user ran 'release', we should probably run 'archive' too
+        # to ensure the ZIPs are created.
+        if [[ "$*" == *"release"* ]]; then
+             echo "Triggering HEMTT archive..."
+             hemtt archive
+        fi
     fi
 
     if [ -f "tools/fix_timestamps.py" ]; then
