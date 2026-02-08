@@ -70,6 +70,22 @@ def setup_project():
             shutil.copy(os.path.join(tools_dir, template), dst)
             print(f" Copied: {template}")
 
+    # 6. Ensure .gitignore covers releases
+    gitignore_path = os.path.join(project_root, ".gitignore")
+    ignore_rule = "/releases/*.zip"
+    if os.path.exists(gitignore_path):
+        with open(gitignore_path, "r") as f:
+            content = f.read()
+        if ignore_rule not in content:
+            with open(gitignore_path, "a") as f:
+                f.write(f"\n# Added by UKSFTA Tools\n{ignore_rule}\n")
+            print(f" Updated: .gitignore (added {ignore_rule})")
+    else:
+        template_src = os.path.join(tools_dir, ".gitignore_template")
+        if os.path.exists(template_src):
+            shutil.copy(template_src, gitignore_path)
+            print(f" Created: .gitignore from template")
+
     print("\nSetup complete! Your project is now linked to UKSFTA-Tools.")
 
 if __name__ == "__main__":

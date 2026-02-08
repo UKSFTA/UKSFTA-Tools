@@ -1,0 +1,21 @@
+# Arma 3 Files
+*.pbo
+*.bisign
+*.vdf
+*.biprivatekey
+*.hemttprivatekey
+
+# Project Configuration
+.env
+.env.example
+mods.lock
+__pycache__/
+
+# HEMTT
+.hemttout
+hemtt
+hemtt.exe
+
+# Build Artifacts
+/releases/*.zip
+/keys/
