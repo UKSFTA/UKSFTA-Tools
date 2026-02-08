@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # UKSFTA HEMTT Wrapper
-# This script ensures all build artifacts have corrected timestamps.
+# This script ensures all build artifacts have corrected timestamps and reliable packaging.
 
 export SOURCE_DATE_EPOCH=$(date +%s)
 
@@ -11,26 +11,35 @@ hemtt "$@"
 STATUS=$?
 
 if [ $STATUS -eq 0 ]; then
-    # 2. Wait for ZIP files to be populated (async archiving fix)
-    if [[ " $* " == *"release"* ]]; then
-        echo "HEMTT: Waiting for release archives to finalize..."
-        # Check for up to 10 seconds for non-empty zips
-        for i in {1..10}; do
-            ZIP_SIZE=$(stat -c%s releases/*.zip 2>/dev/null | awk '{s+=$1} END {print s}')
-            if [[ -n "$ZIP_SIZE" && "$ZIP_SIZE" -gt 1000 ]]; then
-                echo "HEMTT: Archives finalized ($ZIP_SIZE bytes)."
-                break
-            fi
-            sleep 1
-        done
-    fi
+    # Give HEMTT a moment to close file handles
+    sleep 2
 
-    # 3. Fix timestamps in .hemttout
+    # 2. Fix timestamps in .hemttout
     if [ -f "tools/fix_timestamps.py" ]; then
         python3 tools/fix_timestamps.py .hemttout
-        # 4. Fix timestamps in releases folder
+    fi
+
+    # 3. If it was a release, handle final packaging and timestamps
+    if [[ " $* " == *"release"* ]]; then
+        echo "HEMTT: Finalizing release archives..."
+        
+        # Normalize existing zip timestamps
         if [ -d "releases" ]; then
             python3 tools/fix_timestamps.py releases
+            
+            # Manual Renaming (Standardizing unit names)
+            PROJECT_PREFIX=$(grep "prefix =" .hemtt/project.toml | cut -d'"' -f2)
+            PROJECT_VERSION=$(grep "#define PATCHLVL" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\r')
+            MAJOR=$(grep "#define MAJOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\r')
+            MINOR=$(grep "#define MINOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\r')
+            
+            # Find the long-named zip and rename it if needed
+            # (Matches HEMTT default: PREFIX-MAJOR.MINOR.PATCH.BUILD.zip)
+            find releases -name "${PROJECT_PREFIX}*.zip" -not -name "*-latest.zip" | while read -r zip; do
+                NEW_NAME="uksf task force alpha - ${PROJECT_PREFIX,,}_${MAJOR}.${MINOR}.${PROJECT_VERSION}.zip"
+                mv "$zip" "releases/$NEW_NAME" 2>/dev/null
+                echo "Renamed $zip to $NEW_NAME"
+            done
         fi
     fi
 fi
