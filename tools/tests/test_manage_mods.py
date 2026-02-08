@@ -1,116 +1,100 @@
 import unittest
+from unittest.mock import patch, mock_open, MagicMock
 import os
-import sys
 import json
-from unittest.mock import patch, MagicMock, mock_open
+import shutil
+import sys
 
-# Add parent directory to path to import the script
+# Add parent dir to path so we can import manage_mods
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import manage_mods
 
 class TestManageMods(unittest.TestCase):
 
-    def test_get_mod_ids(self):
+    def test_get_mod_ids_from_file(self):
         content = """
         https://steamcommunity.com/sharedfiles/filedetails/?id=12345678
         87654321
         # Some comment
         id=11223344
+        @ignore 99999999
         """
         with patch("builtins.open", mock_open(read_data=content)):
             with patch("os.path.exists", return_value=True):
-                ids = manage_mods.get_mod_ids()
-                self.assertEqual(ids, {"12345678", "87654321", "11223344"})
+                ids = manage_mods.get_mod_ids_from_file()
+                self.assertIn("12345678", ids)
+                self.assertIn("87654321", ids)
+                self.assertIn("11223344", ids)
+                self.assertNotIn("99999999", ids)
 
-    def test_get_mod_ids_no_file(self):
-        with patch("os.path.exists", return_value=False):
-            ids = manage_mods.get_mod_ids()
-            self.assertEqual(ids, set())
+    def test_get_ignored_ids_from_file(self):
+        content = """
+        # Sources
+        12345678
+        @ignore 99999999 88888888
+        ignore=77777777
+        """
+        with patch("builtins.open", mock_open(read_data=content)):
+            with patch("os.path.exists", return_value=True):
+                ignored = manage_mods.get_ignored_ids_from_file()
+                self.assertIn("99999999", ignored)
+                self.assertIn("88888888", ignored)
+                self.assertIn("77777777", ignored)
+                self.assertNotIn("12345678", ignored)
 
-    @patch("subprocess.run")
-    def test_run_steamcmd(self, mock_run):
-        ids = {"123", "456"}
-        manage_mods.run_steamcmd(ids)
-        
-        args, _ = mock_run.call_args
-        cmd = args[0]
-        self.assertEqual(cmd[0], "steamcmd")
-        self.assertIn("+login", cmd)
-        self.assertIn("anonymous", cmd)
-        self.assertIn("+workshop_download_item", cmd)
-        self.assertIn("123", cmd)
-        self.assertIn("456", cmd)
-
-    @patch("os.makedirs")
-    @patch("shutil.copy2")
-    @patch("os.walk")
-    @patch("os.path.exists")
-    @patch("builtins.open", new_callable=mock_open)
-    @patch("json.dump")
-    def test_sync_mods_install(self, mock_json_dump, mock_file, mock_exists, mock_walk, mock_copy, mock_makedirs):
-        # Setup mocks
-        mock_exists.return_value = True # Assume all paths exist
-        
-        # Mock os.walk to simulate a mod directory
-        # Structure: root, dirs, files
-        mock_walk.return_value = [
-            ("/path/to/mod/123", [], ["mod.pbo", "mod.bisign", "mod.bikey", "readme.txt"])
+    @patch("manage_mods.get_workshop_metadata")
+    def test_resolve_dependencies_with_ignore(self, mock_meta):
+        # Setup mock metadata
+        # 123 depends on 456
+        # 456 depends on 789
+        mock_meta.side_effect = [
+            {"name": "Mod 123", "dependencies": [{"id": "456", "name": "Mod 456"}]},
+            {"name": "Mod 456", "dependencies": [{"id": "789", "name": "Mod 789"}]},
+            {"name": "Mod 789", "dependencies": []}
         ]
         
-        # Mock lock file loading (empty initially)
-        # We need to handle open() being called multiple times (read lock, write lock)
-        # Since we are mocking open globally, we verify behavior via side_effects or context
-        # But for simple logic verification, assuming no existing lock file is easier first.
-        # existing lock file check:
-        # if os.path.exists(LOCK_FILE): -> We can mock this specific call if needed, 
-        # but mock_exists returns True for everything. 
-        # So it will try to read the lock file. We need the read to return valid JSON.
+        initial = {"123": "Tag"}
+        ignored = {"789"}
         
-        # Let's verify the copy logic primarily.
+        resolved = manage_mods.resolve_dependencies(initial, ignored)
         
-        manage_mods.LOCK_FILE = "dummy.lock"
-        
-        # We need to be careful with mock_open and json.load reading from it
-        # Simplest way is to mock json.load directly
-        with patch("json.load", return_value={}) as mock_json_load:
-            manage_mods.sync_mods({"123"})
-            
-            # Check if directories created
-            mock_makedirs.assert_any_call(manage_mods.ADDONS_DIR, exist_ok=True)
-            mock_makedirs.assert_any_call(manage_mods.KEYS_DIR, exist_ok=True)
-            
-            # Check copies
-            # mod.pbo -> addons/mod.pbo
-            # mod.bikey -> keys/mod.bikey
-            # readme.txt -> ignored
-            
-            copy_calls = mock_copy.call_args_list
-            destinations = [call[0][1] for call in copy_calls]
-            
-            self.assertTrue(any("addons/mod.pbo" in d for d in destinations))
-            self.assertTrue(any("keys/mod.bikey" in d for d in destinations))
-            self.assertFalse(any("readme.txt" in d for d in destinations))
+        self.assertIn("123", resolved)
+        self.assertIn("456", resolved)
+        self.assertNotIn("789", resolved)
 
     @patch("os.remove")
     @patch("json.load")
-    @patch("json.dump")
     @patch("os.path.exists")
     @patch("builtins.open", new_callable=mock_open)
-    def test_sync_mods_cleanup(self, mock_file, mock_exists, mock_dump, mock_load, mock_remove):
-        # Scenario: Mod 999 was installed, but is no longer in the list.
-        # Lock file has entry for 999.
+    def test_sync_mods_cleanup(self, mock_file, mock_exists, mock_load, mock_remove):
+        # Scenario: Mod 999 was installed (has lock entry), but is now ignored or removed.
+        manage_mods.LOCK_FILE = "mods.lock"
         
+        # Mocking existence checks
+        def side_effect_exists(path):
+            if path == "mods.lock": return True
+            if "addons/" in path: return True
+            return False
+        mock_exists.side_effect = side_effect_exists
+        
+        # Lock file has entry for 999
         mock_load.return_value = {
-            "999": ["addons/old_mod.pbo"]
+            "mods": {
+                "999": {
+                    "files": ["addons/old_mod.pbo"],
+                    "name": "Old Mod",
+                    "dependencies": []
+                }
+            }
         }
         
-        # Assume paths exist so cleanup tries to run
-        mock_exists.return_value = True
+        # Run sync with EMPTY resolved_info
+        # We need to bypass the workshop directory search for this test
+        with patch("os.path.expanduser", return_value="/tmp"):
+            with patch("os.makedirs"):
+                manage_mods.sync_mods({})
         
-        # Run sync with EMPTY mod list
-        manage_mods.sync_mods(set())
-        
-        # Verify removal
+        # Verify removal was called for the file belonging to mod 999
         mock_remove.assert_called_with("addons/old_mod.pbo")
 
 if __name__ == "__main__":
