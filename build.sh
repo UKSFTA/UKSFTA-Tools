@@ -19,18 +19,18 @@ else
     exit 1
 fi
 
-# Fix timestamps if successful
+# Fix timestamps and archive if successful
 if [ $BUILD_STATUS -eq 0 ]; then
-    # If we are doing a release, we should also trigger archiving
-    if [[ "$HEMTT_CMD" == "release" || "$HEMTT_CMD" == "archive" ]]; then
-        echo "Release build detected. Triggering HEMTT archive..."
+    # Hemtt 'release' prepares the files, 'archive' creates the zip.
+    if [[ "$HEMTT_CMD" == "release" ]]; then
+        echo "Release build successful. Packaging ZIP..."
         hemtt archive
     fi
 
     if [ -f "tools/fix_timestamps.py" ]; then
         echo "Normalizing output timestamps..."
         python3 tools/fix_timestamps.py .hemttout
-        # Also fix timestamps in releases/ if it exists
+        # Also fix timestamps in releases/ if it exists (for the ZIPs)
         if [ -d "releases" ]; then
             python3 tools/fix_timestamps.py releases
         fi
