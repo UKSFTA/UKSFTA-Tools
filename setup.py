@@ -49,7 +49,7 @@ def setup_project():
             os.symlink(src, dst)
             print(f" Linked: .hemtt/{category}/{item}")
 
-    # 4. Symlink GitHub Workflows
+    # 4. Copy GitHub Workflows
     workflow_src_dir = os.path.join(tools_dir, "github", "workflows")
     if os.path.exists(workflow_src_dir):
         for item in os.listdir(workflow_src_dir):
@@ -60,8 +60,8 @@ def setup_project():
                     os.remove(dst)
                 elif os.path.isdir(dst):
                     shutil.rmtree(dst)
-            os.symlink(src, dst)
-            print(f" Linked: .github/workflows/{item}")
+            shutil.copy2(src, dst)
+            print(f" Copied: .github/workflows/{item}")
 
     # 5. Copy templates if missing
     for template in ["workshop_description.txt", ".env.example"]:
