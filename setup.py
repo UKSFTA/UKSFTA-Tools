@@ -15,6 +15,7 @@ def setup_project():
     # 1. Create directory structure (ensure these are REAL directories)
     dirs = [
         "tools",
+        "releases",
         ".hemtt/scripts",
         ".hemtt/hooks/pre_build",
         ".hemtt/hooks/post_build",
