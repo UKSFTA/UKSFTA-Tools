@@ -238,6 +238,11 @@ def main():
     print(f"Running HEMTT Release Build with {args.threads} threads...")
     subprocess.run(["hemtt", "release", "-t", str(args.threads)], check=True)
 
+    # Normalize timestamps in .hemttout after build
+    if os.path.exists(os.path.join(PROJECT_ROOT, "tools", "fix_timestamps.py")):
+        print("Normalizing build timestamps...")
+        subprocess.run([sys.executable, os.path.join(PROJECT_ROOT, "tools", "fix_timestamps.py"), HEMTT_OUT], check=False)
+
     possible_zips = glob.glob(os.path.join(RELEASE_DIR, "*.zip")) + glob.glob(os.path.join(PROJECT_ROOT, "releases", "*.zip"))
     if not possible_zips:
         print("Error: No release zip found.")
