@@ -25,7 +25,11 @@ def get_mod_ids_from_file():
             if not clean_line or clean_line.startswith("#"):
                 continue
             
-            # Skip lines that are clearly for ignoring
+            # Stop processing if we hit the ignore block
+            if "[ignore]" in clean_line.lower() or "[ignored]" in clean_line.lower():
+                break
+
+            # Skip lines that are inline ignores
             if "ignore=" in clean_line.lower() or "@ignore" in clean_line.lower():
                 continue
 
@@ -43,16 +47,29 @@ def get_ignored_ids_from_file():
     if not os.path.exists(MOD_SOURCES_FILE):
         return ignored
     
+    ignore_block = False
     with open(MOD_SOURCES_FILE, "r") as f:
         for line in f:
             clean_line = line.strip().lower()
             if not clean_line or clean_line.startswith("#"):
                 continue
             
-            if "ignore=" in clean_line or "@ignore" in clean_line:
+            # Check for block marker
+            if "[ignore]" in clean_line or "[ignored]" in clean_line:
+                ignore_block = True
+                continue
+
+            if ignore_block:
+                # In block, extract any ID found on the line
                 matches = re.findall(r"(\d{8,})", clean_line)
                 for mid in matches:
                     ignored.add(mid)
+            else:
+                # Outside block, still support inline ignore for backward compatibility
+                if "ignore=" in clean_line or "@ignore" in clean_line:
+                    matches = re.findall(r"(\d{8,})", clean_line)
+                    for mid in matches:
+                        ignored.add(mid)
     return ignored
 
 def get_workshop_metadata(mod_id):
