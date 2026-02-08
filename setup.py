@@ -24,7 +24,10 @@ def setup_project():
         src = os.path.join(tools_dir, "tools", tool)
         dst = os.path.join(project_root, "tools", tool)
         if os.path.exists(dst):
-            os.remove(dst)
+            if os.path.islink(dst) or os.path.isfile(dst):
+                os.remove(dst)
+            elif os.path.isdir(dst):
+                shutil.rmtree(dst)
         os.symlink(src, dst)
         print(f" Linked: tools/{tool}")
 
@@ -37,7 +40,10 @@ def setup_project():
             src = os.path.join(src_path, item)
             dst = os.path.join(project_root, ".hemtt", category, item)
             if os.path.exists(dst):
-                os.remove(dst)
+                if os.path.islink(dst) or os.path.isfile(dst):
+                    os.remove(dst)
+                elif os.path.isdir(dst):
+                    shutil.rmtree(dst)
             os.symlink(src, dst)
             print(f" Linked: .hemtt/{category}/{item}")
 
@@ -48,8 +54,7 @@ def setup_project():
             shutil.copy(os.path.join(tools_dir, template), dst)
             print(f" Copied: {template}")
 
-    print("
-Setup complete! Your project is now linked to UKSFTA-Tools.")
+    print("\nSetup complete! Your project is now linked to UKSFTA-Tools.")
 
 if __name__ == "__main__":
     setup_project()
