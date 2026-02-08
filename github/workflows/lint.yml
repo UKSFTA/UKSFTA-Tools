@@ -31,3 +31,6 @@ jobs:
 
       - name: Validate Return Types
         run: python3 tools/return_checker.py
+
+      - name: Validate Unused Variables
+        run: python3 tools/search_unused_privates.py
