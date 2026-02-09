@@ -1,0 +1,20 @@
+name: Project Automation
+
+on:
+  issues:
+    types: [opened]
+  pull_request:
+    types: [opened]
+
+jobs:
+  add-to-project:
+    name: Add to Project Board
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add to UKSFTA Roadmap
+        uses: actions/add-to-project@v1.0.2
+        with:
+          # URL of the organization project board
+          project-url: https://github.com/orgs/UKSFTA/projects/1
+          # Requires a token with 'project' scope
+          github-token: ${{ secrets.UKSFTA_PROJECT_TOKEN }}
