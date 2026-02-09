@@ -256,15 +256,16 @@ if __name__ == "__main__":
     initial_mods = get_mod_ids_from_file()
     ignored_ids = get_ignored_ids_from_file()
     
-    if not initial_mods:
-        print("No mod IDs found in mod_sources.txt")
-        sys.exit(0)
-    
     try:
-        resolved_info = resolve_dependencies(initial_mods, ignored_ids)
-        run_steamcmd(set(resolved_info.keys()))
+        resolved_info = {}
+        if initial_mods:
+            resolved_info = resolve_dependencies(initial_mods, ignored_ids)
+            run_steamcmd(set(resolved_info.keys()))
+        else:
+            print("No external mods defined. Running workspace maintenance...")
+            
         sync_mods(resolved_info)
-        print("\nSuccess: All mods and dependencies synced.")
+        print("\nSuccess: Workspace synced and cleaned.")
     except Exception as e:
         print(f"\nError: {e}")
         import traceback
