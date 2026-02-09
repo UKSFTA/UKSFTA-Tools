@@ -16,8 +16,8 @@ pip install rich pytest
 
 ## 3. Mikero Tools (DePbo Suite)
 We use version **0.10.13+**. 
-1. **Shared Library:** `libdepbo.so.0` must be in `/home/matt/lib/`.
-2. **Binaries:** `makepbo`, `extractpbo`, and `rapify` must be in `/home/matt/bin/`.
+1. **Shared Library:** `libdepbo.so.0` must be in `$HOME/lib/`.
+2. **Binaries:** `makepbo`, `extractpbo`, and `rapify` must be in `$HOME/bin/`.
 3. **Library Path:** Ensure your `~/.bashrc` includes:
    ```bash
    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$HOME/lib
