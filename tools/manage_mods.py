@@ -147,6 +147,65 @@ def run_steamcmd(mod_ids):
     print(f"\n--- Updating {len(mod_ids)} mods via SteamCMD ---")
     subprocess.run(cmd, check=True)
 
+def get_workshop_cache_path():
+    home = os.path.expanduser("~")
+    possible_paths = [
+        os.path.join(home, ".steam/steam/steamapps/workshop/content", STEAMAPP_ID),
+        os.path.join(home, "Steam/steamapps/workshop/content", STEAMAPP_ID),
+        os.path.join(home, ".local/share/Steam/steamapps/workshop/content", STEAMAPP_ID),
+        os.path.join("/ext/SteamLibrary/steamapps/workshop/content", STEAMAPP_ID),
+        os.path.join(os.getcwd(), "steamapps/workshop/content", STEAMAPP_ID)
+    ]
+    for p in possible_paths:
+        if os.path.exists(p):
+            return p
+    return None
+
+def identify_existing_pbos():
+    cache_path = get_workshop_cache_path()
+    if not cache_path:
+        print("Error: Could not find Steam Workshop cache to identify PBOs.")
+        return
+
+    print("--- Identifying PBO Origins ---")
+    # Build a map of all PBOs in the Workshop cache
+    pbo_map = {}
+    for mod_id in os.listdir(cache_path):
+        mod_dir = os.path.join(cache_path, mod_id)
+        if not os.path.isdir(mod_dir): continue
+        for root, _, files in os.walk(mod_dir):
+            for f in files:
+                if f.lower().endswith(".pbo"):
+                    if f not in pbo_map: pbo_map[f] = []
+                    pbo_map[f].append(mod_id)
+
+    # Scan our local addons
+    if not os.path.exists(ADDONS_DIR):
+        print("Addons directory does not exist.")
+        return
+
+    found_matches = {}
+    unidentified = []
+    
+    for f in os.listdir(ADDONS_DIR):
+        if f.lower().endswith(".pbo"):
+            if f in pbo_map:
+                match_id = pbo_map[f][0]
+                if match_id not in found_matches: found_matches[match_id] = []
+                found_matches[match_id].append(f)
+            else:
+                unidentified.append(f)
+
+    for mid, files in found_matches.items():
+        print(f"Mod ID {mid} contains:")
+        for file in files:
+            print(f"  - {file}")
+    
+    if unidentified:
+        print("\nUnidentified PBOs (Internal or Non-Workshop):")
+        for f in unidentified:
+            print(f"  - {f}")
+
 def sync_mods(resolved_info):
     if os.path.exists(LOCK_FILE):
         with open(LOCK_FILE, "r") as f:
@@ -253,6 +312,10 @@ def sync_hemtt_launch(mod_ids):
         f.writelines(new_lines)
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "identify":
+        identify_existing_pbos()
+        sys.exit(0)
+
     initial_mods = get_mod_ids_from_file()
     ignored_ids = get_ignored_ids_from_file()
     
