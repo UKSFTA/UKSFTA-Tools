@@ -42,8 +42,10 @@ if [ $STATUS -eq 0 ]; then
         MAJOR=$(grep "#define MAJOR" "$VERSION_FILE" | awk '{print $3}' | tr -d '\n\r ')
         MINOR=$(grep "#define MINOR" "$VERSION_FILE" | awk '{print $3}' | tr -d '\n\r ')
         
-        MOD_FOLDER_NAME="@${PREFIX}"
-        ZIP_NAME="uksf task force alpha - ${PREFIX,,}_${MAJOR}.${MINOR}.${VERSION}.zip"
+        # Get Project ID (Folder Name) for unique ZIP/Folder naming
+        PROJECT_ID=$(basename "$PROJECT_ROOT")
+        MOD_FOLDER_NAME="@${PROJECT_ID}"
+        ZIP_NAME="uksf task force alpha - ${PROJECT_ID,,}_${MAJOR}.${MINOR}.${VERSION}.zip"
         
         STAGING_DIR=".hemttout/zip_staging"
         rm -rf "$STAGING_DIR"
