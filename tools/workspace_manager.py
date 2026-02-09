@@ -197,7 +197,19 @@ def cmd_build(args):
 
 def cmd_release(args):
     console = Console(force_terminal=True); print_banner(console)
-    for p in get_projects(): console.print(f"🚀 [bold green]Packaging:[/bold green] {p.name}"); subprocess.run(["bash", "build.sh", "release"], cwd=p)
+    import shutil
+    central_dir = Path(__file__).parent.parent / "all_releases"
+    central_dir.mkdir(exist_ok=True)
+    for p in get_projects(): 
+        console.print(f"🚀 [bold green]Packaging:[/bold green] {p.name}")
+        subprocess.run(["bash", "build.sh", "release"], cwd=p)
+        proj_releases = p / "releases"
+        if proj_releases.exists():
+            for zf in proj_releases.glob("*.zip"):
+                console.print(f"   [dim]-> Consolidating: {zf.name}[/dim]")
+                shutil.move(str(zf), str(central_dir / zf.name))
+            shutil.rmtree(str(proj_releases), ignore_errors=True)
+    console.print(f"\n[bold cyan]✨ All release packages consolidated to: {central_dir}[/bold cyan]")
 
 def cmd_publish(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects(); publishable = []
