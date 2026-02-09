@@ -12,44 +12,33 @@ def generate_docs(project_path):
         print("  Functions directory not found.")
         return
 
-    output_md = "# 🛠 UKSFTA Global Function Library
-
-"
-    output_md += "Automatically generated API reference for unit-standard functions.
-
-"
+    output_md = "# 🛠 UKSFTA Global Function Library\n\n"
+    output_md += "Automatically generated API reference for unit-standard functions.\n\n"
 
     found_any = False
     for f in sorted(functions_dir.glob("fnc_*.sqf")):
-        content = f.read_text(errors='ignore')
-        
-        # Simple parser for BIS-style headers
-        desc = re.search(r'Description:\s*(.*)', content, re.IGNORECASE)
-        params = re.findall(r'Parameter:\s*(.*)', content, re.IGNORECASE)
-        ret = re.search(r'Return:\s*(.*)', content, re.IGNORECASE)
-        
-        output_md += f"### `{f.stem}`
-"
-        output_md += f"**Description**: {desc.group(1).strip() if desc else 'No description provided.'}
-
-"
-        
-        if params:
-            output_md += "**Parameters**:
-"
-            for p in params:
-                output_md += f"- {p.strip()}
-"
-            output_md += "
-"
+        try:
+            content = f.read_text(errors='ignore')
             
-        output_md += f"**Returns**: {ret.group(1).strip() if ret else 'Nothing'}
-
-"
-        output_md += "---
-
-"
-        found_any = True
+            # Simple parser for BIS-style headers
+            desc = re.search(r'Description:\s*(.*)', content, re.IGNORECASE)
+            params = re.findall(r'Parameter:\s*(.*)', content, re.IGNORECASE)
+            ret = re.search(r'Return:\s*(.*)', content, re.IGNORECASE)
+            
+            output_md += f"### `{f.stem}`\n"
+            output_md += f"**Description**: {desc.group(1).strip() if desc else 'No description provided.'}\n\n"
+            
+            if params:
+                output_md += "**Parameters**:\n"
+                for p in params:
+                    output_md += f"- {p.strip()}\n"
+                output_md += "\n"
+                
+            output_md += f"**Returns**: {ret.group(1).strip() if ret else 'Nothing'}\n\n"
+            output_md += "---\n\n"
+            found_any = True
+        except Exception as e:
+            print(f"  ⚠️ Error parsing {f.name}: {e}")
 
     if found_any:
         docs_out = Path(project_path) / "docs" / "API_REFERENCE.md"
