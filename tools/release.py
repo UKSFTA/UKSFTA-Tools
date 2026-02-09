@@ -10,6 +10,8 @@ import urllib.request
 import html
 import argparse
 import multiprocessing
+from rich.console import Console
+from rich import print
 
 # Configuration
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -204,6 +206,7 @@ def main():
     parser.add_argument("-t", "--tag", action="store_true", help="Force git tagging")
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation for tagging (implies --tag)")
     parser.add_argument("-j", "--threads", type=int, default=multiprocessing.cpu_count(), help="Number of threads for HEMTT (default: all cores)")
+    parser.add_argument("--dry-run", action="store_true", help="Generate VDF and validate but do not upload")
     
     args = parser.parse_args()
 
@@ -211,7 +214,7 @@ def main():
     if not shutil.which("hemtt"):
         print("Error: 'hemtt' not found.")
         sys.exit(1)
-    if not shutil.which("steamcmd"):
+    if not args.dry_run and not shutil.which("steamcmd"):
         print("Error: 'steamcmd' not found.")
         sys.exit(1)
 
@@ -233,8 +236,11 @@ def main():
         if confirm == 'm': part = "minor"
         if confirm == 'major': part = "major"
         new_version = bump_version(part)
-        subprocess.run(["git", "add", VERSION_FILE], check=True)
-        subprocess.run(["git", "commit", "-S", "-m", f"chore: bump version to {new_version}"], check=True)
+        if not args.dry_run:
+            subprocess.run(["git", "add", VERSION_FILE], check=True)
+            subprocess.run(["git", "commit", "-S", "-m", f"chore: bump version to {new_version}"], check=True)
+        else:
+            print(f"[DRY-RUN] Would commit version bump to {new_version}")
 
     # USE THE ROBUST WRAPPER FOR BUILDING
     print(f"Running Robust Release Build...")
@@ -250,7 +256,10 @@ def main():
     ws_config = get_workshop_config()
     workshop_id = ws_config["id"]
     if not workshop_id or workshop_id == "0":
-        workshop_id = input("Enter Workshop ID to update: ").strip()
+        if not args.dry_run:
+            workshop_id = input("Enter Workshop ID to update: ").strip()
+        else:
+            workshop_id = "123456789 (Simulated)"
         
     try:
         last_tag = subprocess.check_output(["git", "describe", "--tags", "--abbrev=0"]).decode().strip()
@@ -264,6 +273,36 @@ def main():
     # Upload from .hemttout/release which contains the normalized raw files
     vdf_path = create_vdf("107410", workshop_id, STAGING_DIR, changelog)
     
+    if args.dry_run:
+        print("\n" + "="*60)
+        print("       [bold cyan]STEAM WORKSHOP MOCK PREVIEW[/bold cyan]")
+        print("="*60)
+        ws_config = get_workshop_config()
+        print(f"[bold]Workshop ID:[/bold]  {workshop_id}")
+        print(f"[bold]Version:[/bold]      {new_version}")
+        print(f"[bold]Tags:[/bold]         {', '.join(ws_config['tags'])}")
+        
+        print("\n[bold cyan]--- Description Preview ---[/bold cyan]")
+        # Mock the description replacement
+        desc = ""
+        if os.path.exists("workshop_description.txt"):
+            with open("workshop_description.txt", "r") as f:
+                desc = f.read()
+        desc = desc.replace("{{INCLUDED_CONTENT}}", generate_content_list())
+        # Strip BBCode for the preview so it's readable in terminal
+        preview_desc = re.sub(r"\[.*?\]", "", desc)
+        print(preview_desc.strip())
+        
+        print("\n[bold cyan]--- Changelog ---[/bold cyan]")
+        print(changelog if changelog else "Initial release.")
+        print("="*60)
+
+        print("\n[DRY-RUN] Build complete. Integrity check follows...")
+        # Use our new checker tool
+        subprocess.run([sys.executable, "tools/mod_integrity_checker.py", STAGING_DIR, "--unsigned"])
+        print("\n[DRY-RUN] Upload skipped. Ready for production.")
+        return
+
     print("\n--- Steam Workshop Upload ---")
     username = os.getenv("STEAM_USERNAME")
     password = os.getenv("STEAM_PASSWORD")
