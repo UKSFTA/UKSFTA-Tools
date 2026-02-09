@@ -1,6 +1,6 @@
-name = "UKSF Task Force Alpha - Project (CBA)";
-author = "UKSF Taskforce Alpha Team";
-prefix = "UKSFTA-Project"
+name = "UKSF Task Force Alpha - Project (CBA)"
+author = "UKSF Taskforce Alpha Team"
+prefix = "uksfta"
 mainprefix = "z"
 
 [version]

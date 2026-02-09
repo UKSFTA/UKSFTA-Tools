@@ -23,7 +23,7 @@ def get_projects(root_dir=".."):
     projects = []
     root = Path(root_dir).resolve()
     for item in root.iterdir():
-        if item.is_dir() and item.name.startswith("UKSFTA-") and item.name not in ["UKSFTA-Tools", "UKSFTA-Scripts"]:
+        if item.is_dir() and item.name.startswith("UKSFTA-") and item.name not in ["UKSFTA-Tools"]:
             if (item / ".hemtt" / "project.toml").exists():
                 projects.append(item)
     return sorted(projects)
@@ -152,6 +152,40 @@ def cmd_release(args):
         else:
             print(f"Skipping {p.name}: No release.sh found.")
 
+def cmd_test(args):
+    console = Console() if HAS_RICH else None
+    projects = get_projects()
+    tools_dir = Path(__file__).parent.resolve()
+    
+    # 1. Run Python Unit Tests for Tools
+    print("\n[bold cyan]Step 1: Running Python Tool Tests (pytest)[/bold cyan]" if HAS_RICH else "\nStep 1: Running Python Tool Tests (pytest)")
+    subprocess.run(["pytest", str(tools_dir / "tests")], cwd=tools_dir.parent)
+
+    # 2. Run Workspace-wide Checks
+    for p in projects:
+        print(f"\n[bold blue]=== Testing Project: {p.name} ===[/bold blue]" if HAS_RICH else f"\n=== Testing Project: {p.name} ===")
+        
+        # A. HEMTT Check
+        print("  - Running HEMTT Check...")
+        subprocess.run(["hemtt", "check"], cwd=p)
+
+        # B. SQFLint
+        print("  - Running SQFLint...")
+        addons_dir = p / "addons"
+        if addons_dir.exists():
+            # sqflint -d <dir> is the correct way to lint a directory
+            subprocess.run(["sqflint", "-d", str(addons_dir.resolve())], cwd=p)
+        else:
+            print("    (No addons directory found)")
+
+        # C. UKSFTA Custom Validators
+        print("  - Running UKSFTA Validators...")
+        validators = ["config_style_checker.py", "stringtable_validator.py", "return_checker.py"]
+        for val in validators:
+            val_path = tools_dir / val
+            if val_path.exists():
+                subprocess.run([sys.executable, str(val_path)], cwd=p)
+
 def cmd_clean(args):
     projects = get_projects()
     for p in projects:
@@ -269,6 +303,7 @@ def main():
     subparsers.add_parser("sync", help="Run mod manager sync on all projects")
     subparsers.add_parser("build", help="Run HEMTT build on all projects")
     subparsers.add_parser("release", help="Run UKSFTA release script (ZIP packaging) on all projects")
+    subparsers.add_parser("test", help="Run full suite of tests (pytest, sqflint, hemtt check)")
     subparsers.add_parser("clean", help="Clean all build artifacts (.hemttout)")
     subparsers.add_parser("cache", help="Show disk usage of .hemttout across workspace")
     
@@ -291,6 +326,8 @@ def main():
         cmd_build(args)
     elif args.command == "release":
         cmd_release(args)
+    elif args.command == "test":
+        cmd_test(args)
     elif args.command == "clean":
         cmd_clean(args)
     elif args.command == "cache":

@@ -1,7 +1,7 @@
 // Verify all addon folders have a $PBOPREFIX$ file
 // This prevents broken references in complex mod structures
 
-let addons = HEMTT_RFS.join("addons").list_dir();
+let addons = HEMTT_RFS.join("addons").list();
 let missing = 0;
 
 for addon in addons {
