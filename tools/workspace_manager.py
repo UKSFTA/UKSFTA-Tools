@@ -57,7 +57,8 @@ def cmd_help(console):
     dev_table = Table(title="🏗️  Development & Management", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold magenta")
     dev_table.add_row("[bold cyan]dashboard[/]", "[dim]Visual overview of all projects, versions, and prefixes[/]")
     dev_table.add_row("[bold cyan]status   [/]", "[dim]Show git status summary for every repository[/]")
-    dev_table.add_row("[bold cyan]sync     [/]", "[dim]Synchronize submodules and dependencies[/]")
+    dev_table.add_row("[bold cyan]pull-mods[/]", "[dim]Pull latest Workshop updates for all project dependencies[/]")
+    dev_table.add_row("[bold cyan]sync     [/]", "[dim]Alias for pull-mods (Synchronize submodules and mods)[/]")
     dev_table.add_row("[bold cyan]build    [/]", "[dim]Execute HEMTT build on all projects[/]")
     dev_table.add_row("[bold cyan]release  [/]", "[dim]Generate signed/packaged release ZIPs[/]")
     dev_table.add_row("[bold cyan]publish  [/]", "[dim]Upload projects to Steam Workshop (with --dry-run)[/]")
@@ -248,14 +249,14 @@ def cmd_workshop_tags(args):
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Diamond Manager", add_help=False)
     subparsers = parser.add_subparsers(dest="command")
-    for cmd in ["dashboard", "status", "sync", "build", "release", "test", "clean", "cache", "validate", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "update", "workshop-tags", "gh-runs", "help"]:
+    for cmd in ["dashboard", "status", "sync", "pull-mods", "build", "release", "test", "clean", "cache", "validate", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "update", "workshop-tags", "gh-runs", "help"]:
         subparsers.add_parser(cmd)
     p_pub = subparsers.add_parser("publish"); p_pub.add_argument("--dry-run", action="store_true")
     p_conv = subparsers.add_parser("convert"); p_conv.add_argument("files", nargs="+")
     args = parser.parse_args()
     console = Console(force_terminal=True)
     cmds = {
-        "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "build": cmd_build, "release": cmd_release,
+        "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
         "test": lambda a: subprocess.run(["pytest"]), "clean": lambda a: [subprocess.run(["rm", "-rf", ".hemttout"], cwd=p) for p in get_projects()],
         "cache": lambda a: [subprocess.run(["du", "-sh", ".hemttout"], cwd=p) for p in get_projects() if (p/".hemttout").exists()],
         "publish": cmd_publish, "audit-deps": cmd_audit_deps, "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings,
