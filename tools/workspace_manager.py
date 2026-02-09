@@ -79,6 +79,74 @@ def cmd_dashboard(args):
     table.title = f"Total Projects: {len(projects)}"
     console.print(table)
 
+def cmd_status(args):
+    projects = get_projects()
+    for p in projects:
+        print(f"\n>>> Project: {p.name}")
+        subprocess.run(["git", "status", "-s"], cwd=p)
+
+def cmd_sync(args):
+    projects = get_projects()
+    for p in projects:
+        print(f"\n>>> Syncing {p.name}...")
+        subprocess.run([sys.executable, "tools/manage_mods.py", "sync"], cwd=p)
+
+def cmd_build(args):
+    projects = get_projects()
+    for p in projects:
+        print(f"\n>>> Building {p.name}...")
+        subprocess.run(["bash", "build.sh", "build"], cwd=p)
+
+def cmd_release(args):
+    projects = get_projects()
+    for p in projects:
+        print(f"\n>>> Packaging Release: {p.name}...")
+        subprocess.run(["bash", "build.sh", "release"], cwd=p)
+
+def cmd_test(args):
+    print("[bold cyan]Step 1: Running Python Tool Tests (pytest)[/bold cyan]")
+    subprocess.run(["pytest"])
+    projects = get_projects()
+    for p in projects:
+        print(f"\n[bold blue]=== Testing Project: {p.name} ===[/bold blue]")
+        subprocess.run(["hemtt", "check"], cwd=p)
+        subprocess.run(["sqflint", "addons"], cwd=p)
+        cmd_validate_project(p)
+
+def cmd_validate_project(p):
+    tools_dir = Path(__file__).parent.resolve()
+    validators = ["config_style_checker.py", "sqf_validator.py", "stringtable_validator.py", "return_checker.py", "search_unused_privates.py"]
+    for val in validators:
+        val_path = tools_dir / val
+        if val_path.exists(): subprocess.run([sys.executable, str(val_path)], cwd=p)
+
+def cmd_clean(args):
+    for p in get_projects():
+        out_dir = p / ".hemttout"
+        if out_dir.exists():
+            print(f"Cleaning {p.name}..."); subprocess.run(["rm", "-rf", str(out_dir)])
+
+def cmd_cache(args):
+    for p in get_projects():
+        out_dir = p / ".hemttout"
+        if out_dir.exists():
+            size = subprocess.check_output(["du", "-sh", str(out_dir)]).split()[0].decode('utf-8')
+            print(f"  {p.name}: {size}")
+
+def cmd_publish(args):
+    projects = get_projects(); publishable = []
+    for p in projects:
+        cp = p / ".hemtt" / "project.toml"
+        if cp.exists():
+            with open(cp, 'r') as f:
+                c = f.read(); wm = re.search(r'workshop_id = "(.*)"', c)
+                if wm and wm.group(1).isdigit(): publishable.append((p, wm.group(1)))
+    if not publishable: print("No valid IDs found."); return
+    for p, ws_id in publishable:
+        print(f"\n>>> Publishing {p.name}..."); cmd = [sys.executable, "tools/release.py", "-n", "-y"]
+        if args.dry_run: cmd.append("--dry-run")
+        subprocess.run(cmd, cwd=p)
+
 def cmd_audit_deps(args):
     console = Console(force_terminal=True)
     projects = get_projects(); defined_patches = set(); dependencies = {}
@@ -88,43 +156,36 @@ def cmd_audit_deps(args):
                 content = f.read()
                 matches = re.finditer(r'class\s+CfgPatches\s*\{[^}]*class\s+([a-zA-Z0-9_]+)', content, re.MULTILINE | re.DOTALL)
                 for m in matches: defined_patches.add(m.group(1))
-                req_match = re.search(r'requiredAddons\[\]\s*=\s*\{([^}]*)\}', content, re.MULTILINE | re.DOTALL)
-                if req_match:
-                    reqs = [r.strip().replace('"', '').replace("'", "") for r in req_match.group(1).split(',')]
-                    dependencies[config] = [r for r in reqs if r]
-
+                rm = re.search(r'requiredAddons\[\]\s*=\s*\{([^}]*)\}', content, re.MULTILINE | re.DOTALL)
+                if rm: dependencies[config] = [r.strip().replace('"', '').replace("'", "") for r in rm.group(1).split(',') if r.strip()]
     console.print(f"\n[bold blue]=== Workspace Dependency Audit ===[/bold blue]")
-    errors = 0; known_externals = ["A3_", "cba_", "ace_", "task_force_radio", "acre_", "rhsusf_", "rhs_"]
-    for config, reqs in dependencies.items():
-        rel_path = config.relative_to(Path(__file__).parent.parent.parent)
-        missing = [r for r in reqs if r not in defined_patches and not any(r.lower().startswith(ext.lower()) for ext in known_externals)]
-        if missing:
-            console.print(f"[red]❌ {rel_path}[/red]")
-            for m in missing: console.print(f"   - Missing dependency: [bold]{m}[/bold]")
-            errors += 1
-        else: console.print(f"[green]✓[/green] {rel_path} (All dependencies resolved)")
-    if errors == 0: console.print(f"\n[bold green]Success: All dependencies healthy![/bold green]")
-    else: console.print(f"\n[bold red]Failed: Found {errors} configs with unresolved dependencies.[/bold red]")
+    errs = 0; exts = ["A3_", "cba_", "ace_", "task_force_radio", "acre_", "rhsusf_", "rhs_"]
+    for cfg, reqs in dependencies.items():
+        rel = cfg.relative_to(Path(__file__).parent.parent.parent)
+        miss = [r for r in reqs if r not in defined_patches and not any(r.lower().startswith(x.lower()) for x in exts)]
+        if miss:
+            console.print(f"[red]❌ {rel}[/red]"); errs += 1
+            for m in miss: console.print(f"   - Missing dependency: [bold]{m}[/bold]")
+        else: console.print(f"[green]✓[/green] {rel} (Resolved)")
+    if errs == 0: console.print(f"\n[bold green]Success: All healthy![/bold green]")
+    else: console.print(f"\n[bold red]Failed: Found {errs} issues.[/bold red]")
 
 def cmd_audit_assets(args):
-    console = Console(force_terminal=True)
-    projects = get_projects()
+    console = Console(force_terminal=True); projects = get_projects()
     auditor = Path(__file__).parent / "asset_auditor.py"
     for p in projects:
         console.print(f"\n[bold blue]>>> Auditing Assets: {p.name}[/bold blue]")
         subprocess.run([sys.executable, str(auditor), str(p)])
 
 def cmd_audit_strings(args):
-    console = Console(force_terminal=True)
-    projects = get_projects()
+    console = Console(force_terminal=True); projects = get_projects()
     auditor = Path(__file__).parent / "string_auditor.py"
     for p in projects:
         console.print(f"\n[bold blue]>>> Auditing Strings: {p.name}[/bold blue]")
         subprocess.run([sys.executable, str(auditor), str(p)])
 
 def cmd_generate_docs(args):
-    console = Console(force_terminal=True)
-    projects = get_projects()
+    console = Console(force_terminal=True); projects = get_projects()
     gen = Path(__file__).parent / "doc_generator.py"
     for p in projects:
         if p.name == "UKSFTA-Scripts":
@@ -140,12 +201,12 @@ def cmd_gh_runs(args):
             if res.returncode == 0:
                 if not res.stdout.strip(): console.print("  No runs found.")
                 else:
-                    for line in res.stdout.splitlines():
-                        if "✓" in line: console.print(f"  [green]{line}[/green]")
-                        elif "X" in line or "fail" in line.lower(): console.print(f"  [red]{line}[/red]")
-                        elif "*" in line: console.print(f"  [yellow]{line}[/yellow]")
-                        else: console.print(f"  {line}")
-            else: console.print(f"  [dim]GH CLI Error or no workflows.[/dim]")
+                    for l in res.stdout.splitlines():
+                        if "✓" in l: console.print(f"  [green]{l}[/green]")
+                        elif "X" in l or "fail" in l.lower(): console.print(f"  [red]{l}[/red]")
+                        elif "*" in l: console.print(f"  [yellow]{l}[/yellow]")
+                        else: console.print(f"  {l}")
+            else: console.print(f"  [dim]GH CLI Error.[/dim]")
         except Exception as e: console.print(f"  Error: {e}")
 
 def cmd_convert(args):
@@ -175,45 +236,20 @@ def cmd_workshop_tags(args):
     else: print("Workshop tags file not found.")
 
 def main():
-    parser = argparse.ArgumentParser(description="UKSFTA Workspace Management Tool")
+    parser = argparse.ArgumentParser(description="UKSFTA Workspace Manager")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
-    subparsers.add_parser("dashboard", help="Workspace overview")
-    subparsers.add_parser("status", help="Git status overview")
-    subparsers.add_parser("sync", help="Sync project dependencies")
-    subparsers.add_parser("build", help="Run HEMTT build")
-    subparsers.add_parser("release", help="Package ZIP release")
-    subparsers.add_parser("test", help="Run all tests")
-    subparsers.add_parser("clean", help="Clean artifacts")
-    subparsers.add_parser("cache", help="Disk usage")
-    subparsers.add_parser("validate", help="Run project validators")
-    subparsers.add_parser("audit-build", help="Audit build integrity")
-    subparsers.add_parser("audit-deps", help="Audit requiredAddons")
-    subparsers.add_parser("audit-assets", help="Find orphaned binary assets")
-    subparsers.add_parser("audit-strings", help="Validate stringtable synchronization")
-    subparsers.add_parser("generate-docs", help="Generate API documentation from SQF headers")
-    subparsers.add_parser("update", help="Push latest tools to projects")
-    subparsers.add_parser("workshop-tags", help="List valid tags")
-    subparsers.add_parser("gh-runs", help="GitHub Actions status")
-    publish_parser = subparsers.add_parser("publish", help="Upload to Steam")
-    publish_parser.add_argument("--dry-run", action="store_true")
-    convert_parser = subparsers.add_parser("convert", help="Convert media (.ogg/.ogv/.paa)")
-    convert_parser.add_argument("files", nargs="+")
-
+    for cmd in ["dashboard", "status", "sync", "build", "release", "test", "clean", "cache", "validate", "audit-deps", "audit-assets", "audit-strings", "generate-docs", "update", "workshop-tags", "gh-runs"]:
+        subparsers.add_parser(cmd)
+    p_pub = subparsers.add_parser("publish"); p_pub.add_argument("--dry-run", action="store_true")
+    p_conv = subparsers.add_parser("convert"); p_conv.add_argument("files", nargs="+")
     args = parser.parse_args()
     cmds = {
-        "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync,
-        "build": cmd_build, "release": cmd_release, "test": cmd_test,
-        "clean": cmd_clean, "cache": cmd_cache, "publish": cmd_publish,
-        "validate": cmd_validate_project, "audit-build": cmd_audit_deps,
-        "audit-deps": cmd_audit_deps, "audit-assets": cmd_audit_assets,
-        "audit-strings": cmd_audit_strings, "generate-docs": cmd_generate_docs,
-        "update": cmd_update, "workshop-tags": cmd_workshop_tags,
-        "gh-runs": cmd_gh_runs, "convert": cmd_convert
+        "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "build": cmd_build, "release": cmd_release,
+        "test": cmd_test, "clean": cmd_clean, "cache": cmd_cache, "publish": cmd_publish, "validate": lambda a: [cmd_validate_project(p) for p in get_projects()],
+        "audit-deps": cmd_audit_deps, "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings,
+        "generate-docs": cmd_generate_docs, "update": cmd_update, "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "convert": cmd_convert
     }
-    if args.command in cmds:
-        if args.command == "validate": # special case for project loop
-            for p in get_projects(): cmds[args.command](p)
-        else: cmds[args.command](args)
+    if args.command in cmds: cmds[args.command](args)
     else: parser.print_help()
 
 if __name__ == "__main__":
