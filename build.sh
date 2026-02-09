@@ -56,9 +56,25 @@ if [ $STATUS -eq 0 ]; then
         python3 tools/fix_timestamps.py "$STAGING_DIR" "$PROJECT_NAME" "$WORKSHOP_ID"
         
         (cd "$STAGING_DIR" && zip -q -r "$PROJECT_ROOT/releases/$ZIP_NAME" "$MOD_FOLDER_NAME")
-        cp "releases/$ZIP_NAME" "releases/${PREFIX}-latest.zip"
-        python3 tools/fix_timestamps.py releases
-        echo "Release packaged: releases/$ZIP_NAME"
+        
+        # Centralization support: Detect the Unit Hub
+        # 1. Check parent directory (Standalone)
+        # 2. Check local submodule directory (.uksf_tools)
+        CENTRAL_HUB=""
+        if [ -d "../UKSFTA-Tools/all_releases" ]; then
+            CENTRAL_HUB="../UKSFTA-Tools/all_releases"
+        elif [ -d ".uksf_tools/all_releases" ]; then
+            CENTRAL_HUB=".uksf_tools/all_releases"
+        fi
+
+        if [ -n "$CENTRAL_HUB" ]; then
+            mv "$PROJECT_ROOT/releases/$ZIP_NAME" "$CENTRAL_HUB/"
+            rmdir "$PROJECT_ROOT/releases" 2>/dev/null
+            echo "✨ Release consolidated to: $CENTRAL_HUB/$ZIP_NAME"
+        else
+            echo "📦 Release packaged: releases/$ZIP_NAME"
+        fi
+        
         rm -rf "$STAGING_DIR"
     fi
 fi
