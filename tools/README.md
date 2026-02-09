@@ -1,52 +1,29 @@
-# UKSFTA Mod Manager
+# UKSFTA Internal Tools
 
-A simple, portable Python tool for managing Arma 3 Steam Workshop mods in HEMTT-based projects.
+This directory contains the Python-based logic for the UKSFTA automation pipeline.
 
-## Features
+### Core Tools
 
-- **Easy Configuration**: Just paste Workshop URLs or IDs into `mod_sources.txt`.
-- **Automatic Sync**: Downloads, updates, and copies mods to your project.
-- **Smart Cleanup**: Automatically removes files when a mod is removed from the list.
-- **Key Management**: Automatically extracts `.bikey` files for server signing.
-- **Anonymous**: No Steam account credentials required for public mods.
+| Script | Purpose |
+| :--- | :--- |
+| `workspace_manager.py` | Central hub for multi-project sync, audit, and status. |
+| `mod_integrity_checker.py` | Deep inspection of PBO headers and structure. |
+| `manage_mods.py` | Workshop dependency manager and key purger. |
+| `fix_timestamps.py` | Normalizes `meta.cpp` metadata and Win32 timestamps. |
+| `release.py` | Orchestrates versioning, building, and Steam uploading. |
 
-## Setup
+### Validation Suite
 
-1.  Ensure you have `steamcmd` installed on your system.
-    *   **Linux**: `sudo apt install steamcmd` (or equivalent).
-    *   **Windows**: Download from Valve and add to your PATH.
-2.  Copy `tools/manage_mods.py` to your project's `tools/` directory.
-3.  Create a `mod_sources.txt` in the root of your project.
+These scripts are run automatically by `workspace_manager.py test` and GitHub Actions:
+- `config_style_checker.py`: Enforces standard formatting in `.cpp` files.
+- `sqf_validator.py`: Catch basic syntax and bracket errors in SQF.
+- `stringtable_validator.py`: Validates XML structure and `AFM` naming conventions.
+- `return_checker.py`: Verifies SQF return types match documentation blocks.
+- `search_unused_privates.py`: Identifies local variables not declared as private.
 
-## Usage
+### Usage
 
-1.  **Add Mods**:
-    Open `mod_sources.txt` and add Steam Workshop links or IDs, one per line.
-    ```text
-    https://steamcommunity.com/sharedfiles/filedetails/?id=450814997
-    463939057
-    ```
-
-2.  **Run the Tool**:
-    ```bash
-    python3 tools/manage_mods.py
-    ```
-
-    This will:
-    *   Download the mods using `steamcmd`.
-    *   Copy `.pbo` and `.bisign` files to `addons/`.
-    *   Copy `.bikey` files to `keys/`.
-    *   Update `mods.lock` to track installed files.
-
-3.  **Remove Mods**:
-    Simply delete the line from `mod_sources.txt` and run the script again. The tool will delete the associated files from `addons/` and `keys/`.
-
-## Requirements
-
-*   Python 3.6+
-*   SteamCMD
-
-## Troubleshooting
-
-*   **"SteamCMD not found"**: Ensure `steamcmd` is in your system PATH.
-*   **Permissions**: On Linux, ensure the script has write access to `addons/` and `keys/`.
+Most tools are designed to be run via the **Workspace Manager**:
+```bash
+./tools/workspace_manager.py [status|sync|build|release|test|audit-build|cache|clean]
+```

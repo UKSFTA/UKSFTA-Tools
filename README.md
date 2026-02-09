@@ -4,14 +4,13 @@ Centralized automation and DevOps infrastructure for UKSF Taskforce Alpha mod pr
 
 ## 🛠 Features
 
-- **Mod Manager (`manage_mods.py`)**: Automates Workshop dependency syncing, dependency resolution, and smart cleanup of orphaned PBOs/Keys.
-- **Release Tool (`release.py`)**: Handles version bumping, HEMTT building, changelog generation, Steam Workshop uploading, and GitHub Release creation.
-- **HEMTT Integration**: Shared scripts and hooks for versioning and artifact management.
-- **Validation**: Includes SQF, Config, and Stringtable validators.
+- **Workspace Manager**: Centralized `dashboard`, `sync`, and `test` suite for managing all unit projects.
+- **Build Hardening**: Automated `publishedid` injection and timestamp normalization to prevent Launcher corruption.
+- **Mod Integrity**: Deep PBO inspection tool to catch source leaks and header errors.
+- **HEMTT Integration**: Shared scripts and hooks for versioning, prefix checking, and artifact management.
+- **Scaffolding**: Rapid project creation with `Standard` and `CBA` templates.
 
-## 🚀 Integration
-
-To add these tools to a project:
+## 🚀 Quick Start
 
 1. **Add Submodule**:
    ```bash
@@ -22,16 +21,17 @@ To add these tools to a project:
    ```bash
    python3 .uksf_tools/setup.py
    ```
-   *This creates the necessary symlinks in `tools/` and `.hemtt/`.*
 
-## 📋 Mod Management
+3. **Manage Workspace**:
+   ```bash
+   # From the tools repo root:
+   ./tools/workspace_manager.py dashboard
+   ./tools/workspace_manager.py test
+   ```
 
-Add Steam Workshop links to `mod_sources.txt`. To exclude specific dependencies:
+## 📋 Documentation
 
-```text
-[ignore]
-https://steamcommunity.com/sharedfiles/filedetails/?id=450814997 # CBA_A3
-```
+For detailed technical standards, build pipeline logic, and troubleshooting, see the [DevOps Guide](docs/devops_guide.md).
 
 ## ⚖ License
 
