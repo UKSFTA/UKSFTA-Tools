@@ -23,7 +23,7 @@ jobs:
           annotate: false
 
       - name: Run HEMTT build
-        run: bash build.sh
+        run: bash build.sh build
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
