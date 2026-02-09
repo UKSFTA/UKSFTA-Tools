@@ -141,8 +141,17 @@ def run_steamcmd(mod_ids):
     if not mod_ids:
         return
     
-    username = os.getenv("STEAM_USERNAME", "anonymous")
+    username = os.getenv("STEAM_USERNAME")
     password = os.getenv("STEAM_PASSWORD")
+    
+    if not username:
+        print("\n[!] Steam credentials not found in environment.")
+        choice = input("Attempt anonymous download? [y/N]: ").lower()
+        if choice != 'y':
+            username = input("Steam Username: ").strip()
+            password = input("Steam Password: ").strip()
+        else:
+            username = "anonymous"
     
     cmd = ["steamcmd", "+login", username]
     if password:
@@ -151,8 +160,13 @@ def run_steamcmd(mod_ids):
     for mid in mod_ids:
         cmd.extend(["+workshop_download_item", STEAMAPP_ID, mid])
     cmd.append("+quit")
+    
     print(f"\n--- Updating {len(mod_ids)} mods via SteamCMD (as {username}) ---")
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError:
+        print("❌ SteamCMD failed. If using anonymous, try with unit credentials.")
+        sys.exit(1)
 
 def get_workshop_cache_path():
     home = os.path.expanduser("~")
