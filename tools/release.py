@@ -20,7 +20,15 @@ except ImportError:
 
 # Configuration
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VERSION_FILE = os.path.join(PROJECT_ROOT, "addons", "main", "script_version.hpp")
+def find_version_file():
+    # Recursively find the first script_version.hpp in addons/
+    addons_dir = os.path.join(PROJECT_ROOT, "addons")
+    for root, _, files in os.walk(addons_dir):
+        if "script_version.hpp" in files:
+            return os.path.join(root, "script_version.hpp")
+    return None
+
+VERSION_FILE = find_version_file()
 HEMTT_OUT = os.path.join(PROJECT_ROOT, ".hemttout")
 # Workshop expects the RAW contents (addons, keys etc) at the root
 STAGING_DIR = os.path.join(HEMTT_OUT, "release")
@@ -253,10 +261,19 @@ def main():
 
     # Locate the newly created ZIP for GitHub
     possible_zips = glob.glob(os.path.join(PROJECT_ROOT, "releases", "*.zip"))
+    
+    # Also check the central unit hub
+    central_hub = os.path.join(PROJECT_ROOT, "..", "UKSFTA-Tools", "all_releases")
+    if os.path.exists(central_hub):
+        possible_zips += glob.glob(os.path.join(central_hub, "*.zip"))
+
     if not possible_zips:
-        print("Error: No release zip found in releases/ folder.")
+        print("Error: No release zip found in local releases/ or central hub.")
         sys.exit(1)
+    
+    # Get the absolute newest file by creation time
     latest_zip = max(possible_zips, key=os.path.getctime)
+    print(f"Using release package: {os.path.basename(latest_zip)}")
     
     ws_config = get_workshop_config()
     workshop_id = ws_config["id"]
