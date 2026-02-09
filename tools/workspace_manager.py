@@ -152,6 +152,16 @@ def cmd_release(args):
         else:
             print(f"Skipping {p.name}: No release.sh found.")
 
+def cmd_clean(args):
+    projects = get_projects()
+    for p in projects:
+        out_dir = p / ".hemttout"
+        if out_dir.exists():
+            print(f"Cleaning {p.name}...")
+            shutil.rmtree(out_dir)
+        else:
+            print(f"Skipping {p.name}: No .hemttout found.")
+
 def cmd_publish(args):
     projects = get_projects()
     publishable = []
@@ -238,6 +248,7 @@ def main():
     subparsers.add_parser("sync", help="Run mod manager sync on all projects")
     subparsers.add_parser("build", help="Run HEMTT build on all projects")
     subparsers.add_parser("release", help="Run UKSFTA release script (ZIP packaging) on all projects")
+    subparsers.add_parser("clean", help="Clean all build artifacts (.hemttout)")
     
     publish_parser = subparsers.add_parser("publish", help="Upload all projects with valid IDs to Steam Workshop")
     publish_parser.add_argument("--dry-run", action="store_true", help="Simulate upload and validate without talking to Steam")
@@ -258,6 +269,8 @@ def main():
         cmd_build(args)
     elif args.command == "release":
         cmd_release(args)
+    elif args.command == "clean":
+        cmd_clean(args)
     elif args.command == "publish":
         cmd_publish(args)
     elif args.command == "validate":
