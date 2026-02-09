@@ -294,6 +294,24 @@ def cmd_update(args):
         print(f"Updating tools in {p.name}...")
         subprocess.run([sys.executable, str(setup_script.resolve())], cwd=p)
 
+def cmd_convert(args):
+    from media_converter import convert_audio, convert_video, check_ffmpeg
+    if not check_ffmpeg():
+        print("❌ Error: ffmpeg not found. Please install it (sudo pacman -S ffmpeg)")
+        return
+    
+    for f in args.files:
+        if not os.path.exists(f):
+            print(f"⚠️ File not found: {f}")
+            continue
+        ext = os.path.splitext(f)[1].lower()
+        if ext in [".wav", ".mp3", ".m4a", ".flac"]:
+            convert_audio(f)
+        elif ext in [".mp4", ".mkv", ".mov", ".avi"]:
+            convert_video(f)
+        else:
+            print(f"❓ Unknown format for {f}")
+
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Workspace Management Tool")
     subparsers = parser.add_subparsers(dest="command", help="Management commands")
@@ -313,6 +331,9 @@ def main():
     subparsers.add_parser("validate", help="Run all validators on all projects")
     subparsers.add_parser("audit-build", help="Run integrity check on built artifacts (.hemttout)")
     subparsers.add_parser("update", help="Push latest tools/setup to all projects")
+    
+    convert_parser = subparsers.add_parser("convert", help="Convert media to Arma-optimized formats (.ogg/.ogv)")
+    convert_parser.add_argument("files", nargs="+", help="Files to convert")
 
     args = parser.parse_args()
 
@@ -340,6 +361,8 @@ def main():
         cmd_audit_build(args)
     elif args.command == "update":
         cmd_update(args)
+    elif args.command == "convert":
+        cmd_convert(args)
     else:
         parser.print_help()
 
