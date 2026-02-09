@@ -10,8 +10,13 @@ import urllib.request
 import html
 import argparse
 import multiprocessing
-from rich.console import Console
-from rich import print
+try:
+    from rich.console import Console
+    from rich import print as rprint
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
+    rprint = print
 
 # Configuration
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -275,14 +280,23 @@ def main():
     
     if args.dry_run:
         print("\n" + "="*60)
-        print("       [bold cyan]STEAM WORKSHOP MOCK PREVIEW[/bold cyan]")
+        if HAS_RICH:
+            rprint("       [bold cyan]STEAM WORKSHOP MOCK PREVIEW[/bold cyan]")
+        else:
+            print("       STEAM WORKSHOP MOCK PREVIEW")
         print("="*60)
         ws_config = get_workshop_config()
-        print(f"[bold]Workshop ID:[/bold]  {workshop_id}")
-        print(f"[bold]Version:[/bold]      {new_version}")
-        print(f"[bold]Tags:[/bold]         {', '.join(ws_config['tags'])}")
-        
-        print("\n[bold cyan]--- Description Preview ---[/bold cyan]")
+        if HAS_RICH:
+            rprint(f"[bold]Workshop ID:[/bold]  {workshop_id}")
+            rprint(f"[bold]Version:[/bold]      {new_version}")
+            rprint(f"[bold]Tags:[/bold]         {', '.join(ws_config['tags'])}")
+            rprint("\n[bold cyan]--- Description Preview ---[/bold cyan]")
+        else:
+            print(f"Workshop ID:  {workshop_id}")
+            print(f"Version:      {new_version}")
+            print(f"Tags:         {', '.join(ws_config['tags'])}")
+            print("\n--- Description Preview ---")
+            
         # Mock the description replacement
         desc = ""
         if os.path.exists("workshop_description.txt"):
@@ -293,7 +307,10 @@ def main():
         preview_desc = re.sub(r"\[.*?\]", "", desc)
         print(preview_desc.strip())
         
-        print("\n[bold cyan]--- Changelog ---[/bold cyan]")
+        if HAS_RICH:
+            rprint("\n[bold cyan]--- Changelog ---[/bold cyan]")
+        else:
+            print("\n--- Changelog ---")
         print(changelog if changelog else "Initial release.")
         print("="*60)
 

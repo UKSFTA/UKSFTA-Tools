@@ -6,10 +6,15 @@ import subprocess
 import argparse
 import re
 from pathlib import Path
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich import box
+
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich import box
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
 
 # UKSFTA Workspace Manager
 # Centralized control for multi-project mod environments
@@ -35,9 +40,20 @@ def get_version(project_path):
     return "?.?.?"
 
 def cmd_dashboard(args):
-    console = Console()
     projects = get_projects()
     
+    if not HAS_RICH:
+        print(f"{'Project':<25} | {'Version':<8} | {'Sync':<5} | {'Build':<5} | {'Health':<10}")
+        print("-" * 65)
+        for p in projects:
+            version = get_version(p)
+            sync = "✔" if (p / "mods.lock").exists() else "!"
+            build = "✔" if (p / ".hemttout" / "release").exists() else "✖"
+            health = "Stable" if (p / "mods.lock").exists() else "Unsynced"
+            print(f"{p.name:<25} | {version:<8} | {sync:<5} | {build:<5} | {health:<10}")
+        return
+
+    console = Console()
     table = Table(title="UKSFTA Mod Workspace Dashboard", box=box.ROUNDED, header_style="bold cyan")
     table.add_column("Project", style="bold white")
     table.add_column("Version", justify="center")
@@ -154,19 +170,28 @@ def cmd_publish(args):
         print("No projects found with valid Workshop IDs.")
         return
 
-    print("\n[bold yellow]Target Projects for Workshop Upload:[/bold yellow]")
+    if HAS_RICH:
+        mode_label = "[bold red]PRODUCTION UPLOAD[/bold red]" if not args.dry_run else "[bold green]DRY-RUN SIMULATION[/bold green]"
+        print(f"\nTarget Projects for {mode_label}:")
+    else:
+        mode_label = "PRODUCTION UPLOAD" if not args.dry_run else "DRY-RUN SIMULATION"
+        print(f"\nTarget Projects for {mode_label}:")
+        
     for p, ws_id in publishable:
         print(f"  - {p.name} (ID: {ws_id})")
     
-    confirm = input("\nProceed with publishing ALL identified projects? [y/N]: ").lower()
-    if confirm != 'y':
-        print("Aborting.")
-        return
+    if not args.dry_run:
+        confirm = input("\nProceed with publishing ALL identified projects? [y/N]: ").lower()
+        if confirm != 'y':
+            print("Aborting.")
+            return
 
     for p, ws_id in publishable:
         print(f"\n>>> Publishing {p.name} to Workshop...")
-        # We use -n (none) to skip version bumping as we assume build is already finalized
-        subprocess.run([sys.executable, "tools/release.py", "-n", "-y"], cwd=p)
+        cmd = [sys.executable, "tools/release.py", "-n", "-y"]
+        if args.dry_run:
+            cmd.append("--dry-run")
+        subprocess.run(cmd, cwd=p)
 
 def cmd_validate(args):
     projects = get_projects()
@@ -213,7 +238,10 @@ def main():
     subparsers.add_parser("sync", help="Run mod manager sync on all projects")
     subparsers.add_parser("build", help="Run HEMTT build on all projects")
     subparsers.add_parser("release", help="Run UKSFTA release script (ZIP packaging) on all projects")
-    subparsers.add_parser("publish", help="Upload all projects with valid IDs to Steam Workshop")
+    
+    publish_parser = subparsers.add_parser("publish", help="Upload all projects with valid IDs to Steam Workshop")
+    publish_parser.add_argument("--dry-run", action="store_true", help="Simulate upload and validate without talking to Steam")
+    
     subparsers.add_parser("validate", help="Run all validators on all projects")
     subparsers.add_parser("audit-build", help="Run integrity check on built artifacts (.hemttout)")
     subparsers.add_parser("update", help="Push latest tools/setup to all projects")
