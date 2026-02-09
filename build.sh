@@ -31,9 +31,16 @@ if [ $STATUS -eq 0 ]; then
         echo "HEMTT: Manually packaging ZIP..."
         mkdir -p releases
         PREFIX=$(grep "prefix =" .hemtt/project.toml | head -n 1 | sed -E 's/prefix = "(.*)"/\1/' | xargs)
-        VERSION=$(grep "#define PATCHLVL" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\n\r ')
-        MAJOR=$(grep "#define MAJOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\n\r ')
-        MINOR=$(grep "#define MINOR" addons/main/script_version.hpp | awk '{print $3}' | tr -d '\n\r ')
+        # Dynamically find the first version file in any addon component
+        VERSION_FILE=$(find addons -name "script_version.hpp" | head -n 1)
+        if [ -z "$VERSION_FILE" ]; then
+            echo "ERROR: Could not find script_version.hpp in any addon folder."
+            exit 1
+        fi
+        
+        VERSION=$(grep "#define PATCHLVL" "$VERSION_FILE" | awk '{print $3}' | tr -d '\n\r ')
+        MAJOR=$(grep "#define MAJOR" "$VERSION_FILE" | awk '{print $3}' | tr -d '\n\r ')
+        MINOR=$(grep "#define MINOR" "$VERSION_FILE" | awk '{print $3}' | tr -d '\n\r ')
         
         MOD_FOLDER_NAME="@${PREFIX}"
         ZIP_NAME="uksf task force alpha - ${PREFIX,,}_${MAJOR}.${MINOR}.${VERSION}.zip"
