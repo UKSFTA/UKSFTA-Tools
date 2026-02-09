@@ -332,6 +332,8 @@ def main():
     subparsers.add_parser("audit-build", help="Run integrity check on built artifacts (.hemttout)")
     subparsers.add_parser("update", help="Push latest tools/setup to all projects")
     
+    subparsers.add_parser("gh-runs", help="Show status of recent GitHub Action runs across workspace")
+
     convert_parser = subparsers.add_parser("convert", help="Convert media to Arma-optimized formats (.ogg/.ogv)")
     convert_parser.add_argument("files", nargs="+", help="Files to convert")
 
@@ -361,10 +363,43 @@ def main():
         cmd_audit_build(args)
     elif args.command == "update":
         cmd_update(args)
+    elif args.command == "gh-runs":
+        cmd_gh_runs(args)
     elif args.command == "convert":
         cmd_convert(args)
     else:
         parser.print_help()
+
+def cmd_gh_runs(args):
+    projects = get_projects()
+    for p in projects:
+        print(f"\n[bold blue]=== GitHub Runs: {p.name} ===[/bold blue]")
+        try:
+            # Check if GH CLI is authenticated and repo has actions
+            result = subprocess.run(
+                ["gh", "run", "list", "--limit", "3"],
+                cwd=p,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                if not result.stdout.strip():
+                    print("  No runs found.")
+                else:
+                    # Colorize output for better readability in dashboard
+                    for line in result.stdout.splitlines():
+                        if "✓" in line:
+                            print(f"  [green]{line}[/green]")
+                        elif "X" in line or "fail" in line.lower():
+                            print(f"  [red]{line}[/red]")
+                        elif "*" in line:
+                            print(f"  [yellow]{line}[/yellow]")
+                        else:
+                            print(f"  {line}")
+            else:
+                print(f"  [dim]GH CLI Error or no workflows configured.[/dim]")
+        except Exception as e:
+            print(f"  Error: {e}")
 
 if __name__ == "__main__":
     main()
