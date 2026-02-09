@@ -140,11 +140,18 @@ def resolve_dependencies(initial_mods, ignored_ids=None):
 def run_steamcmd(mod_ids):
     if not mod_ids:
         return
-    cmd = ["steamcmd", "+login", "anonymous"]
+    
+    username = os.getenv("STEAM_USERNAME", "anonymous")
+    password = os.getenv("STEAM_PASSWORD")
+    
+    cmd = ["steamcmd", "+login", username]
+    if password:
+        cmd.append(password)
+        
     for mid in mod_ids:
         cmd.extend(["+workshop_download_item", STEAMAPP_ID, mid])
     cmd.append("+quit")
-    print(f"\n--- Updating {len(mod_ids)} mods via SteamCMD ---")
+    print(f"\n--- Updating {len(mod_ids)} mods via SteamCMD (as {username}) ---")
     subprocess.run(cmd, check=True)
 
 def get_workshop_cache_path():
