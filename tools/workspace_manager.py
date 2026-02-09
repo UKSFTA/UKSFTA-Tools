@@ -16,6 +16,7 @@ try:
     from rich.panel import Panel
     from rich.text import Text
     from rich.progress import Progress, SpinnerColumn, TextColumn
+    from rich.columns import Columns
 except ImportError:
     class Table:
         def __init__(self, **kwargs): self.rows = []
@@ -30,10 +31,9 @@ except ImportError:
     class box: ROUNDED = None
     class Panel:
         @staticmethod
-        def fit(text, title=None): return f"--- {title} ---\n{text}"
+        def fit(text, title=None, **kwargs): return f"--- {title} ---\n{text}"
 
 def get_projects():
-    """Find all HEMTT projects in the parent directory."""
     parent_dir = Path(__file__).parent.parent.parent
     projects = []
     for d in parent_dir.iterdir():
@@ -41,20 +41,31 @@ def get_projects():
             projects.append(d)
     return sorted(projects)
 
+def print_banner(console):
+    banner = Text.assemble(
+        ("\n ⚔️  ", "bold blue"),
+        ("UKSF TASKFORCE ALPHA ", "bold white"),
+        ("| ", "dim"),
+        ("PLATINUM DEVOPS SUITE", "bold cyan"),
+        ("\n ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", "dim blue")
+    )
+    console.print(banner)
+
 def cmd_dashboard(args):
     console = Console(force_terminal=True)
+    print_banner(console)
     projects = get_projects()
-    console.print(f"\n[bold green]UKSFTA Workspace Dashboard - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/bold green]")
     
-    table = Table(title=f"Total Projects: {len(projects)}", box=box.ROUNDED, header_style="bold magenta")
+    table = Table(title=f"Unit Workspace Overview ({len(projects)} Projects)", box=box.ROUNDED, header_style="bold magenta", border_style="blue")
+    table.add_column("ID", style="dim", justify="right")
     table.add_column("Project", style="cyan", no_wrap=True)
     table.add_column("Prefix", style="magenta")
-    table.add_column("Version", style="yellow")
-    table.add_column("Workshop ID", style="green")
+    table.add_column("Version", style="bold yellow")
+    table.add_column("Workshop", style="green")
     table.add_column("Tags", style="blue")
     table.add_column("Status", justify="center")
 
-    for p in projects:
+    for i, p in enumerate(projects):
         prefix = "Unknown"; version = "0.0.0"; ws_id = "None"; tags = []
         config_path = p / ".hemtt" / "project.toml"
         if config_path.exists():
@@ -71,23 +82,23 @@ def cmd_dashboard(args):
         v_path = next((path for path in v_paths if path.exists()), None)
         if v_path:
             with open(v_path, 'r') as f:
-                vc = f.read()
-                ma = re.search(r'#define MAJOR (.*)', vc); mi = re.search(r'#define MINOR (.*)', vc); pa = re.search(r'#define PATCHLVL (.*)', vc)
+                vc = f.read(); ma = re.search(r'#define MAJOR (.*)', vc); mi = re.search(r'#define MINOR (.*)', vc); pa = re.search(r'#define PATCHLVL (.*)', vc)
                 if ma and mi and pa: version = f"{ma.group(1).strip()}.{mi.group(1).strip()}.{pa.group(1).strip()}"
 
-        table.add_row(p.name, prefix, version, ws_id, ", ".join(tags) if tags else "None", "[bold green]ONLINE[/bold green]")
+        table.add_row(str(i+1), p.name, f"\\z\\{prefix}", version, ws_id, ", ".join(tags[:2]) + ("..." if len(tags)>2 else ""), "[bold green]ONLINE[/bold green]")
 
     console.print(table)
 
 def cmd_gh_runs(args):
     console = Console(force_terminal=True)
+    print_banner(console)
     projects = get_projects()
-    table = Table(title="Organization CI/CD Status", box=box.ROUNDED, header_style="bold blue")
+    table = Table(title="Global CI/CD Monitor", box=box.ROUNDED, header_style="bold blue", border_style="blue")
     table.add_column("Project", style="cyan", no_wrap=True)
     table.add_column("Workflow", style="magenta")
     table.add_column("Status", justify="center")
     table.add_column("Branch", style="dim")
-    table.add_column("Message", style="italic")
+    table.add_column("Last Message", style="italic")
     table.add_column("Age", justify="right")
 
     for p in projects:
@@ -95,29 +106,28 @@ def cmd_gh_runs(args):
             res = subprocess.run(["gh", "run", "list", "--limit", "1", "--json", "status,conclusion,workflowName,headBranch,displayTitle,createdAt"], cwd=p, capture_output=True, text=True)
             if res.returncode == 0:
                 runs = json.loads(res.stdout)
-                if not runs:
-                    table.add_row(p.name, "-", "[dim]No Runs[/dim]", "-", "-", "-")
-                    continue
+                if not runs: table.add_row(p.name, "-", "[dim]No Runs[/dim]", "-", "-", "-"); continue
                 run = runs[0]; status_icon = "⚪"; status_style = "white"
                 if run['status'] == "completed":
                     if run['conclusion'] == "success": status_icon = "✅ SUCCESS"; status_style = "bold green"
                     elif run['conclusion'] == "failure": status_icon = "❌ FAILED"; status_style = "bold red"
                     else: status_icon = f"❓ {run['conclusion'].upper()}"; status_style = "yellow"
-                else: status_icon = "⏳ IN PROGRESS"; status_style = "bold cyan"
+                else: status_icon = "⏳ RUNNING"; status_style = "bold cyan"
                 
                 created = datetime.fromisoformat(run['createdAt'].replace('Z', '+00:00'))
                 diff = datetime.now(created.tzinfo) - created
-                if diff.days > 0: age = f"{diff.days}d ago"
-                elif diff.seconds > 3600: age = f"{diff.seconds // 3600}h ago"
-                else: age = f"{diff.seconds // 60}m ago"
+                if diff.days > 0: age = f"{diff.days}d"
+                elif diff.seconds > 3600: age = f"{diff.seconds // 3600}h"
+                else: age = f"{diff.seconds // 60}m"
 
-                table.add_row(p.name, run['workflowName'], f"[{status_style}]{status_icon}[/{status_style}]", run['headBranch'], run['displayTitle'][:40], age)
-            else: table.add_row(p.name, "[red]Error[/red]", "Auth Fail", "-", "-", "-")
+                table.add_row(p.name, run['workflowName'], f"[{status_style}]{status_icon}[/{status_style}]", run['headBranch'], run['displayTitle'][:30], age)
+            else: table.add_row(p.name, "[red]Error[/red]", "Check Auth", "-", "-", "-")
         except Exception: table.add_row(p.name, "[red]Failed[/red]", "-", "-", "-", "-")
     console.print(table)
 
 def cmd_audit_deps(args):
-    console = Console(force_terminal=True); projects = get_projects(); defined_patches = set(); dependencies = {}
+    console = Console(force_terminal=True); print_banner(console)
+    projects = get_projects(); defined_patches = set(); dependencies = {}
     for p in projects:
         for config in p.glob("addons/*/config.cpp"):
             with open(config, 'r', errors='ignore') as f:
@@ -125,48 +135,64 @@ def cmd_audit_deps(args):
                 for m in re.finditer(r'class\s+CfgPatches\s*\{[^}]*class\s+([a-zA-Z0-9_]+)', content, re.MULTILINE | re.DOTALL): defined_patches.add(m.group(1))
                 rm = re.search(r'requiredAddons\[\]\s*=\s*\{([^}]*)\}', content, re.MULTILINE | re.DOTALL)
                 if rm: dependencies[config] = [r.strip().replace('"', '').replace("'", "") for r in rm.group(1).split(',') if r.strip()]
-    table = Table(title="Dependency Report", box=box.ROUNDED)
-    table.add_column("File", style="dim"); table.add_column("Status", justify="center"); table.add_column("Missing", style="red")
+    table = Table(title="Dependency Integrity Scan", box=box.ROUNDED, border_style="blue")
+    table.add_column("Config File", style="dim"); table.add_column("Health", justify="center"); table.add_column("Resolution Issues", style="bold red")
     errs = 0; exts = ["A3_", "cba_", "ace_", "task_force_radio", "acre_", "rhsusf_", "rhs_"]
     for cfg, reqs in dependencies.items():
         rel = cfg.relative_to(Path(__file__).parent.parent.parent)
         miss = [r for r in reqs if r not in defined_patches and not any(r.lower().startswith(x.lower()) for x in exts)]
-        if miss: table.add_row(str(rel), "[red]❌[/red]", ", ".join(miss)); errs += 1
-        else: table.add_row(str(rel), "[green]✅[/green]", "")
+        if miss: table.add_row(str(rel), "❌ [bold red]FAIL[/bold red]", ", ".join(miss)); errs += 1
+        else: table.add_row(str(rel), "✅ [bold green]PASS[/bold green]", "[dim]Healthy[/dim]")
     console.print(table)
 
 def cmd_audit_assets(args):
-    console = Console(force_terminal=True); projects = get_projects(); auditor = Path(__file__).parent / "asset_auditor.py"
-    table = Table(title="Orphaned Assets", box=box.ROUNDED)
-    table.add_column("Project", style="cyan"); table.add_column("Bloat Count", justify="right")
+    console = Console(force_terminal=True); print_banner(console)
+    projects = get_projects(); auditor = Path(__file__).parent / "asset_auditor.py"
+    table = Table(title="Resource Bloat Audit", box=box.ROUNDED, border_style="blue")
+    table.add_column("Project", style="cyan"); table.add_column("Status", justify="center"); table.add_column("Unused Assets", justify="right", style="bold yellow")
     for p in projects:
         res = subprocess.run([sys.executable, str(auditor), str(p)], capture_output=True, text=True)
         count = re.search(r'Found (\d+)', res.stdout).group(1) if "Found" in res.stdout else "0"
-        table.add_row(p.name, count)
+        status = "[bold yellow]⚠️ BLOATED[/bold yellow]" if int(count) > 0 else "[bold green]✅ LEAN[/bold green]"
+        table.add_row(p.name, status, count)
     console.print(table)
 
 def cmd_audit_strings(args):
-    console = Console(force_terminal=True); auditor = Path(__file__).parent / "string_auditor.py"
-    table = Table(title="Localization Audit", box=box.ROUNDED)
-    table.add_column("Project"); table.add_column("Status")
+    console = Console(force_terminal=True); print_banner(console)
+    auditor = Path(__file__).parent / "string_auditor.py"
+    table = Table(title="Localization Sync Audit", box=box.ROUNDED, border_style="blue")
+    table.add_column("Project", style="cyan"); table.add_column("Sync State", justify="center")
     for p in get_projects():
         res = subprocess.run([sys.executable, str(auditor), str(p)], capture_output=True, text=True)
-        table.add_row(p.name, "[red]❌ ERR[/red]" if "MISSING" in res.stdout else "[green]✅ OK[/green]")
+        table.add_row(p.name, "[bold red]❌ DESYNCED[/bold red]" if "MISSING" in res.stdout else "[bold green]✅ MATCHED[/bold green]")
     console.print(table)
 
 def cmd_status(args):
-    for p in get_projects(): print(f"\n>>> {p.name}"); subprocess.run(["git", "status", "-s"], cwd=p)
+    console = Console(force_terminal=True); print_banner(console)
+    for p in get_projects():
+        console.print(Panel(f"[dim]Project Root: {p}[/dim]", title=f"📦 {p.name}", border_style="cyan"))
+        subprocess.run(["git", "status", "-s"], cwd=p)
 
 def cmd_sync(args):
-    for p in get_projects(): print(f"\n>>> Syncing {p.name}"); subprocess.run([sys.executable, "tools/manage_mods.py", "sync"], cwd=p)
+    console = Console(force_terminal=True); print_banner(console)
+    for p in get_projects():
+        console.print(f"🔄 [bold cyan]Syncing Dependencies:[/bold cyan] {p.name}")
+        subprocess.run([sys.executable, "tools/manage_mods.py", "sync"], cwd=p)
 
 def cmd_build(args):
-    for p in get_projects(): print(f"\n>>> Building {p.name}"); subprocess.run(["bash", "build.sh", "build"], cwd=p)
+    console = Console(force_terminal=True); print_banner(console)
+    for p in get_projects():
+        console.print(f"🏗️ [bold yellow]Building:[/bold yellow] {p.name}")
+        subprocess.run(["bash", "build.sh", "build"], cwd=p)
 
 def cmd_release(args):
-    for p in get_projects(): print(f"\n>>> Release: {p.name}"); subprocess.run(["bash", "build.sh", "release"], cwd=p)
+    console = Console(force_terminal=True); print_banner(console)
+    for p in get_projects():
+        console.print(f"🚀 [bold green]Packaging Release:[/bold green] {p.name}")
+        subprocess.run(["bash", "build.sh", "release"], cwd=p)
 
 def cmd_publish(args):
+    console = Console(force_terminal=True); print_banner(console)
     projects = get_projects(); publishable = []
     for p in projects:
         cp = p / ".hemtt" / "project.toml"
@@ -175,33 +201,43 @@ def cmd_publish(args):
                 c = f.read(); wm = re.search(r'workshop_id = "(.*)"', c)
                 if wm and wm.group(1).isdigit(): publishable.append((p, wm.group(1)))
     for p, ws_id in publishable:
+        console.print(f"📤 [bold green]Publishing to Steam:[/bold green] {p.name} ({ws_id})")
         cmd = [sys.executable, "tools/release.py", "-n", "-y"]
         if args.dry_run: cmd.append("--dry-run")
         subprocess.run(cmd, cwd=p)
 
 def cmd_generate_docs(args):
+    console = Console(force_terminal=True); print_banner(console)
     gen = Path(__file__).parent / "doc_generator.py"; p = Path(__file__).parent.parent.parent / "UKSFTA-Scripts"
-    if p.exists(): subprocess.run([sys.executable, str(gen), str(p)])
+    if p.exists():
+        console.print(f"📖 [bold blue]Generating Documentation:[/bold blue] {p.name}")
+        subprocess.run([sys.executable, str(gen), str(p)])
 
 def cmd_convert(args):
+    console = Console(force_terminal=True); print_banner(console)
     from media_converter import convert_audio, convert_video, convert_image, check_ffmpeg, check_armake
     for f in args.files:
         ext = os.path.splitext(f)[1].lower()
+        console.print(f"⚡ [bold cyan]Processing:[/bold cyan] {os.path.basename(f)}")
         if ext in [".wav", ".mp3", ".m4a", ".flac"] and check_ffmpeg(): convert_audio(f)
         elif ext in [".mp4", ".mkv", ".mov", ".avi"] and check_ffmpeg(): convert_video(f)
         elif ext in [".png", ".jpg", ".jpeg"] and check_armake(): convert_image(f)
 
 def cmd_update(args):
+    console = Console(force_terminal=True); print_banner(console)
     setup = Path(__file__).parent.parent / "setup.py"
-    for p in get_projects(): subprocess.run([sys.executable, str(setup.resolve())], cwd=p)
+    for p in get_projects():
+        console.print(f"⏫ [bold green]Updating Tools:[/bold green] {p.name}")
+        subprocess.run([sys.executable, str(setup.resolve())], cwd=p)
 
 def cmd_workshop_tags(args):
+    console = Console(force_terminal=True); print_banner(console)
     tags = Path(__file__).parent / "workshop_tags.txt"
-    if tags.exists(): print(tags.read_text())
+    if tags.exists(): console.print(Panel(tags.read_text(), title="Valid Workshop Tags", border_style="blue"))
 
 def main():
-    parser = argparse.ArgumentParser(description="UKSFTA Manager")
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    parser = argparse.ArgumentParser(description="UKSFTA Diamond Workspace Manager")
+    subparsers = parser.add_subparsers(dest="command", help="Management Commands")
     for cmd in ["dashboard", "status", "sync", "build", "release", "test", "clean", "cache", "validate", "audit-deps", "audit-assets", "audit-strings", "generate-docs", "update", "workshop-tags", "gh-runs"]:
         subparsers.add_parser(cmd)
     p_pub = subparsers.add_parser("publish"); p_pub.add_argument("--dry-run", action="store_true")
