@@ -72,11 +72,12 @@ def cmd_help(console):
     audit_table.add_row("[bold cyan]audit-mission [/]", "[dim]Verify a Mission PBO against workspace and externals[/]")
     audit_table.add_row("[bold cyan]gh-runs       [/]", "[dim]Real-time monitoring of GitHub Actions runners[/]")
     util_table = Table(title="🛠️  Utilities & Tools", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold cyan")
-    util_table.add_row("[bold cyan]convert      [/]", "[dim]Optimize media for Arma (WAV/PNG -> OGG/PAA)[/]")
-    util_table.add_row("[bold cyan]generate-docs[/]", "[dim]Auto-generate API Manual from SQF headers[/]")
-    util_table.add_row("[bold cyan]workshop-tags[/]", "[dim]List all valid Arma 3 Steam Workshop tags[/]")
-    util_table.add_row("[bold cyan]update       [/]", "[dim]Push latest UKSFTA-Tools to all projects[/]")
-    util_table.add_row("[bold cyan]cache        [/]", "[dim]Show disk space usage of build artifacts[/]")
+    util_table.add_row("[bold cyan]convert          [/]", "[dim]Optimize media for Arma (WAV/PNG -> OGG/PAA)[/]")
+    util_table.add_row("[bold cyan]generate-docs    [/]", "[dim]Auto-generate API Manual from SQF headers[/]")
+    util_table.add_row("[bold cyan]generate-manifest[/]", "[dim]Create unit-wide manifest of all mods and PBOs[/]")
+    util_table.add_row("[bold cyan]workshop-tags    [/]", "[dim]List all valid Arma 3 Steam Workshop tags[/]")
+    util_table.add_row("[bold cyan]update           [/]", "[dim]Push latest UKSFTA-Tools to all projects[/]")
+    util_table.add_row("[bold cyan]cache            [/]", "[dim]Show disk space usage of build artifacts[/]")
     console.print(dev_table); console.print(audit_table); console.print(util_table)
     console.print("\n[dim]Usage: ./tools/workspace_manager.py <command> [args][/]\n")
 
@@ -167,7 +168,7 @@ def cmd_audit_mission(args):
     console.print(table)
 
 def cmd_audit_assets(args):
-    console = Console(force_terminal=True); print_banner(console); projects = get_projects(); auditor = Path(__file__).parent / "asset_auditor.py"
+    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "asset_auditor.py"
     table = Table(title="Resource Audit", box=box.ROUNDED, border_style="blue")
     table.add_column("Project", style="cyan"); table.add_column("Status", justify="center"); table.add_column("Unused", justify="right", style="bold yellow")
     for p in get_projects():
@@ -183,7 +184,7 @@ def cmd_audit_strings(args):
     table.add_column("Project", style="cyan"); table.add_column("Sync State", justify="center")
     for p in get_projects():
         res = subprocess.run([sys.executable, str(auditor), str(p)], capture_output=True, text=True)
-        table.add_row(p.name, "[bold red]❌ DESYNCED[/bold red]" if "MISSING" in res.stdout else "[bold green]✅ MATCH[/bold green]")
+        table.add_row(p.name, "[bold red]❌ DESYNC[/bold red]" if "MISSING" in res.stdout else "[bold green]✅ MATCH[/bold green]")
     console.print(table)
 
 def cmd_audit_security(args):
@@ -201,7 +202,7 @@ def cmd_status(args):
 
 def cmd_sync(args):
     console = Console(force_terminal=True); print_banner(console)
-    for p in get_projects(): console.print(f"🔄 [bold cyan]Syncing:[/bold cyan] {p.name}"); subprocess.run([sys.executable, "tools/manage_mods.py", "sync"], cwd=p)
+    for p in get_projects(): console.print(f"🔄 [bold cyan]Syncing Dependencies:[/bold cyan] {p.name}"); subprocess.run([sys.executable, "tools/manage_mods.py", "sync"], cwd=p)
 
 def cmd_build(args):
     console = Console(force_terminal=True); print_banner(console)
@@ -227,14 +228,19 @@ def cmd_publish(args):
                 if wm and wm.group(1).isdigit(): publishable.append((p, wm.group(1)))
     for p, ws_id in publishable:
         console.print(f"📤 [bold green]Publishing to Steam:[/bold green] {p.name} ({ws_id})")
-        cmd = [sys.executable, "tools/release.py", "-n", "-y"]
-        if args.dry_run: cmd.append("--dry-run")
+        cmd = [sys.executable, "tools/release.py", "-n", "-y"]; cmd.append("--dry-run") if args.dry_run else None
         subprocess.run(cmd, cwd=p)
 
 def cmd_generate_docs(args):
     console = Console(force_terminal=True); print_banner(console); gen = Path(__file__).parent / "doc_generator.py"
     p = Path(__file__).parent.parent.parent / "UKSFTA-Scripts"
     if p.exists(): console.print(f"📖 [bold blue]Documenting:[/bold blue] {p.name}"); subprocess.run([sys.executable, str(gen), str(p)])
+
+def cmd_generate_manifest(args):
+    console = Console(force_terminal=True); print_banner(console)
+    from manifest_generator import generate_total_manifest
+    output_path = generate_total_manifest(Path(__file__).parent.parent)
+    console.print(f"\n[bold green]Success![/bold green] Total manifest saved to: [cyan]{output_path}[/cyan]")
 
 def cmd_convert(args):
     console = Console(force_terminal=True); print_banner(console); from media_converter import convert_audio, convert_video, convert_image, check_ffmpeg, check_armake
@@ -255,24 +261,19 @@ def cmd_workshop_tags(args):
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Manager", add_help=False)
     subparsers = parser.add_subparsers(dest="command")
-    
-    # Simple commands
-    simple_cmds = ["dashboard", "status", "sync", "pull-mods", "build", "release", "test", "clean", "cache", "validate", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "update", "workshop-tags", "gh-runs", "help"]
+    simple_cmds = ["dashboard", "status", "sync", "pull-mods", "build", "release", "test", "clean", "cache", "validate", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "generate-manifest", "update", "workshop-tags", "gh-runs", "help"]
     for cmd in simple_cmds: subparsers.add_parser(cmd)
-        
-    # Complex commands
     p_pub = subparsers.add_parser("publish"); p_pub.add_argument("--dry-run", action="store_true")
     p_conv = subparsers.add_parser("convert"); p_conv.add_argument("files", nargs="+")
     p_miss = subparsers.add_parser("audit-mission"); p_miss.add_argument("pbo", help="Path to mission PBO")
-
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
         "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
         "test": lambda a: subprocess.run(["pytest"]), "clean": lambda a: [subprocess.run(["rm", "-rf", ".hemttout"], cwd=p) for p in get_projects()],
         "cache": lambda a: [subprocess.run(["du", "-sh", ".hemttout"], cwd=p) for p in get_projects() if (p/".hemttout").exists()],
         "publish": cmd_publish, "audit-deps": cmd_audit_deps, "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings,
-        "audit-security": cmd_audit_security, "audit-mission": cmd_audit_mission, "generate-docs": cmd_generate_docs, "update": cmd_update, 
-        "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "convert": cmd_convert, "help": lambda a: cmd_help(console)
+        "audit-security": cmd_audit_security, "audit-mission": cmd_audit_mission, "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest,
+        "update": cmd_update, "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "convert": cmd_convert, "help": lambda a: cmd_help(console)
     }
     if args.command in cmds: cmds[args.command](args)
     else: cmd_help(console)
