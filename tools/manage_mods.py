@@ -141,32 +141,35 @@ def run_steamcmd(mod_ids):
     if not mod_ids:
         return
     
-    username = os.getenv("STEAM_USERNAME")
-    password = os.getenv("STEAM_PASSWORD")
-    
-    if not username:
-        print("\n[!] Steam credentials not found in environment.")
-        choice = input("Attempt anonymous download? [y/N]: ").lower()
-        if choice != 'y':
-            username = input("Steam Username: ").strip()
-            password = input("Steam Password: ").strip()
-        else:
-            username = "anonymous"
-    
-    cmd = ["steamcmd", "+login", username]
-    if password:
-        cmd.append(password)
-        
+    # 1. Attempt Anonymous Download
+    print(f"\n--- Updating {len(mod_ids)} mods via SteamCMD (as anonymous) ---")
+    cmd = ["steamcmd", "+login", "anonymous"]
     for mid in mod_ids:
         cmd.extend(["+workshop_download_item", STEAMAPP_ID, mid])
     cmd.append("+quit")
     
-    print(f"\n--- Updating {len(mod_ids)} mods via SteamCMD (as {username}) ---")
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError:
-        print("❌ SteamCMD failed. If using anonymous, try with unit credentials.")
-        sys.exit(1)
+    # We capture output to detect specific download failures that don't trigger non-zero exit codes
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    print(result.stdout)
+    
+    if "failed" in result.stdout or "Error" in result.stdout or result.returncode != 0:
+        # 2. Try with .env credentials if anonymous failed
+        username = os.getenv("STEAM_USERNAME")
+        password = os.getenv("STEAM_PASSWORD")
+        
+        if username and password:
+            print(f"\n[!] Anonymous download failed. Retrying with unit credentials ({username})...")
+            cmd_auth = ["steamcmd", "+login", username, password]
+            for mid in mod_ids:
+                cmd_auth.extend(["+workshop_download_item", STEAMAPP_ID, mid])
+            cmd_auth.append("+quit")
+            subprocess.run(cmd_auth, check=True)
+        else:
+            print("\n❌ Error: Anonymous download failed and no unit credentials found in .env.")
+            print("Please add STEAM_USERNAME and STEAM_PASSWORD to your .env file.")
+            sys.exit(1)
+    else:
+        print("✅ Anonymous download successful.")
 
 def get_workshop_cache_path():
     home = os.path.expanduser("~")
