@@ -25,3 +25,6 @@ workshop_tags = ["Mod", "Addon"]
 
 [hemtt.signing]
 authority = "UKSFTA"
+
+[hemtt.include]
+"include" = ""

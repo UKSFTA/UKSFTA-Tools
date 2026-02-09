@@ -16,6 +16,7 @@ def setup_project():
     dirs = [
         "tools",
         "releases",
+        "include",
         ".hemtt/scripts",
         ".hemtt/hooks/pre_build",
         ".hemtt/hooks/post_build",
