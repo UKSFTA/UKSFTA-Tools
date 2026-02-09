@@ -8,11 +8,26 @@ import urllib.request
 import html
 
 # Configuration
+PROJECT_ROOT = os.getcwd()
 MOD_SOURCES_FILE = "mod_sources.txt"
 LOCK_FILE = "mods.lock"
 ADDONS_DIR = "addons"
 KEYS_DIR = "keys"
 STEAMAPP_ID = "107410"  # Arma 3
+
+def load_env():
+    env_path = os.path.join(PROJECT_ROOT, ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    parts = line.split("=", 1)
+                    if len(parts) == 2:
+                        key, value = parts
+                        os.environ[key.strip()] = value.strip()
 
 def get_mod_ids_from_file():
     mods = {}
@@ -336,6 +351,7 @@ def sync_hemtt_launch(mod_ids):
         f.writelines(new_lines)
 
 if __name__ == "__main__":
+    load_env()
     if len(sys.argv) > 1 and sys.argv[1] == "identify":
         identify_existing_pbos()
         sys.exit(0)
