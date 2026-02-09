@@ -1,305 +1,42 @@
 #!/usr/bin/env python3
-
-import os
-import sys
-import subprocess
 import argparse
+import os
+import subprocess
 import re
+import sys
 from pathlib import Path
+from datetime import datetime
 
+# Soft-import rich for CI environments
 try:
     from rich.console import Console
     from rich.table import Table
-    from rich.panel import Panel
     from rich import box
-    HAS_RICH = True
+    from rich.panel import Panel
 except ImportError:
-    HAS_RICH = False
+    # Minimal polyfill for environment without rich
+    class Table:
+        def __init__(self, **kwargs): self.rows = []
+        def add_column(self, *args, **kwargs): pass
+        def add_row(self, *args): self.rows.append(args)
+    class Console:
+        def print(self, obj):
+            if hasattr(obj, 'rows'):
+                for r in obj.rows: print(" | ".join(map(str, r)))
+            else: print(obj)
+    class box: ROUNDED = None
+    class Panel:
+        @staticmethod
+        def fit(text, title=None): return f"--- {title} ---\n{text}"
 
-# UKSFTA Workspace Manager
-# Centralized control for multi-project mod environments
-
-def get_projects(root_dir=".."):
+def get_projects():
+    """Find all HEMTT projects in the parent directory."""
+    parent_dir = Path(__file__).parent.parent.parent
     projects = []
-    root = Path(root_dir).resolve()
-    for item in root.iterdir():
-        if item.is_dir() and item.name.startswith("UKSFTA-") and item.name not in ["UKSFTA-Tools"]:
-            if (item / ".hemtt" / "project.toml").exists():
-                projects.append(item)
+    for d in parent_dir.iterdir():
+        if d.is_dir() and (d / ".hemtt" / "project.toml").exists():
+            projects.append(d)
     return sorted(projects)
-
-def get_version(project_path):
-    version_file = project_path / "addons" / "main" / "script_version.hpp"
-    if not version_file.exists(): return "?.?.?"
-    content = version_file.read_text()
-    major = re.search(r"#define\s+MAJOR\s+(\d+)", content)
-    minor = re.search(r"#define\s+MINOR\s+(\d+)", content)
-    patch = re.search(r"#define\s+PATCHLVL\s+(\d+)", content)
-    if major and minor and patch:
-        return f"{major.group(1)}.{minor.group(1)}.{patch.group(1)}"
-    return "?.?.?"
-
-def cmd_dashboard(args):
-    projects = get_projects()
-    
-    if not HAS_RICH:
-        print(f"{'Project':<25} | {'Version':<8} | {'Sync':<5} | {'Build':<5} | {'Health':<10}")
-        print("-" * 65)
-        for p in projects:
-            version = get_version(p)
-            sync = "✔" if (p / "mods.lock").exists() else "!"
-            build = "✔" if (p / ".hemttout" / "release").exists() else "✖"
-            health = "Stable" if (p / "mods.lock").exists() else "Unsynced"
-            print(f"{p.name:<25} | {version:<8} | {sync:<5} | {build:<5} | {health:<10}")
-        return
-
-    console = Console()
-    table = Table(title="UKSFTA Mod Workspace Dashboard", box=box.ROUNDED, header_style="bold cyan")
-    table.add_column("Project", style="bold white")
-    table.add_column("Version", justify="center")
-    table.add_column("Workshop ID", justify="center", style="dim")
-    table.add_column("Sync", justify="center")
-    table.add_column("Build", justify="center")
-    table.add_column("Health", justify="center")
-
-    for p in projects:
-        # Version
-        version = get_version(p)
-        
-        # Workshop ID
-        ws_id = "None"
-        toml = p / ".hemtt" / "project.toml"
-        if toml.exists():
-            match = re.search(r'workshop_id = "(.*?)"', toml.read_text())
-            if match: ws_id = match.group(1)
-        
-        # Sync Status
-        sync_icon = "[green]✔[/green]" if (p / "mods.lock").exists() else "[yellow]![/yellow]"
-        
-        # Build Status
-        build_icon = "[red]✖[/red]"
-        release_dir = p / ".hemttout" / "release"
-        if release_dir.exists():
-            build_icon = "[green]✔[/green]"
-            
-        # Overall Health (Quick check)
-        health = "[green]Stable[/green]"
-        if ws_id == "0" or ws_id == "None":
-            health = "[yellow]No ID[/yellow]"
-        if not (p / "mods.lock").exists():
-            health = "[red]Unsynced[/red]"
-
-        table.add_row(
-            p.name,
-            version,
-            ws_id,
-            sync_icon,
-            build_icon,
-            health
-        )
-
-    console.print(Panel(table, expand=False, border_style="blue"))
-
-def run_in_project(project_path, cmd):
-    print(f"\n>>> Project: {project_path.name}")
-    try:
-        result = subprocess.run(cmd, cwd=project_path, check=True, text=True, capture_output=True)
-        print(result.stdout)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"Error in {project_path.name}:")
-        print(e.stdout)
-        print(e.stderr)
-        return False
-
-def cmd_status(args):
-    projects = get_projects()
-    print(f"{'Project':<25} | {'HEMTT':<6} | {'Sync':<10} | {'Artifacts (K/S)':<15}")
-    print("-" * 65)
-    for p in projects:
-        has_hemtt = "Yes" if (p / ".hemtt" / "project.toml").exists() else "No"
-        sync_state = "Synced" if (p / "mods.lock").exists() else "Pending"
-        
-        keys = len(list((p / "keys").glob("*.bikey"))) if (p / "keys").exists() else 0
-        signs = len(list((p / "addons").glob("*.bisign"))) if (p / "addons").exists() else 0
-        
-        print(f"{p.name:<25} | {has_hemtt:<6} | {sync_state:<10} | {keys}/{signs}")
-
-def cmd_sync(args):
-    projects = get_projects()
-    for p in projects:
-        if (p / "tools" / "manage_mods.py").exists():
-            print(f"--- Syncing {p.name} ---")
-            run_in_project(p, [sys.executable, "tools/manage_mods.py"])
-        else:
-            print(f"Skipping {p.name}: No Mod Manager found.")
-
-def cmd_build(args):
-    projects = get_projects()
-    for p in projects:
-        if (p / "build.sh").exists():
-            print(f"--- Building {p.name} ---")
-            run_in_project(p, ["bash", "build.sh", "build"])
-        else:
-            print(f"Skipping {p.name}: No build.sh found.")
-
-def cmd_release(args):
-    projects = get_projects()
-    for p in projects:
-        if (p / "release.sh").exists():
-            print(f"--- Packaging Release: {p.name} ---")
-            run_in_project(p, ["bash", "release.sh"])
-        else:
-            print(f"Skipping {p.name}: No release.sh found.")
-
-def cmd_test(args):
-    console = Console() if HAS_RICH else None
-    projects = get_projects()
-    tools_dir = Path(__file__).parent.resolve()
-    
-    # 1. Run Python Unit Tests for Tools
-    print("\n[bold cyan]Step 1: Running Python Tool Tests (pytest)[/bold cyan]" if HAS_RICH else "\nStep 1: Running Python Tool Tests (pytest)")
-    subprocess.run(["pytest", str(tools_dir / "tests")], cwd=tools_dir.parent)
-
-    # 2. Run Workspace-wide Checks
-    for p in projects:
-        print(f"\n[bold blue]=== Testing Project: {p.name} ===[/bold blue]" if HAS_RICH else f"\n=== Testing Project: {p.name} ===")
-        
-        # A. HEMTT Check
-        print("  - Running HEMTT Check...")
-        subprocess.run(["hemtt", "check"], cwd=p)
-
-        # B. SQFLint
-        print("  - Running SQFLint...")
-        addons_dir = p / "addons"
-        if addons_dir.exists():
-            # sqflint -d <dir> is the correct way to lint a directory
-            subprocess.run(["sqflint", "-d", str(addons_dir.resolve())], cwd=p)
-        else:
-            print("    (No addons directory found)")
-
-        # C. UKSFTA Custom Validators
-        print("  - Running UKSFTA Validators...")
-        validators = ["config_style_checker.py", "stringtable_validator.py", "return_checker.py"]
-        for val in validators:
-            val_path = tools_dir / val
-            if val_path.exists():
-                subprocess.run([sys.executable, str(val_path)], cwd=p)
-
-def cmd_clean(args):
-    projects = get_projects()
-    for p in projects:
-        out_dir = p / ".hemttout"
-        if out_dir.exists():
-            print(f"Cleaning {p.name}...")
-            shutil.rmtree(out_dir)
-        else:
-            print(f"Skipping {p.name}: No .hemttout found.")
-
-def cmd_cache(args):
-    projects = get_projects()
-    total_bytes = 0
-    print(f"{'Project':<25} | {'Cache Size':<15}")
-    print("-" * 45)
-    for p in projects:
-        out_dir = p / ".hemttout"
-        size = 0
-        if out_dir.exists():
-            for f in out_dir.rglob("*"):
-                if f.is_file():
-                    size += f.stat().st_size
-        
-        total_bytes += size
-        size_mb = size / (1024 * 1024)
-        print(f"{p.name:<25} | {size_mb:>10.2f} MB")
-    
-    total_gb = total_bytes / (1024 * 1024 * 1024)
-    print("-" * 45)
-    print(f"{'TOTAL':<25} | {total_gb:>10.2f} GB")
-
-def cmd_publish(args):
-    projects = get_projects()
-    publishable = []
-    
-    for p in projects:
-        ws_id = "None"
-        toml = p / ".hemtt" / "project.toml"
-        if toml.exists():
-            match = re.search(r'workshop_id = "(.*?)"', toml.read_text())
-            if match: ws_id = match.group(1)
-        
-        if ws_id not in ["0", "None", "INSERT_ID_HERE", ""]:
-            publishable.append((p, ws_id))
-    
-    if not publishable:
-        print("No projects found with valid Workshop IDs.")
-        return
-
-    if HAS_RICH:
-        mode_label = "[bold red]PRODUCTION UPLOAD[/bold red]" if not args.dry_run else "[bold green]DRY-RUN SIMULATION[/bold green]"
-        print(f"\nTarget Projects for {mode_label}:")
-    else:
-        mode_label = "PRODUCTION UPLOAD" if not args.dry_run else "DRY-RUN SIMULATION"
-        print(f"\nTarget Projects for {mode_label}:")
-        
-    for p, ws_id in publishable:
-        print(f"  - {p.name} (ID: {ws_id})")
-    
-    if not args.dry_run:
-        confirm = input("\nProceed with publishing ALL identified projects? [y/N]: ").lower()
-        if confirm != 'y':
-            print("Aborting.")
-            return
-
-    for p, ws_id in publishable:
-        print(f"\n>>> Publishing {p.name} to Workshop...")
-        cmd = [sys.executable, "tools/release.py", "-n", "-y"]
-        if args.dry_run:
-            cmd.append("--dry-run")
-        subprocess.run(cmd, cwd=p)
-
-def cmd_validate(args):
-    projects = get_projects()
-    tools_dir = Path(__file__).parent.resolve()
-    validators = [
-        "config_style_checker.py",
-        "sqf_validator.py",
-        "stringtable_validator.py",
-        "return_checker.py",
-        "search_unused_privates.py"
-    ]
-    
-    for p in projects:
-        print(f"\n=== Validating {p.name} ===")
-        for val in validators:
-            val_path = tools_dir / val
-            if val_path.exists():
-                subprocess.run([sys.executable, str(val_path)], cwd=p)
-
-def cmd_audit_build(args):
-    projects = get_projects()
-    checker = Path(__file__).parent / "mod_integrity_checker.py"
-    for p in projects:
-        build_path = p / ".hemttout" / "release"
-        if build_path.exists():
-            cmd = [sys.executable, str(checker.resolve()), str(build_path.resolve()), "--unsigned"]
-            subprocess.run(cmd)
-        else:
-            print(f"\n>>> Skipping {p.name}: No built artifacts found in .hemttout/release")
-
-def cmd_update(args):
-    projects = get_projects()
-    setup_script = Path(__file__).parent.parent / "setup.py"
-    for p in projects:
-        print(f"Updating tools in {p.name}...")
-        subprocess.run([sys.executable, str(setup_script.resolve())], cwd=p)
-
-def cmd_workshop_tags(args):
-    tags_file = Path(__file__).parent / "workshop_tags.txt"
-    if tags_file.exists():
-        print(tags_file.read_text())
-    else:
-        print("Workshop tags reference file not found.")
 
 def cmd_dashboard(args):
     projects = get_projects()
@@ -335,11 +72,18 @@ def cmd_dashboard(args):
                     tags = [t.strip().replace('"', '').replace("'", "") for t in tags_match.group(1).split(',')]
 
         # Get version from script_version.hpp if possible
-        v_path = p / "addons" / "main" / "script_version.hpp"
-        if not v_path.exists(): # Try component-specific paths
-            v_path = next(p.glob("addons/*/script_version.hpp"), v_path)
+        v_paths = [
+            p / "addons" / "main" / "script_version.hpp",
+            p / "addons" / "core" / "script_version.hpp",
+            p / "addons" / "maps" / "script_version.hpp",
+            p / "addons" / "zeus" / "script_version.hpp",
+            p / "addons" / "tmp" / "script_version.hpp",
+            p / "addons" / "temp" / "script_version.hpp",
+        ]
+        
+        v_path = next((path for path in v_paths if path.exists()), None)
             
-        if v_path.exists():
+        if v_path:
             with open(v_path, 'r') as f:
                 v_content = f.read()
                 major = re.search(r'#define MAJOR (.*)', v_content)
@@ -354,18 +98,236 @@ def cmd_dashboard(args):
             version,
             ws_id,
             ", ".join(tags) if tags else "None",
-            "[green]SYNCED[/green]" # Placeholder for now
+            "[green]SYNCED[/green]" 
         )
 
     console = Console()
     table.title = f"Total Projects: {len(projects)}"
     console.print(table)
 
-def cmd_convert(args):
-    from media_converter import convert_audio, convert_video, check_ffmpeg
-    if not check_ffmpeg():
-        print("❌ Error: ffmpeg not found. Please install it (sudo pacman -S ffmpeg)")
+def cmd_status(args):
+    projects = get_projects()
+    for p in projects:
+        print(f"\n>>> Project: {p.name}")
+        subprocess.run(["git", "status", "-s"], cwd=p)
+
+def cmd_sync(args):
+    projects = get_projects()
+    for p in projects:
+        print(f"\n>>> Syncing {p.name}...")
+        subprocess.run([sys.executable, "tools/manage_mods.py", "sync"], cwd=p)
+
+def cmd_build(args):
+    projects = get_projects()
+    for p in projects:
+        print(f"\n>>> Building {p.name}...")
+        subprocess.run(["bash", "build.sh", "build"], cwd=p)
+
+def cmd_release(args):
+    projects = get_projects()
+    for p in projects:
+        print(f"\n>>> Packaging Release: {p.name}...")
+        subprocess.run(["bash", "build.sh", "release"], cwd=p)
+
+def cmd_test(args):
+    # 1. Run Python tool tests
+    print("[bold cyan]Step 1: Running Python Tool Tests (pytest)[/bold cyan]")
+    subprocess.run(["pytest"])
+
+    # 2. Run Workspace-wide HEMTT and custom checks
+    projects = get_projects()
+    for p in projects:
+        print(f"\n[bold blue]=== Testing Project: {p.name} ===[/bold blue]")
+        
+        print("  - Running HEMTT Check...")
+        subprocess.run(["hemtt", "check"], cwd=p)
+        
+        print("  - Running SQFLint...")
+        subprocess.run(["sqflint", "addons"], cwd=p)
+
+        print("  - Running UKSFTA Validators...")
+        cmd_validate_project(p)
+
+def cmd_validate_project(p):
+    tools_dir = Path(__file__).parent.resolve()
+    validators = [
+        "config_style_checker.py",
+        "sqf_validator.py",
+        "stringtable_validator.py",
+        "return_checker.py",
+        "search_unused_privates.py"
+    ]
+    for val in validators:
+        val_path = tools_dir / val
+        if val_path.exists():
+            subprocess.run([sys.executable, str(val_path)], cwd=p)
+
+def cmd_clean(args):
+    projects = get_projects()
+    for p in projects:
+        out_dir = p / ".hemttout"
+        if out_dir.exists():
+            print(f"Cleaning {p.name}...")
+            subprocess.run(["rm", "-rf", str(out_dir)])
+
+def cmd_cache(args):
+    projects = get_projects()
+    for p in projects:
+        out_dir = p / ".hemttout"
+        if out_dir.exists():
+            size = subprocess.check_output(["du", "-sh", str(out_dir)]).split()[0].decode('utf-8')
+            print(f"  {p.name}: {size}")
+
+def cmd_publish(args):
+    projects = get_projects()
+    publishable = []
+    
+    for p in projects:
+        config_path = p / ".hemtt" / "project.toml"
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                content = f.read()
+                ws_id_match = re.search(r'workshop_id = "(.*)"', content)
+                if ws_id_match and ws_id_match.group(1).isdigit():
+                    publishable.append((p, ws_id_match.group(1)))
+
+    if not publishable:
+        print("No projects found with a valid Steam Workshop ID.")
         return
+
+    if args.dry_run:
+        print("\n[bold yellow]--- PUBLISH DRY-RUN MODE ---[/bold yellow]")
+    else:
+        mode_label = "PRODUCTION UPLOAD" if not args.dry_run else "DRY-RUN SIMULATION"
+        print(f"\nTarget Projects for {mode_label}:")
+        
+    for p, ws_id in publishable:
+        print(f"  - {p.name} (ID: {ws_id})")
+    
+    if not args.dry_run:
+        confirm = input("\nProceed with publishing ALL identified projects? [y/N]: ").lower()
+        if confirm != 'y':
+            print("Aborting.")
+            return
+
+    for p, ws_id in publishable:
+        print(f"\n>>> Publishing {p.name} to Workshop...")
+        cmd = [sys.executable, "tools/release.py", "-n", "-y"]
+        if args.dry_run:
+            cmd.append("--dry-run")
+        subprocess.run(cmd, cwd=p)
+
+def cmd_validate(args):
+    projects = get_projects()
+    for p in projects:
+        print(f"\n=== Validating {p.name} ===")
+        cmd_validate_project(p)
+
+def cmd_audit_build(args):
+    projects = get_projects()
+    checker = Path(__file__).parent / "mod_integrity_checker.py"
+    for p in projects:
+        build_path = p / ".hemttout" / "release"
+        if build_path.exists():
+            cmd = [sys.executable, str(checker.resolve()), str(build_path.resolve()), "--unsigned"]
+            subprocess.run(cmd)
+        else:
+            print(f"\n>>> Skipping {p.name}: No built artifacts found in .hemttout/release")
+
+def cmd_update(args):
+    projects = get_projects()
+    setup_script = Path(__file__).parent.parent / "setup.py"
+    for p in projects:
+        print(f"Updating tools in {p.name}...")
+        subprocess.run([sys.executable, str(setup_script.resolve())], cwd=p)
+
+def cmd_workshop_tags(args):
+    tags_file = Path(__file__).parent / "workshop_tags.txt"
+    if tags_file.exists():
+        print(tags_file.read_text())
+    else:
+        print("Workshop tags reference file not found.")
+
+def cmd_audit_deps(args):
+    projects = get_projects()
+    defined_patches = set()
+    dependencies = {}
+
+    # 1. Discover all patches defined in the workspace
+    for p in projects:
+        for config in p.glob("addons/*/config.cpp"):
+            with open(config, 'r', errors='ignore') as f:
+                content = f.read()
+                # Find class CfgPatches { class NAME
+                matches = re.finditer(r'class\s+CfgPatches\s*\{[^}]*class\s+([a-zA-Z0-9_]+)', content, re.MULTILINE | re.DOTALL)
+                for m in matches:
+                    patch_name = m.group(1)
+                    defined_patches.add(patch_name)
+                    
+                # Find requiredAddons[] = { "A", "B" };
+                req_match = re.search(r'requiredAddons\[\]\s*=\s*\{([^}]*)\}', content, re.MULTILINE | re.DOTALL)
+                if req_match:
+                    reqs = [r.strip().replace('"', '').replace("'", "") for r in req_match.group(1).split(',')]
+                    reqs = [r for r in reqs if r] # Filter empty
+                    dependencies[config] = reqs
+
+    # 2. Validate
+    print(f"\n[bold blue]=== Workspace Dependency Audit ===[/bold blue]")
+    print(f"Found {len(defined_patches)} local patches defined.\n")
+    
+    errors = 0
+    known_externals = ["A3_", "cba_", "ace_", "task_force_radio", "acre_", "rhsusf_", "rhs_"]
+
+    for config, reqs in dependencies.items():
+        rel_path = config.relative_to(Path(__file__).parent.parent.parent)
+        missing = []
+        for r in reqs:
+            if r in defined_patches:
+                continue
+            if any(r.lower().startswith(ext.lower()) for ext in known_externals):
+                continue
+            missing.append(r)
+        
+        if missing:
+            print(f"[red]❌ {rel_path}[/red]")
+            for m in missing:
+                print(f"   - Missing dependency: [bold]{m}[/bold]")
+            errors += 1
+        else:
+            print(f"[green]✓[/green] {rel_path} (All dependencies resolved)")
+
+    if errors == 0:
+        print(f"\n[bold green]Success: All workspace dependencies are healthy![/bold green]")
+    else:
+        print(f"\n[bold red]Failed: Found {errors} configs with unresolved dependencies.[/bold red]")
+
+def cmd_gh_runs(args):
+    projects = get_projects()
+    for p in projects:
+        print(f"\n[bold blue]=== GitHub Runs: {p.name} ===[/bold blue]")
+        try:
+            result = subprocess.run(
+                ["gh", "run", "list", "--limit", "3"],
+                cwd=p,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                if not result.stdout.strip():
+                    print("  No runs found.")
+                else:
+                    for line in result.stdout.splitlines():
+                        if "✓" in line: print(f"  [green]{line}[/green]")
+                        elif "X" in line or "fail" in line.lower(): print(f"  [red]{line}[/red]")
+                        elif "*" in line: print(f"  [yellow]{line}[/yellow]")
+                        else: print(f"  {line}")
+            else:
+                print(f"  [dim]GH CLI Error or no workflows configured.[/dim]")
+        except Exception as e:
+            print(f"  Error: {e}")
+
+def cmd_convert(args):
+    from media_converter import convert_audio, convert_video, convert_image, check_ffmpeg, check_armake
     
     for f in args.files:
         if not os.path.exists(f):
@@ -373,9 +335,14 @@ def cmd_convert(args):
             continue
         ext = os.path.splitext(f)[1].lower()
         if ext in [".wav", ".mp3", ".m4a", ".flac"]:
-            convert_audio(f)
+            if check_ffmpeg(): convert_audio(f)
+            else: print(f"❌ Error: ffmpeg required for {f}")
         elif ext in [".mp4", ".mkv", ".mov", ".avi"]:
-            convert_video(f)
+            if check_ffmpeg(): convert_video(f)
+            else: print(f"❌ Error: ffmpeg required for {f}")
+        elif ext in [".png", ".jpg", ".jpeg"]:
+            if check_armake(): convert_image(f)
+            else: print(f"❌ Error: armake required for {f}")
         else:
             print(f"❓ Unknown format for {f}")
 
@@ -387,89 +354,40 @@ def main():
     subparsers.add_parser("status", help="Show status of all projects")
     subparsers.add_parser("sync", help="Run mod manager sync on all projects")
     subparsers.add_parser("build", help="Run HEMTT build on all projects")
-    subparsers.add_parser("release", help="Run UKSFTA release script (ZIP packaging) on all projects")
-    subparsers.add_parser("test", help="Run full suite of tests (pytest, sqflint, hemtt check)")
-    subparsers.add_parser("clean", help="Clean all build artifacts (.hemttout)")
-    subparsers.add_parser("cache", help="Show disk usage of .hemttout across workspace")
-    
-    publish_parser = subparsers.add_parser("publish", help="Upload all projects with valid IDs to Steam Workshop")
-    publish_parser.add_argument("--dry-run", action="store_true", help="Simulate upload and validate without talking to Steam")
-    
-    subparsers.add_parser("validate", help="Run all validators on all projects")
-    subparsers.add_parser("audit-build", help="Run integrity check on built artifacts (.hemttout)")
-    subparsers.add_parser("update", help="Push latest tools/setup to all projects")
-    
-    subparsers.add_parser("gh-runs", help="Show status of recent GitHub Action runs across workspace")
-    subparsers.add_parser("workshop-tags", help="List valid Arma 3 Steam Workshop tags")
+    subparsers.add_parser("release", help="Run release script")
+    subparsers.add_parser("test", help="Run tests")
+    subparsers.add_parser("clean", help="Clean build artifacts")
+    subparsers.add_parser("cache", help="Show disk usage")
+    subparsers.add_parser("publish", help="Upload to Steam")
+    subparsers.add_parser("validate", help="Run validators")
+    subparsers.add_parser("audit-build", help="Audit builds")
+    subparsers.add_parser("update", help="Push latest tools")
+    subparsers.add_parser("workshop-tags", help="List Workshop Tags")
+    subparsers.add_parser("gh-runs", help="GitHub Action status")
+    subparsers.add_parser("audit-deps", help="Audit project requiredAddons dependencies")
 
-    convert_parser = subparsers.add_parser("convert", help="Convert media to Arma-optimized formats (.ogg/.ogv)")
+    convert_parser = subparsers.add_parser("convert", help="Convert media (.ogg/.ogv/.paa)")
     convert_parser.add_argument("files", nargs="+", help="Files to convert")
 
     args = parser.parse_args()
 
-    if args.command == "dashboard":
-        cmd_dashboard(args)
-    elif args.command == "status":
-        cmd_status(args)
-    elif args.command == "sync":
-        cmd_sync(args)
-    elif args.command == "build":
-        cmd_build(args)
-    elif args.command == "release":
-        cmd_release(args)
-    elif args.command == "test":
-        cmd_test(args)
-    elif args.command == "clean":
-        cmd_clean(args)
-    elif args.command == "cache":
-        cmd_cache(args)
-    elif args.command == "publish":
-        cmd_publish(args)
-    elif args.command == "validate":
-        cmd_validate(args)
-    elif args.command == "audit-build":
-        cmd_audit_build(args)
-    elif args.command == "update":
-        cmd_update(args)
-    elif args.command == "workshop-tags":
-        cmd_workshop_tags(args)
-    elif args.command == "gh-runs":
-        cmd_gh_runs(args)
-    elif args.command == "convert":
-        cmd_convert(args)
-    else:
-        parser.print_help()
-
-def cmd_gh_runs(args):
-    projects = get_projects()
-    for p in projects:
-        print(f"\n[bold blue]=== GitHub Runs: {p.name} ===[/bold blue]")
-        try:
-            # Check if GH CLI is authenticated and repo has actions
-            result = subprocess.run(
-                ["gh", "run", "list", "--limit", "3"],
-                cwd=p,
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0:
-                if not result.stdout.strip():
-                    print("  No runs found.")
-                else:
-                    # Colorize output for better readability in dashboard
-                    for line in result.stdout.splitlines():
-                        if "✓" in line:
-                            print(f"  [green]{line}[/green]")
-                        elif "X" in line or "fail" in line.lower():
-                            print(f"  [red]{line}[/red]")
-                        elif "*" in line:
-                            print(f"  [yellow]{line}[/yellow]")
-                        else:
-                            print(f"  {line}")
-            else:
-                print(f"  [dim]GH CLI Error or no workflows configured.[/dim]")
-        except Exception as e:
-            print(f"  Error: {e}")
+    if args.command == "dashboard": cmd_dashboard(args)
+    elif args.command == "status": cmd_status(args)
+    elif args.command == "sync": cmd_sync(args)
+    elif args.command == "build": cmd_build(args)
+    elif args.command == "release": cmd_release(args)
+    elif args.command == "test": cmd_test(args)
+    elif args.command == "clean": cmd_clean(args)
+    elif args.command == "cache": cmd_cache(args)
+    elif args.command == "publish": cmd_publish(args)
+    elif args.command == "validate": cmd_validate(args)
+    elif args.command == "audit-build": cmd_audit_build(args)
+    elif args.command == "update": cmd_update(args)
+    elif args.command == "workshop-tags": cmd_workshop_tags(args)
+    elif args.command == "gh-runs": cmd_gh_runs(args)
+    elif args.command == "audit-deps": cmd_audit_deps(args)
+    elif args.command == "convert": cmd_convert(args)
+    else: parser.print_help()
 
 if __name__ == "__main__":
     main()
