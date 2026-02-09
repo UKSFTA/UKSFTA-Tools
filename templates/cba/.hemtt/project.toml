@@ -1,0 +1,27 @@
+name = "UKSF Task Force Alpha - Project (CBA)";
+author = "UKSF Taskforce Alpha Team";
+prefix = "UKSFTA-Project"
+mainprefix = "z"
+
+[version]
+path = "addons/main/script_version.hpp"
+
+[files]
+include = [
+    "addons/*.pbo",
+    "addons/*.bisign",
+    "keys/*.bikey",
+    "mod.cpp",
+    "meta.cpp",
+    "LICENSE",
+    "README.md"
+]
+
+[archive]
+directory = "releases"
+
+workshop_id = "0"
+workshop_tags = ["Mod", "Addon"]
+
+[hemtt.signing]
+authority = "UKSFTA"

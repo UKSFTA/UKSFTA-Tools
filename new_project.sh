@@ -1,50 +1,56 @@
 #!/bin/bash
 
 # UKSFTA New Project Scaffold
-# Usage: ./new_project.sh [PROJECT_NAME]
+# Usage: ./new_project.sh [PROJECT_NAME] [TEMPLATE: standard|cba]
 
 if [ -z "$1" ]; then
-    echo "Usage: ./new_project.sh [PROJECT_NAME]"
+    echo "Usage: ./new_project.sh [PROJECT_NAME] [TEMPLATE: standard|cba]"
     exit 1
 fi
 
 PROJECT_NAME=$1
+TEMPLATE=${2:-standard}
+TOOLS_DIR=$(pwd)
 PROJECT_DIR="../$PROJECT_NAME"
 
-echo "Creating new UKSFTA project: $PROJECT_NAME"
+if [[ "$TEMPLATE" != "standard" && "$TEMPLATE" != "cba" ]]; then
+    echo "Error: Template must be 'standard' or 'cba'."
+    exit 1
+fi
 
-# 1. Clone Template
+echo "Creating new UKSFTA project: $PROJECT_NAME (Template: $TEMPLATE)"
+
+# 1. Scaffold from Template
 if [ -d "$PROJECT_DIR" ]; then
     echo "Error: Directory $PROJECT_DIR already exists."
     exit 1
 fi
 
-# We assume UKSFTA-Template is in the parent directory
-if [ ! -d "../UKSFTA-Template" ]; then
-    echo "Error: UKSFTA-Template not found in parent directory."
-    exit 1
-fi
-
-cp -r ../UKSFTA-Template "$PROJECT_DIR"
+mkdir -p "$PROJECT_DIR"
+cp -r templates/"$TEMPLATE"/* "$PROJECT_DIR/"
 cd "$PROJECT_DIR"
 
-# 2. Re-initialize Git
-rm -rf .git
+# 2. Initialize Git
 git init
 git branch -M main
 
-# 3. Setup Submodule
+# 3. Setup Submodule (using the current tools repo as source)
 git submodule add git@github.com:UKSFTA/UKSFTA-Tools.git .uksf_tools
 python3 .uksf_tools/setup.py
 
-# 4. Customize project.toml
-sed -i "s/UKSF Task Force Alpha - Template/UKSF Task Force Alpha - $PROJECT_NAME/" .hemtt/project.toml
-sed -i "s/UKSFTA-Template/$PROJECT_NAME/" .hemtt/project.toml
+# 4. Customize metadata
+sed -i "s/Project/$PROJECT_NAME/g" .hemtt/project.toml
+sed -i "s/Project/$PROJECT_NAME/g" addons/main/script_version.hpp 2>/dev/null
+if [ "$TEMPLATE" == "cba" ]; then
+    sed -i "s/Project/$PROJECT_NAME/g" addons/main/\$PBOPREFIX\$
+    sed -i "s/Project/$PROJECT_NAME/g" addons/main/config.cpp
+    sed -i "s/project/${PROJECT_NAME,,}/g" addons/main/script_macros.hpp
+fi
 
 # 5. Initial Commit
 git add .
-git commit -S -m "Initial commit: Scaffolded from UKSFTA-Template"
+git commit -S -m "Initial commit: Scaffolded from UKSFTA-Tools ($TEMPLATE template)"
 
 echo ""
-echo "Project $PROJECT_NAME created successfully at $PROJECT_DIR"
+echo "Project $PROJECT_NAME ($TEMPLATE) created successfully at $PROJECT_DIR"
 echo "Don't forget to update the workshop_id in .hemtt/project.toml!"

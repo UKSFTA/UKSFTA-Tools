@@ -162,6 +162,27 @@ def cmd_clean(args):
         else:
             print(f"Skipping {p.name}: No .hemttout found.")
 
+def cmd_cache(args):
+    projects = get_projects()
+    total_bytes = 0
+    print(f"{'Project':<25} | {'Cache Size':<15}")
+    print("-" * 45)
+    for p in projects:
+        out_dir = p / ".hemttout"
+        size = 0
+        if out_dir.exists():
+            for f in out_dir.rglob("*"):
+                if f.is_file():
+                    size += f.stat().st_size
+        
+        total_bytes += size
+        size_mb = size / (1024 * 1024)
+        print(f"{p.name:<25} | {size_mb:>10.2f} MB")
+    
+    total_gb = total_bytes / (1024 * 1024 * 1024)
+    print("-" * 45)
+    print(f"{'TOTAL':<25} | {total_gb:>10.2f} GB")
+
 def cmd_publish(args):
     projects = get_projects()
     publishable = []
@@ -249,6 +270,7 @@ def main():
     subparsers.add_parser("build", help="Run HEMTT build on all projects")
     subparsers.add_parser("release", help="Run UKSFTA release script (ZIP packaging) on all projects")
     subparsers.add_parser("clean", help="Clean all build artifacts (.hemttout)")
+    subparsers.add_parser("cache", help="Show disk usage of .hemttout across workspace")
     
     publish_parser = subparsers.add_parser("publish", help="Upload all projects with valid IDs to Steam Workshop")
     publish_parser.add_argument("--dry-run", action="store_true", help="Simulate upload and validate without talking to Steam")
@@ -271,6 +293,8 @@ def main():
         cmd_release(args)
     elif args.command == "clean":
         cmd_clean(args)
+    elif args.command == "cache":
+        cmd_cache(args)
     elif args.command == "publish":
         cmd_publish(args)
     elif args.command == "validate":
