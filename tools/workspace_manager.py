@@ -167,6 +167,16 @@ def cmd_audit_strings(args):
         table.add_row(p.name, "[bold red]❌ DESYNCED[/bold red]" if "MISSING" in res.stdout else "[bold green]✅ MATCHED[/bold green]")
     console.print(table)
 
+def cmd_audit_security(args):
+    console = Console(force_terminal=True); print_banner(console)
+    auditor = Path(__file__).parent / "security_auditor.py"
+    table = Table(title="Guardian Security Scan", box=box.ROUNDED, border_style="red")
+    table.add_column("Project", style="cyan"); table.add_column("Security Status", justify="center")
+    for p in get_projects():
+        res = subprocess.run([sys.executable, str(auditor), str(p)], capture_output=True, text=True)
+        table.add_row(p.name, "[bold red]❌ LEAK DETECTED[/bold red]" if "LEAK" in res.stdout or "CRITICAL" in res.stdout else "[bold green]✅ SECURE[/bold green]")
+    console.print(table)
+
 def cmd_status(args):
     console = Console(force_terminal=True); print_banner(console)
     for p in get_projects():
@@ -238,7 +248,7 @@ def cmd_workshop_tags(args):
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Diamond Workspace Manager")
     subparsers = parser.add_subparsers(dest="command", help="Management Commands")
-    for cmd in ["dashboard", "status", "sync", "build", "release", "test", "clean", "cache", "validate", "audit-deps", "audit-assets", "audit-strings", "generate-docs", "update", "workshop-tags", "gh-runs"]:
+    for cmd in ["dashboard", "status", "sync", "build", "release", "test", "clean", "cache", "validate", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "update", "workshop-tags", "gh-runs"]:
         subparsers.add_parser(cmd)
     p_pub = subparsers.add_parser("publish"); p_pub.add_argument("--dry-run", action="store_true")
     p_conv = subparsers.add_parser("convert"); p_conv.add_argument("files", nargs="+")
@@ -248,6 +258,7 @@ def main():
         "test": lambda a: subprocess.run(["pytest"]), "clean": lambda a: [subprocess.run(["rm", "-rf", ".hemttout"], cwd=p) for p in get_projects()],
         "cache": lambda a: [subprocess.run(["du", "-sh", ".hemttout"], cwd=p) for p in get_projects() if (p/".hemttout").exists()],
         "publish": cmd_publish, "audit-deps": cmd_audit_deps, "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings,
+        "audit-security": cmd_audit_security,
         "generate-docs": cmd_generate_docs, "update": cmd_update, "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "convert": cmd_convert
     }
     if args.command in cmds: cmds[args.command](args)
