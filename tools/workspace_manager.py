@@ -294,6 +294,73 @@ def cmd_update(args):
         print(f"Updating tools in {p.name}...")
         subprocess.run([sys.executable, str(setup_script.resolve())], cwd=p)
 
+def cmd_workshop_tags(args):
+    tags_file = Path(__file__).parent / "workshop_tags.txt"
+    if tags_file.exists():
+        print(tags_file.read_text())
+    else:
+        print("Workshop tags reference file not found.")
+
+def cmd_dashboard(args):
+    projects = get_projects()
+    print(f"\n[bold green]UKSFTA Workspace Dashboard - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/bold green]")
+    
+    table = Table(title="Project Overview", box=box.ROUNDED)
+    table.add_column("Project", style="cyan")
+    table.add_column("Prefix", style="magenta")
+    table.add_column("Version", style="yellow")
+    table.add_column("Workshop ID", style="green")
+    table.add_column("Tags", style="blue")
+    table.add_column("CI Status", justify="center")
+
+    for p in projects:
+        # Extract metadata
+        prefix = "Unknown"
+        version = "0.0.0"
+        ws_id = "None"
+        tags = []
+        
+        config_path = p / ".hemtt" / "project.toml"
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                content = f.read()
+                prefix_match = re.search(r'prefix = "(.*)"', content)
+                if prefix_match: prefix = prefix_match.group(1)
+                
+                ws_id_match = re.search(r'workshop_id = "(.*)"', content)
+                if ws_id_match: ws_id = ws_id_match.group(1)
+
+                tags_match = re.search(r'workshop_tags = \[(.*)\]', content)
+                if tags_match:
+                    tags = [t.strip().replace('"', '').replace("'", "") for t in tags_match.group(1).split(',')]
+
+        # Get version from script_version.hpp if possible
+        v_path = p / "addons" / "main" / "script_version.hpp"
+        if not v_path.exists(): # Try component-specific paths
+            v_path = next(p.glob("addons/*/script_version.hpp"), v_path)
+            
+        if v_path.exists():
+            with open(v_path, 'r') as f:
+                v_content = f.read()
+                major = re.search(r'#define MAJOR (.*)', v_content)
+                minor = re.search(r'#define MINOR (.*)', v_content)
+                patch = re.search(r'#define PATCHLVL (.*)', v_content)
+                if major and minor and patch:
+                    version = f"{major.group(1).strip()}.{minor.group(1).strip()}.{patch.group(1).strip()}"
+
+        table.add_row(
+            p.name,
+            prefix,
+            version,
+            ws_id,
+            ", ".join(tags) if tags else "None",
+            "[green]SYNCED[/green]" # Placeholder for now
+        )
+
+    console = Console()
+    table.title = f"Total Projects: {len(projects)}"
+    console.print(table)
+
 def cmd_convert(args):
     from media_converter import convert_audio, convert_video, check_ffmpeg
     if not check_ffmpeg():
@@ -333,6 +400,7 @@ def main():
     subparsers.add_parser("update", help="Push latest tools/setup to all projects")
     
     subparsers.add_parser("gh-runs", help="Show status of recent GitHub Action runs across workspace")
+    subparsers.add_parser("workshop-tags", help="List valid Arma 3 Steam Workshop tags")
 
     convert_parser = subparsers.add_parser("convert", help="Convert media to Arma-optimized formats (.ogg/.ogv)")
     convert_parser.add_argument("files", nargs="+", help="Files to convert")
@@ -363,6 +431,8 @@ def main():
         cmd_audit_build(args)
     elif args.command == "update":
         cmd_update(args)
+    elif args.command == "workshop-tags":
+        cmd_workshop_tags(args)
     elif args.command == "gh-runs":
         cmd_gh_runs(args)
     elif args.command == "convert":

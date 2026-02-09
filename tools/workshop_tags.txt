@@ -1,0 +1,41 @@
+# Valid Arma 3 Steam Workshop Tags
+# Reference: https://steamcommunity.com/workshop/browse/?appid=107410
+
+# CATEGORY: Type (Pick 1-2)
+Mod
+Map
+Scenario
+Addon
+Total Conversion
+Campaign
+Voice
+
+# CATEGORY: Gameplay (Optional)
+Singleplayer
+Multiplayer
+Coop
+Realism
+Casual
+Hardcore
+
+# CATEGORY: Role (Optional)
+Infantry
+Armor
+Air
+Sea
+Special Forces
+Stealth
+Survival
+
+# CATEGORY: Setting (Optional)
+Modern
+Cold War
+WW2
+Vietnam
+Future
+Sci-Fi
+Fictional
+
+# CATEGORY: Utility
+Tools
+Other
