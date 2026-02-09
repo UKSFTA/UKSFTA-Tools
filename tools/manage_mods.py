@@ -137,11 +137,11 @@ def resolve_dependencies(initial_mods, ignored_ids=None):
         if mid in processed and mid in resolved_info:
             continue
 
-        print(f"Checking {mid}...")
         meta = get_workshop_metadata(mid)
         if mid in initial_mods and initial_mods[mid]:
             meta["name"] = initial_mods[mid]
             
+        print(f"Checking {meta['name']} ({mid})...")
         resolved_info[mid] = meta
         processed.add(mid)
         
