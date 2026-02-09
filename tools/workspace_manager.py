@@ -118,6 +118,56 @@ def cmd_sync(args):
         else:
             print(f"Skipping {p.name}: No Mod Manager found.")
 
+def cmd_build(args):
+    projects = get_projects()
+    for p in projects:
+        if (p / "build.sh").exists():
+            print(f"--- Building {p.name} ---")
+            run_in_project(p, ["bash", "build.sh", "build"])
+        else:
+            print(f"Skipping {p.name}: No build.sh found.")
+
+def cmd_release(args):
+    projects = get_projects()
+    for p in projects:
+        if (p / "release.sh").exists():
+            print(f"--- Packaging Release: {p.name} ---")
+            run_in_project(p, ["bash", "release.sh"])
+        else:
+            print(f"Skipping {p.name}: No release.sh found.")
+
+def cmd_publish(args):
+    projects = get_projects()
+    publishable = []
+    
+    for p in projects:
+        ws_id = "None"
+        toml = p / ".hemtt" / "project.toml"
+        if toml.exists():
+            match = re.search(r'workshop_id = "(.*?)"', toml.read_text())
+            if match: ws_id = match.group(1)
+        
+        if ws_id not in ["0", "None", "INSERT_ID_HERE", ""]:
+            publishable.append((p, ws_id))
+    
+    if not publishable:
+        print("No projects found with valid Workshop IDs.")
+        return
+
+    print("\n[bold yellow]Target Projects for Workshop Upload:[/bold yellow]")
+    for p, ws_id in publishable:
+        print(f"  - {p.name} (ID: {ws_id})")
+    
+    confirm = input("\nProceed with publishing ALL identified projects? [y/N]: ").lower()
+    if confirm != 'y':
+        print("Aborting.")
+        return
+
+    for p, ws_id in publishable:
+        print(f"\n>>> Publishing {p.name} to Workshop...")
+        # We use -n (none) to skip version bumping as we assume build is already finalized
+        subprocess.run([sys.executable, "tools/release.py", "-n", "-y"], cwd=p)
+
 def cmd_validate(args):
     projects = get_projects()
     tools_dir = Path(__file__).parent.resolve()
@@ -161,6 +211,9 @@ def main():
     subparsers.add_parser("dashboard", help="Visual workspace overview")
     subparsers.add_parser("status", help="Show status of all projects")
     subparsers.add_parser("sync", help="Run mod manager sync on all projects")
+    subparsers.add_parser("build", help="Run HEMTT build on all projects")
+    subparsers.add_parser("release", help="Run UKSFTA release script (ZIP packaging) on all projects")
+    subparsers.add_parser("publish", help="Upload all projects with valid IDs to Steam Workshop")
     subparsers.add_parser("validate", help="Run all validators on all projects")
     subparsers.add_parser("audit-build", help="Run integrity check on built artifacts (.hemttout)")
     subparsers.add_parser("update", help="Push latest tools/setup to all projects")
@@ -173,6 +226,12 @@ def main():
         cmd_status(args)
     elif args.command == "sync":
         cmd_sync(args)
+    elif args.command == "build":
+        cmd_build(args)
+    elif args.command == "release":
+        cmd_release(args)
+    elif args.command == "publish":
+        cmd_publish(args)
     elif args.command == "validate":
         cmd_validate(args)
     elif args.command == "audit-build":
