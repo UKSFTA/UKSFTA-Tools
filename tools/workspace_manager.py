@@ -70,6 +70,7 @@ def cmd_help(console):
     audit_table.add_row("[bold cyan]audit-assets  [/]", "[dim]Detect orphaned/unused binary files (PAA, P3D)[/]")
     audit_table.add_row("[bold cyan]audit-strings [/]", "[dim]Validate stringtable keys vs SQF usage[/]")
     audit_table.add_row("[bold cyan]audit-security[/]", "[dim]Scan for leaked tokens, webhooks, or private keys[/]")
+    audit_table.add_row("[bold cyan]audit-mission [/]", "[dim]Verify a Mission PBO against workspace and externals[/]")
     audit_table.add_row("[bold cyan]gh-runs       [/]", "[dim]Real-time monitoring of GitHub Actions runners[/]")
 
     util_table = Table(title="🛠️  Utilities & Tools", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold cyan")
@@ -184,6 +185,37 @@ def cmd_audit_security(args):
         table.add_row(p.name, "[bold red]❌ LEAK DETECTED[/bold red]" if "LEAK" in res.stdout or "CRITICAL" in res.stdout else "[bold green]✅ SECURE[/bold green]")
     console.print(table)
 
+def cmd_audit_mission(args):
+    console = Console(force_terminal=True); print_banner(console)
+    from mission_auditor import audit_mission
+    
+    # 1. First get all local patches from workspace
+    defined_patches = set()
+    for p in get_projects():
+        for config in p.glob("addons/*/config.cpp"):
+            with open(config, 'r', errors='ignore') as f:
+                content = f.read()
+                for m in re.finditer(r'class\s+CfgPatches\s*\{[^}]*class\s+([a-zA-Z0-9_]+)', content, re.MULTILINE | re.DOTALL): defined_patches.add(m.group(1))
+
+    # 2. Run Audit
+    results = audit_mission(args.pbo, defined_patches)
+    if not results: return
+
+    table = Table(title=f"Mission Dependency Analysis", box=box.ROUNDED, border_style="blue")
+    table.add_column("Category", style="bold cyan")
+    table.add_column("Addon Class Name", style="dim")
+    table.add_column("Status", justify="center")
+
+    for m in results["missing"]: table.add_row("Unknown/Missing", m, "[bold red]❌ NOT FOUND[/bold red]")
+    for l in results["local"]: table.add_row("UKSFTA Workspace", l, "[bold green]✅ RESOLVED[/bold green]")
+    for e in results["external"]: table.add_row("Known External", e, "[bold blue]ℹ️ EXTERNAL[/bold blue]")
+
+    console.print(table)
+    if results["missing"]:
+        console.print(f"\n[bold red]⚠️  WARNING: {len(results['missing'])} unresolved dependencies found![/bold red]")
+    else:
+        console.print(f"\n[bold green]🌟 All {len(results['required'])} mission dependencies are accounted for.[/bold green]")
+
 def cmd_status(args):
     console = Console(force_terminal=True); print_banner(console)
     for p in get_projects(): console.print(Panel(f"[dim]Root: {p}[/dim]", title=f"📦 {p.name}", border_style="cyan")); subprocess.run(["git", "status", "-s"], cwd=p)
@@ -249,10 +281,14 @@ def cmd_workshop_tags(args):
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Diamond Manager", add_help=False)
     subparsers = parser.add_subparsers(dest="command")
-    for cmd in ["dashboard", "status", "sync", "pull-mods", "build", "release", "test", "clean", "cache", "validate", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "update", "workshop-tags", "gh-runs", "help"]:
+    for cmd in ["dashboard", "status", "sync", "pull-mods", "build", "release", "test", "clean", "cache", "validate", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-mission", "generate-docs", "update", "workshop-tags", "gh-runs", "help"]:
         subparsers.add_parser(cmd)
     p_pub = subparsers.add_parser("publish"); p_pub.add_argument("--dry-run", action="store_true")
     p_conv = subparsers.add_parser("convert"); p_conv.add_argument("files", nargs="+")
+    
+    p_miss = subparsers.add_parser("audit-mission")
+    p_miss.add_argument("pbo", help="Path to the mission PBO file")
+
     args = parser.parse_args()
     console = Console(force_terminal=True)
     cmds = {
@@ -260,7 +296,8 @@ def main():
         "test": lambda a: subprocess.run(["pytest"]), "clean": lambda a: [subprocess.run(["rm", "-rf", ".hemttout"], cwd=p) for p in get_projects()],
         "cache": lambda a: [subprocess.run(["du", "-sh", ".hemttout"], cwd=p) for p in get_projects() if (p/".hemttout").exists()],
         "publish": cmd_publish, "audit-deps": cmd_audit_deps, "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings,
-        "audit-security": cmd_audit_security, "generate-docs": cmd_generate_docs, "update": cmd_update, 
+        "audit-security": cmd_audit_security, "audit-mission": cmd_audit_mission,
+        "generate-docs": cmd_generate_docs, "update": cmd_update, 
         "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "convert": cmd_convert, "help": lambda a: cmd_help(console)
     }
     if args.command in cmds: cmds[args.command](args)
