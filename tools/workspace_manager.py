@@ -101,7 +101,7 @@ def cmd_dashboard(args):
             "[green]SYNCED[/green]" 
         )
 
-    console = Console()
+    console = Console(force_terminal=True)
     table.title = f"Total Projects: {len(projects)}"
     console.print(table)
 
@@ -249,6 +249,7 @@ def cmd_workshop_tags(args):
         print("Workshop tags reference file not found.")
 
 def cmd_audit_deps(args):
+    console = Console(force_terminal=True)
     projects = get_projects()
     defined_patches = set()
     dependencies = {}
@@ -272,8 +273,8 @@ def cmd_audit_deps(args):
                     dependencies[config] = reqs
 
     # 2. Validate
-    print(f"\n[bold blue]=== Workspace Dependency Audit ===[/bold blue]")
-    print(f"Found {len(defined_patches)} local patches defined.\n")
+    console.print(f"\n[bold blue]=== Workspace Dependency Audit ===[/bold blue]")
+    console.print(f"Found {len(defined_patches)} local patches defined.\n")
     
     errors = 0
     known_externals = ["A3_", "cba_", "ace_", "task_force_radio", "acre_", "rhsusf_", "rhs_"]
@@ -289,22 +290,23 @@ def cmd_audit_deps(args):
             missing.append(r)
         
         if missing:
-            print(f"[red]❌ {rel_path}[/red]")
+            console.print(f"[red]❌ {rel_path}[/red]")
             for m in missing:
-                print(f"   - Missing dependency: [bold]{m}[/bold]")
+                console.print(f"   - Missing dependency: [bold]{m}[/bold]")
             errors += 1
         else:
-            print(f"[green]✓[/green] {rel_path} (All dependencies resolved)")
+            console.print(f"[green]✓[/green] {rel_path} (All dependencies resolved)")
 
     if errors == 0:
-        print(f"\n[bold green]Success: All workspace dependencies are healthy![/bold green]")
+        console.print(f"\n[bold green]Success: All workspace dependencies are healthy![/bold green]")
     else:
-        print(f"\n[bold red]Failed: Found {errors} configs with unresolved dependencies.[/bold red]")
+        console.print(f"\n[bold red]Failed: Found {errors} configs with unresolved dependencies.[/bold red]")
 
 def cmd_gh_runs(args):
+    console = Console(force_terminal=True)
     projects = get_projects()
     for p in projects:
-        print(f"\n[bold blue]=== GitHub Runs: {p.name} ===[/bold blue]")
+        console.print(f"\n[bold blue]=== GitHub Runs: {p.name} ===[/bold blue]")
         try:
             result = subprocess.run(
                 ["gh", "run", "list", "--limit", "3"],
@@ -314,17 +316,17 @@ def cmd_gh_runs(args):
             )
             if result.returncode == 0:
                 if not result.stdout.strip():
-                    print("  No runs found.")
+                    console.print("  No runs found.")
                 else:
                     for line in result.stdout.splitlines():
-                        if "✓" in line: print(f"  [green]{line}[/green]")
-                        elif "X" in line or "fail" in line.lower(): print(f"  [red]{line}[/red]")
-                        elif "*" in line: print(f"  [yellow]{line}[/yellow]")
-                        else: print(f"  {line}")
+                        if "✓" in line: console.print(f"  [green]{line}[/green]")
+                        elif "X" in line or "fail" in line.lower(): console.print(f"  [red]{line}[/red]")
+                        elif "*" in line: console.print(f"  [yellow]{line}[/yellow]")
+                        else: console.print(f"  {line}")
             else:
-                print(f"  [dim]GH CLI Error or no workflows configured.[/dim]")
+                console.print(f"  [dim]GH CLI Error or no workflows configured.[/dim]")
         except Exception as e:
-            print(f"  Error: {e}")
+            console.print(f"  Error: {e}")
 
 def cmd_convert(args):
     from media_converter import convert_audio, convert_video, convert_image, check_ffmpeg, check_armake
