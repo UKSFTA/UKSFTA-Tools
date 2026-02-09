@@ -12,26 +12,17 @@ Centralized automation and DevOps infrastructure for UKSF Taskforce Alpha mod pr
 
 ## 🚀 Quick Start
 
-1. **Add Submodule**:
-   ```bash
-   git submodule add git@github.com:UKSFTA/UKSFTA-Tools.git .uksf_tools
-   ```
+1. **Add Submodule**: `git submodule add git@github.com:UKSFTA/UKSFTA-Tools.git .uksf_tools`
+2. **Run Setup**: `python3 .uksf_tools/setup.py`
+3. **Open Dashboard**: `./tools/workspace_manager.py dashboard`
 
-2. **Run Setup**:
-   ```bash
-   python3 .uksf_tools/setup.py
-   ```
+## 📋 Technical Documentation
 
-3. **Manage Workspace**:
-   ```bash
-   # From the tools repo root:
-   ./tools/workspace_manager.py dashboard
-   ./tools/workspace_manager.py test
-   ```
-
-## 📋 Documentation
-
-For detailed technical standards, build pipeline logic, and troubleshooting, see the [DevOps Guide](docs/devops_guide.md).
+Explore our in-depth DevOps guides:
+- [**Architecture & Standards**](docs/ARCHITECTURE.md): The "Logic vs. Assets" model and VFS rules.
+- [**Environment Setup**](docs/SETUP.md): Zero-to-hero guide for Linux, SteamCMD, and Mikero tools.
+- [**Production Workflow**](docs/WORKFLOW.md): Step-by-step "Runbook" from scaffold to Steam Workshop.
+- [**Troubleshooting**](docs/TROUBLESHOOTING.md): Fixes for Launcher corruption and Btrfs redownload loops.
 
 ## ⚖ License
 
