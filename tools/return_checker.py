@@ -40,13 +40,17 @@ def filter_files(filepaths):
                         (lambda s: s.strip()), file_contents.readlines()
                     ))
 
-                    return_value_comment_index = lines.index('* Return Value:')
-                    return_value_index = return_value_comment_index + 1
+                    try:
+                        return_value_comment_index = lines.index('* Return Value:')
+                        return_value_index = return_value_comment_index + 1
 
-                    # Drop the first two characters (e.g. `* `) so it returns the return type
-                    return_value = lines[return_value_index][2:]
+                        # Drop the first two characters (e.g. `* `) so it returns the return type
+                        return_value = lines[return_value_index][2:]
 
-                    filtered_files.append([filepath, return_value])
+                        filtered_files.append([filepath, return_value])
+                    except ValueError:
+                        # Skip if documentation block doesn't match expected format
+                        continue
 
                     break
 

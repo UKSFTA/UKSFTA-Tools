@@ -20,9 +20,10 @@ fi
 STATUS=$?
 
 if [ $STATUS -eq 0 ]; then
-    # 2. Fix timestamps and Sync meta.cpp name
+    # 2. Fix timestamps and Sync meta.cpp name/ID
     if [ -f "tools/fix_timestamps.py" ]; then
-        python3 tools/fix_timestamps.py .hemttout "$PROJECT_NAME"
+        WORKSHOP_ID=$(grep "workshop_id =" .hemtt/project.toml | head -n 1 | sed -E 's/workshop_id = "(.*)"/\1/' | xargs)
+        python3 tools/fix_timestamps.py .hemttout "$PROJECT_NAME" "$WORKSHOP_ID"
     fi
 
     # 3. Manual Packaging for releases
@@ -45,7 +46,7 @@ if [ $STATUS -eq 0 ]; then
         cp -r .hemttout/release/* "$STAGING_DIR/$MOD_FOLDER_NAME/"
         
         # Ensure staging metadata is also fixed and name is synced
-        python3 tools/fix_timestamps.py "$STAGING_DIR" "$PROJECT_NAME"
+        python3 tools/fix_timestamps.py "$STAGING_DIR" "$PROJECT_NAME" "$WORKSHOP_ID"
         
         (cd "$STAGING_DIR" && zip -q -r "$PROJECT_ROOT/releases/$ZIP_NAME" "$MOD_FOLDER_NAME")
         cp "releases/$ZIP_NAME" "releases/${PREFIX}-latest.zip"

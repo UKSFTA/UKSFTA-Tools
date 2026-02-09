@@ -16,18 +16,18 @@ def get_private_declare(content):
 
     priv_dec_str = ''.join(priv_srch_declared)
 
-    srch = re.compile('(?<![_a-zA-Z0-9])(_[a-zA-Z]*?)[ ,\}\]\)";]')
+    srch = re.compile(r'(?<![_a-zA-Z0-9])(_[a-zA-Z]*?)[ ,\}\]\)";]')
     priv_split = srch.findall(priv_dec_str)
     priv_split = sorted(set(priv_split))
     priv_declared += priv_split;
 
-    srch = re.compile('params \[.*\]|PARAMS_[0-9].*|EXPLODE_[0-9]_PVT.*|DEFAULT_PARAM.*|KEY_PARAM.*|IGNORE_PRIVATE_WARNING.*')
+    srch = re.compile(r'params \[.*\]|PARAMS_[0-9].*|EXPLODE_[0-9]_PVT.*|DEFAULT_PARAM.*|KEY_PARAM.*|IGNORE_PRIVATE_WARNING.*')
     priv_srch_declared = srch.findall(content)
     priv_srch_declared = sorted(set(priv_srch_declared))
 
     priv_dec_str = ''.join(priv_srch_declared)
 
-    srch = re.compile('(?<![_a-zA-Z0-9])(_[a-zA-Z]*?)[ ,\}\]\)";]')
+    srch = re.compile(r'(?<![_a-zA-Z0-9])(_[a-zA-Z]*?)[ ,\}\]\)";]')
     priv_split = srch.findall(priv_dec_str)
     priv_split = sorted(set(priv_split))
 
@@ -53,7 +53,7 @@ def check_privates(filepath):
 
 
         # Regex search privates
-        srch = re.compile('(?<![_a-zA-Z0-9])(_[a-zA-Z]*?)[ ,\}\]\)";]')
+        srch = re.compile(r'(?<![_a-zA-Z0-9])(_[a-zA-Z]*?)[ ,\}\]\)";]')
         priv_use = srch.findall(content)
 
         # Private declaration search
