@@ -28,6 +28,16 @@ jobs:
       with:
         languages: python
         build-mode: none
+        # Exclude large binary/production folders to prevent timeout/memory failures
+        config: |
+          paths-ignore:
+            - 'addons/**'
+            - 'media/**'
+            - 'releases/**'
+            - 'all_releases/**'
+            - '**/*.pbo'
+            - '**/*.ogv'
+            - '**/*.paa'
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
