@@ -131,28 +131,48 @@ def cmd_dashboard(args):
 
 def cmd_gh_runs(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects()
-    table = Table(title="Global CI/CD Monitor", box=box.ROUNDED, header_style="bold blue", border_style="blue")
-    table.add_column("Project", style="cyan", no_wrap=True); table.add_column("Workflow", style="magenta"); table.add_column("Status", justify="center")
-    table.add_column("Branch", style="dim"); table.add_column("Last Message", style="italic"); table.add_column("Age", justify="right")
-    for p in projects:
-        try:
-            res = subprocess.run(["gh", "run", "list", "--limit", "1", "--json", "status,conclusion,workflowName,headBranch,displayTitle,createdAt"], cwd=p, capture_output=True, text=True)
-            if res.returncode == 0:
-                runs = json.loads(res.stdout)
-                if not runs: table.add_row(p.name, "-", "[dim]No Runs[/dim]", "-", "-", "-"); continue
-                run = runs[0]; status_icon = "⚪"; status_style = "white"
-                if run['status'] == "completed":
-                    if run['conclusion'] == "success": status_icon = "✅ SUCCESS"; status_style = "bold green"
-                    elif run['conclusion'] == "failure": status_icon = "❌ FAILED"; status_style = "bold red"
-                    else: status_icon = f"❓ {run['conclusion'].upper()}"; status_style = "yellow"
-                else: status_icon = "⏳ RUNNING"; status_style = "bold cyan"
-                created = datetime.fromisoformat(run['createdAt'].replace('Z', '+00:00'))
-                diff = datetime.now(created.tzinfo) - created
-                age = f"{diff.days}d" if diff.days > 0 else (f"{diff.seconds // 3600}h" if diff.seconds > 3600 else f"{diff.seconds // 60}m")
-                table.add_row(p.name, run['workflowName'], f"[{status_style}]{status_icon}[/{status_style}]", run['headBranch'], run['displayTitle'][:30], age)
-            else: table.add_row(p.name, "[red]Error[/red]", "Check Auth", "-", "-", "-")
-        except Exception: table.add_row(p.name, "[red]Failed[/red]", "-", "-", "-", "-")
+    table = Table(title="Unit Pipeline Matrix (Lint | CodeQL | Build)", box=box.ROUNDED, header_style="bold blue", border_style="blue")
+    table.add_column("Project", style="cyan", no_wrap=True)
+    table.add_column("Lint", justify="center")
+    table.add_column("CodeQL", justify="center")
+    table.add_column("Build", justify="center")
+    table.add_column("Age", justify="right", style="dim")
+
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
+        task = progress.add_task("[cyan]Auditing GitHub Runners...", total=len(projects))
+        
+        for p in projects:
+            stats = {"Lint": "⚪", "CodeQL": "⚪", "Build": "⚪", "Age": "-"}
+            try:
+                # We pull the 5 most recent runs to find the latest state of each unique workflow
+                res = subprocess.run(["gh", "run", "list", "--limit", "10", "--json", "workflowName,conclusion,status,createdAt"], cwd=p, capture_output=True, text=True)
+                if res.returncode == 0:
+                    runs = json.loads(res.stdout)
+                    for run in runs:
+                        name = run['workflowName'].lower()
+                        key = None
+                        if "lint" in name: key = "Lint"
+                        elif "codeql" in name: key = "CodeQL"
+                        elif "build" in name or "release" in name: key = "Build"
+                        
+                        if key and stats[key] == "⚪": # Only take the absolute latest for this type
+                            if run['status'] != "completed": stats[key] = "⏳"
+                            elif run['conclusion'] == "success": stats[key] = "[bold green]✅[/]"
+                            elif run['conclusion'] == "failure": stats[key] = "[bold red]❌[/]"
+                            else: stats[key] = "[yellow]❓[/]"
+                            
+                            if stats["Age"] == "-":
+                                created = datetime.fromisoformat(run['createdAt'].replace('Z', '+00:00'))
+                                diff = datetime.now(created.tzinfo) - created
+                                stats["Age"] = f"{diff.days}d" if diff.days > 0 else (f"{diff.seconds // 3600}h" if diff.seconds > 3600 else f"{diff.seconds // 60}m")
+                
+                table.add_row(p.name, stats["Lint"], stats["CodeQL"], stats["Build"], stats["Age"])
+            except Exception:
+                table.add_row(p.name, "[red]Err[/]", "[red]Err[/]", "[red]Err[/]", "-")
+            progress.update(task, advance=1)
+
     console.print(table)
+    console.print("[dim]Key: ✅ Success | ❌ Failed | ⏳ Running | ⚪ No Data[/dim]")
 
 def cmd_audit_updates(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects()
