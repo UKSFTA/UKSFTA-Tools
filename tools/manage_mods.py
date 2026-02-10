@@ -177,64 +177,53 @@ def run_steamcmd(mod_ids):
     if not mod_ids:
         return
     
+    # Check for global offline override in environment
+    if os.getenv("UKSFTA_OFFLINE") == "1":
+        print("\n[!] Global Offline Mode Active (via .env). Skipping SteamCMD.")
+        return
+
     username = os.getenv("STEAM_USERNAME")
     password = os.getenv("STEAM_PASSWORD")
     
-    # 1. Determine Login Strategy (Prefer .env)
+    # 1. Determine Login Strategy
     if username and password:
         login_user = username
         login_pass = password
-        print(f"\n--- Updating {len(mod_ids)} mods via SteamCMD (Authenticated as {username}) ---")
+        print(f"\n--- Updating {len(mod_ids)} mods via SteamCMD (Authenticated) ---")
     else:
         login_user = "anonymous"
         login_pass = None
         print(f"\n--- Updating {len(mod_ids)} mods via SteamCMD (as anonymous) ---")
-        print("[!] Warning: Anonymous downloads are often throttled. Add credentials to .env for maximum speed.")
 
-    # Get the Workshop path to force install there
-    workshop_base = get_workshop_cache_path()
-    if workshop_base:
-        install_dir = os.path.abspath(os.path.join(workshop_base, "..", "..", "..", ".."))
-    else:
-        install_dir = os.getcwd()
-
-    # SYSTEM CACHE REDIRECTION:
-    # We force Steam to use the library root as its "Home" to keep manifests and temp files on /ext
-    steam_env = os.environ.copy()
-    steam_env["HOME"] = install_dir
+    # SAFETY: We no longer use +force_install_dir on the main library.
+    # SteamCMD will now download to its own internal folders (~/.steam/steamcmd/steamapps/workshop)
+    # This prevents manifest corruption and "Arma 3 Reinstalling" bugs.
     
-    base_cmd = ["steamcmd", "+force_install_dir", install_dir, "+login", login_user]
+    base_cmd = ["steamcmd", "+login", login_user]
     if login_pass:
         base_cmd.append(login_pass)
         
-    # 2. Execute with live output and retry logic
     for mid in mod_ids:
         print(f"--- Syncing Item: {mid} ---")
-        attempt = 0
-        max_attempts = 3
-        while attempt < max_attempts:
-            cmd = base_cmd + ["+workshop_download_item", STEAMAPP_ID, mid, "+quit"]
-            try:
-                # We pass the custom environment here
-                subprocess.run(cmd, check=True, stdout=None, stderr=subprocess.STDOUT, env=steam_env)
-                break # Success!
-            except subprocess.CalledProcessError as e:
-                attempt += 1
-                if attempt < max_attempts:
-                    print(f"\n⚠️  Download of {mid} timed out or failed (Code {e.returncode}). Retrying ({attempt}/{max_attempts})...")
-                else:
-                    print(f"\n❌ Failed to download {mid} after {max_attempts} attempts.")
-                    sys.exit(1)
+        cmd = base_cmd + ["+workshop_download_item", STEAMAPP_ID, mid, "+quit"]
+        try:
+            subprocess.run(cmd, check=True, stdout=None, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as e:
+            print(f"\n⚠️  Download of {mid} failed (Code {e.returncode}).")
+            print("Recommendation: Download this mod via the Steam Desktop Client instead.")
     
-    print("\n✅ All SteamCMD syncs completed.")
+    print("\n✅ SteamCMD attempt finished.")
 
 def get_workshop_cache_path():
     home = os.path.expanduser("~")
+    # We prioritize the GUI paths first, then SteamCMD's default internal path
     possible_paths = [
         os.path.join(home, ".steam/steam/steamapps/workshop/content", STEAMAPP_ID),
         os.path.join(home, "Steam/steamapps/workshop/content", STEAMAPP_ID),
         os.path.join(home, ".local/share/Steam/steamapps/workshop/content", STEAMAPP_ID),
         os.path.join("/ext/SteamLibrary/steamapps/workshop/content", STEAMAPP_ID),
+        # SteamCMD's own internal download location
+        os.path.join(home, ".steam/steamcmd/steamapps/workshop/content", STEAMAPP_ID),
         os.path.join(os.getcwd(), "steamapps/workshop/content", STEAMAPP_ID)
     ]
     for p in possible_paths:
@@ -434,7 +423,10 @@ if __name__ == "__main__":
         if initial_mods:
             resolved_info = resolve_dependencies(initial_mods, ignored_ids)
             
-            if not args.offline:
+            # Global offline check
+            is_offline = args.offline or os.getenv("UKSFTA_OFFLINE") == "1"
+
+            if not is_offline:
                 # 1. Load current lock to compare versions
                 lock_data = {"mods": {}}
                 if os.path.exists(LOCK_FILE):
@@ -448,16 +440,12 @@ if __name__ == "__main__":
                     locked_ts = locked_mod.get("updated", "0")
                     current_ts = info["updated"]
                     
-                    # Check if files actually exist in addons/
                     files_exist = all(os.path.exists(f) for f in locked_mod.get("files", [])) if locked_mod.get("files") else False
                     
-                    # RETROACTIVE LOCK: If we have files but no TS, we don't need to download
                     if locked_ts == "0" and files_exist:
                         continue
 
-                    if current_ts != locked_ts:
-                        needs_download.append(mid)
-                    elif not files_exist:
+                    if current_ts != locked_ts or not files_exist:
                         needs_download.append(mid)
 
                 if needs_download:
@@ -465,7 +453,7 @@ if __name__ == "__main__":
                 else:
                     print("\n✅ All Workshop dependencies are already at the latest version or locked.")
             else:
-                print("\n[!] Offline Mode: Skipping SteamCMD downloads. Syncing from local cache only.")
+                print("\n[!] Offline Mode Active: Skipping SteamCMD. Syncing from local Steam cache only.")
         else:
             print("No external mods defined. Running workspace maintenance...")
             
