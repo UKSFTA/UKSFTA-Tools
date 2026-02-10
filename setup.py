@@ -61,18 +61,25 @@ def setup_project():
                 src_item_abs = os.path.join(src_cat_abs, item)
                 dst_item_abs = os.path.join(dst_cat_abs, item)
                 
+                # We want the symlink to point to the .uksf_tools relative path
+                # e.g. .hemtt/hooks/pre_build/01.rhai -> ../../../.uksf_tools/hemtt/hooks/pre_build/01.rhai
+                rel_src = os.path.relpath(src_item_abs, project_root)
+                # If we are in a project, 'tools_dir' is the absolute path to UKSFTA-Tools
+                # We need to find where UKSFTA-Tools is relative to project_root (usually .uksf_tools)
+                submodule_path = os.path.relpath(tools_dir, project_root)
+                
                 if os.path.isdir(src_item_abs):
                     os.makedirs(dst_item_abs, exist_ok=True)
                     for subitem in os.listdir(src_item_abs):
-                        s_abs = os.path.join(src_item_abs, subitem)
                         d_abs = os.path.join(dst_item_abs, subitem)
-                        rel_path = os.path.relpath(s_abs, os.path.dirname(d_abs))
-                        os.symlink(rel_path, d_abs)
-                        print(f" Linked: .hemtt/{category}/{item}/{subitem}")
+                        # Path from .hemtt/... to .uksf_tools/...
+                        target = os.path.join(submodule_path, "hemtt", category, item, subitem)
+                        rel_target = os.path.relpath(os.path.join(project_root, target), os.path.dirname(d_abs))
+                        os.symlink(rel_target, d_abs)
                 else:
-                    rel_path = os.path.relpath(src_item_abs, os.path.dirname(dst_item_abs))
-                    os.symlink(rel_path, dst_item_abs)
-                    print(f" Linked: .hemtt/{category}/{item}")
+                    target = os.path.join(submodule_path, "hemtt", category, item)
+                    rel_target = os.path.relpath(os.path.join(project_root, target), os.path.dirname(dst_item_abs))
+                    os.symlink(rel_target, dst_item_abs)
 
     # 4. Copy GitHub Workflows
     workflow_src_dir = os.path.join(tools_dir, ".github", "workflows")
