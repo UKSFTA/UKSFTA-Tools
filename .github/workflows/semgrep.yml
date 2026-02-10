@@ -1,0 +1,43 @@
+name: Semgrep
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * 1' # Weekly scan on Mondays
+
+jobs:
+  semgrep:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+    container:
+      image: returntocorp/semgrep
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run Semgrep
+        run: |
+          semgrep 
+            --sarif --output report.sarif 
+            --metrics=off 
+            --config="p/security-audit" 
+            --config="p/python" 
+            --config="p/javascript" 
+            --config="p/secrets"
+
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: report.sarif
+        if: always()
