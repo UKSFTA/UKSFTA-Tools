@@ -322,6 +322,12 @@ def sync_mods(resolved_info):
         # Check if files actually exist in addons/
         files_exist = all(os.path.exists(f) for f in locked_info.get("files", [])) if locked_info.get("files") else False
         
+        # RETROACTIVE LOCK: If we have the files but no timestamp, lock them now to avoid a copy
+        if locked_ts == "0" and files_exist:
+            print(f"--- Retroactively locking version: {info['name']} (v{current_ts}) ---")
+            locked_info["updated"] = current_ts
+            locked_ts = current_ts
+
         if current_ts == locked_ts and files_exist:
             print(f"--- Mod up to date: {info['name']} (v{current_ts}) ---")
             current_mods[mid] = locked_info
