@@ -302,11 +302,34 @@ def cmd_workshop_tags(args):
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Manager", add_help=False)
     subparsers = parser.add_subparsers(dest="command")
-    simple_cmds = ["dashboard", "status", "sync", "pull-mods", "build", "release", "test", "clean", "cache", "validate", "audit-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-mission", "generate-docs", "generate-manifest", "update", "workshop-tags", "gh-runs", "help"]
-    for cmd in simple_cmds: subparsers.add_parser(cmd)
+    
+    # Register commands explicitly to avoid subparser conflicts
+    subparsers.add_parser("dashboard")
+    subparsers.add_parser("status")
+    subparsers.add_parser("sync")
+    subparsers.add_parser("pull-mods")
+    subparsers.add_parser("build")
+    subparsers.add_parser("release")
+    subparsers.add_parser("test")
+    subparsers.add_parser("clean")
+    subparsers.add_parser("cache")
+    subparsers.add_parser("validate")
+    subparsers.add_parser("audit-updates")
+    subparsers.add_parser("audit-deps")
+    subparsers.add_parser("audit-assets")
+    subparsers.add_parser("audit-strings")
+    subparsers.add_parser("audit-security")
+    subparsers.add_parser("generate-docs")
+    subparsers.add_parser("generate-manifest")
+    subparsers.add_parser("update")
+    subparsers.add_parser("workshop-tags")
+    subparsers.add_parser("gh-runs")
+    subparsers.add_parser("help")
+    
     p_pub = subparsers.add_parser("publish"); p_pub.add_argument("--dry-run", action="store_true")
     p_conv = subparsers.add_parser("convert"); p_conv.add_argument("files", nargs="+")
     p_miss = subparsers.add_parser("audit-mission"); p_miss.add_argument("pbo", help="Path to mission PBO")
+
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
         "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
