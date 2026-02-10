@@ -9,7 +9,7 @@ def generate_total_manifest(workspace_path):
     print(f"📋 Generating Global Unit Manifest...")
     
     parent_dir = Path(workspace_path).parent
-    projects = [d for d in parent_dir.iterdir() if d.is_dir() and (d / ".hemtt" / "project.toml").exists()]
+    projects = [d for d in parent_dir.iterdir() if d.is_dir() and d.name.startswith("UKSFTA-") and (d / ".hemtt" / "project.toml").exists()]
     
     external_mods = {} # ID -> {"name": str, "sources": list}
     internal_mods = [] 
