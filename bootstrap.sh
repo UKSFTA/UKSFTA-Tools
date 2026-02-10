@@ -1,61 +1,84 @@
 #!/bin/bash
+# ⚔️ UKSFTA Platinum DevOps Bootstrap Script
+# This script establishes a "Diamond Grade" development environment.
+# Supported: Arch (pacman), Debian/Ubuntu (apt), Fedora/RHEL (dnf), BSD/Termux (pkg)
 
-# UKSFTA Development Environment Bootstrap
-# This script installs the necessary tools for UKSFTA mod development.
+set -e
 
-echo "UKSF Taskforce Alpha - DevOps Bootstrapper"
-echo "=========================================="
+echo -e "\033[1;34m"
+echo " ⚔️  UKSF TASKFORCE ALPHA | DEVOPS BOOTSTRAP"
+echo " ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo -e "\033[0m"
 
-# 1. Check for Python
-if ! command -v python3 &> /dev/null; then
-    echo "Error: python3 is not installed. Please install it first."
-    exit 1
-fi
+# --- 1. OS DETECTION & SYSTEM PKG INSTALL ---
+install_pkg() {
+    if command -v pacman &> /dev/null; then
+        echo "📦 [pacman] Installing system dependencies..."
+        sudo pacman -S --needed --noconfirm git github-cli python-pip ffmpeg zip unzip gnupg
+    elif command -v apt-get &> /dev/null; then
+        echo "📦 [apt] Installing system dependencies..."
+        sudo apt-get update
+        sudo apt-get install -y git gh python3-pip ffmpeg zip unzip gnupg
+    elif command -v dnf &> /dev/null; then
+        echo "📦 [dnf] Installing system dependencies..."
+        sudo dnf install -y git gh python3-pip ffmpeg zip unzip gnupg
+    elif command -v pkg &> /dev/null; then
+        echo "📦 [pkg] Installing system dependencies..."
+        sudo pkg install -y git gh python3-pip ffmpeg zip unzip gnupg
+    else
+        echo "⚠️  Package manager not recognized. Please ensure git, gh, python3, ffmpeg, and zip are installed."
+    fi
+}
 
-# 2. Install HEMTT (Linux)
+install_pkg
+
+# --- 2. PYTHON ENVIRONMENT ---
+echo "🐍 Setting up Python environment..."
+# We use --break-system-packages for modern distros where pip is restricted
+# or recommend a venv if they prefer. For unit use, direct install is often easier.
+python3 -m pip install --upgrade rich --break-system-packages 2>/dev/null || \
+python3 -m pip install --upgrade rich || \
+echo "⚠️  Could not install 'rich' via pip. Workspace Manager visuals may be degraded."
+
+# --- 3. ARMA DEVELOPMENT TOOLS ---
+# HEMTT (The Builder)
 if ! command -v hemtt &> /dev/null; then
-    echo "Installing HEMTT..."
-    curl -s https://api.github.com/repos/vurtual/hemtt/releases/latest | 
-    grep "browser_download_url.*hemtt_linux_x86_64.zip" | 
-    cut -d : -f 2,3 | 
-    tr -d " | 
-    wget -qi - -O hemtt.zip
-    unzip hemtt.zip
-    chmod +x hemtt
-    sudo mv hemtt /usr/local/bin/
-    rm hemtt.zip
-    echo "HEMTT installed."
+    echo "🏗️  Installing HEMTT..."
+    curl -s https://get.hemtt.dev | sh
+    [ -f ./hemtt ] && sudo mv hemtt /usr/local/bin/
 else
-    echo "HEMTT already installed: $(hemtt --version)"
+    echo "✅ HEMTT is already installed."
 fi
 
-# 3. Install SteamCMD (Linux)
-if ! command -v steamcmd &> /dev/null; then
-    echo "Installing SteamCMD..."
-    sudo apt-get update
-    sudo apt-get install -y steamcmd
-    # Create symlink for easier access
-    sudo ln -s /usr/games/steamcmd /usr/local/bin/steamcmd
-    echo "SteamCMD installed."
+# Mikero's Tools (Required for Mission Auditor)
+echo "🔍 Checking for Mikero's Tools..."
+MISSING_MIKERO=0
+command -v extractpbo &> /dev/null || MISSING_MIKERO=1
+command -v derap &> /dev/null || MISSING_MIKERO=1
+
+if [ $MISSING_MIKERO -eq 1 ]; then
+    echo -e "\033[1;33m"
+    echo "⚠️  Mikero's Tools (extractpbo/derap) not found."
+    echo "👉 Manual installation required: https://mikero.bytex.digital/Downloads"
+    echo -e "\033[0m"
 else
-    echo "SteamCMD already installed."
+    echo "✅ Mikero's Tools verified."
 fi
 
-# 4. Install GitHub CLI (Linux)
-if ! command -v gh &> /dev/null; then
-    echo "Installing GitHub CLI..."
-    type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
-    sudo mkdir -p -m 755 /etc/apt/keyrings
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/etc/apt/keyrings/githubcli-archive-keyring.gpg
-    sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-    sudo apt update
-    sudo apt install gh -y
-    echo "GitHub CLI installed."
+# --- 4. GIT & SECURITY CONFIG ---
+echo "🛡️  Verifying Security Posture..."
+if ! gpg --list-secret-keys --keyid-format LONG | grep -q "sec"; then
+    echo "ℹ️  Note: No GPG signing keys found. Remember to run 'gpg --full-generate-key' for Diamond commits."
 else
-    echo "GitHub CLI already installed."
+    echo "✅ GPG Infrastructure ready."
 fi
 
-echo ""
-echo "Setup complete! You are ready to develop for UKSFTA."
-echo "Next steps: Run './sync_tools.sh' in your development root."
+# Ensure git is configured for the unit standard
+if [ -z "$(git config --global user.signingkey)" ]; then
+    echo "ℹ️  Note: GPG signing is NOT enabled globally. Unit standard requires -S flag."
+fi
+
+echo " ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo -e "\033[1;32m🎉 Setup Complete! Your environment is now Diamond Grade.\033[0m"
+echo "   Run: ./tools/workspace_manager.py help"
+echo " ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
