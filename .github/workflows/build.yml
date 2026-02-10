@@ -44,7 +44,7 @@ jobs:
           if [ -f ".uksf_tools/tools/size_reporter.py" ]; then
             python3 .uksf_tools/tools/size_reporter.py
           else
-            python3 tools/size_reporter.py
+            CHECKER=".uksf_tools/tools/size_reporter.py"; if [ ! -f "$CHECKER" ]; then CHECKER="tools/size_reporter.py"; fi; python3 "$CHECKER"
           fi
 
       - name: Mod Integrity Check

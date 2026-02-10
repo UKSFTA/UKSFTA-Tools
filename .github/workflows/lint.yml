@@ -37,10 +37,10 @@ jobs:
           python3 "$CHECKER"
 
       - name: Validate Stringtables
-        run: python3 tools/stringtable_validator.py
+        run: CHECKER=".uksf_tools/tools/stringtable_validator.py"; if [ ! -f "$CHECKER" ]; then CHECKER="tools/stringtable_validator.py"; fi; python3 "$CHECKER"
 
       - name: Validate SQF
-        run: python3 tools/sqf_validator.py
+        run: CHECKER=".uksf_tools/tools/sqf_validator.py"; if [ ! -f "$CHECKER" ]; then CHECKER="tools/sqf_validator.py"; fi; python3 "$CHECKER"
 
       - name: Validate Return Types
         run: python3 tools/return_checker.py
