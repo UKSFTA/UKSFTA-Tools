@@ -427,26 +427,20 @@ if __name__ == "__main__":
             is_offline = args.offline or os.getenv("UKSFTA_OFFLINE") == "1"
 
             if not is_offline:
-                # 1. Load current lock to compare versions
+                # ... (standard download logic remains) ...
                 lock_data = {"mods": {}}
                 if os.path.exists(LOCK_FILE):
                     with open(LOCK_FILE, "r") as f:
                         lock_data = json.load(f)
 
-                # 2. Only download if timestamp changed or files are missing
                 needs_download = []
                 for mid, info in resolved_info.items():
                     locked_mod = lock_data["mods"].get(mid, {})
                     locked_ts = locked_mod.get("updated", "0")
                     current_ts = info["updated"]
-                    
                     files_exist = all(os.path.exists(f) for f in locked_mod.get("files", [])) if locked_mod.get("files") else False
-                    
-                    if locked_ts == "0" and files_exist:
-                        continue
-
-                    if current_ts != locked_ts or not files_exist:
-                        needs_download.append(mid)
+                    if locked_ts == "0" and files_exist: continue
+                    if current_ts != locked_ts or not files_exist: needs_download.append(mid)
 
                 if needs_download:
                     run_steamcmd(needs_download)
@@ -454,8 +448,25 @@ if __name__ == "__main__":
                     print("\n✅ All Workshop dependencies are already at the latest version or locked.")
             else:
                 print("\n[!] Offline Mode Active: Skipping SteamCMD. Syncing from local Steam cache only.")
+                # OFFLINE CHECK: Identify what is missing from the local Steam cache
+                missing_manual = []
+                base_workshop_path = get_workshop_cache_path()
+                for mid, info in resolved_info.items():
+                    mod_path = os.path.join(base_workshop_path, mid) if base_workshop_path else None
+                    if not mod_path or not os.path.exists(mod_path):
+                        missing_manual.append((info['name'], mid))
+                
+                if missing_manual:
+                    print("\n" + "!"*60)
+                    print("⚠️  ACTION REQUIRED: The following mods are missing from your cache.")
+                    print("Please subscribe to them in the Steam Desktop Client:")
+                    for name, mid in missing_manual:
+                        print(f"  - Mod:  {name}")
+                        print(f"    Link: https://steamcommunity.com/sharedfiles/filedetails/?id={mid}")
+                    print("!"*60 + "\n")
         else:
             print("No external mods defined. Running workspace maintenance...")
+
             
         sync_mods(resolved_info)
         print("\nSuccess: Workspace synced and cleaned.")
