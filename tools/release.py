@@ -397,10 +397,6 @@ def main():
                 print(f"Creating GitHub Release for {tag_name}...")
                 gh_cmd = ["gh", "release", "create", tag_name, latest_zip, "--title", f"Release {new_version}", "--notes", changelog, "--latest"]
                 subprocess.run(gh_cmd, check=False)
-            
-    except subprocess.CalledProcessError as e:
-        print(f"\nError during upload: {e}")
-        sys.exit(1)
 
 if __name__ == "__main__":
     main()
