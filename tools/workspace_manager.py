@@ -38,7 +38,7 @@ def get_projects():
     parent_dir = Path(__file__).parent.parent.parent
     projects = []
     for d in parent_dir.iterdir():
-        if d.is_dir() and (d / ".hemtt" / "project.toml").exists():
+        if d.is_dir() and d.name.startswith("UKSFTA-") and (d / ".hemtt" / "project.toml").exists():
             projects.append(d)
     return sorted(projects)
 

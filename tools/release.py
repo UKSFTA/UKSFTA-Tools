@@ -127,6 +127,10 @@ def generate_content_list():
             if "[ignore]" in clean_line.lower() or "[ignored]" in clean_line.lower():
                 break
 
+            # Respect inline ignore
+            if "ignore=" in clean_line.lower() or "@ignore" in clean_line.lower():
+                continue
+
             match = re.search(r"(?:id=)?(\d{8,})", clean_line)
             if not match: continue
             mid = match.group(1)
