@@ -53,13 +53,3 @@ jobs:
           CHECKER=".uksf_tools/tools/mod_integrity_checker.py"
           if [ ! -f "$CHECKER" ]; then CHECKER="tools/mod_integrity_checker.py"; fi
           python3 "$CHECKER" .hemttout/build --unsigned
-
-      - name: Notify Discord
-        if: always()
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          JOB_STATUS: ${{ job.status }}
-        run: |
-          CHECKER=".uksf_tools/tools/notify_discord.py"
-          if [ ! -f "$CHECKER" ]; then CHECKER="tools/notify_discord.py"; fi
-          python3 "$CHECKER"
