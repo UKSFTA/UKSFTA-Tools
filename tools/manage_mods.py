@@ -98,7 +98,7 @@ def get_ignored_ids_from_file():
 
 def get_workshop_metadata(mod_id):
     url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={mod_id}"
-    info = {"name": f"Mod {mod_id}", "dependencies": []}
+    info = {"name": f"Mod {mod_id}", "dependencies": [], "updated": "0"}
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -108,6 +108,11 @@ def get_workshop_metadata(mod_id):
             match = re.search(r'<div class="workshopItemTitle">(.*?)</div>', page)
             if match:
                 info["name"] = html.unescape(match.group(1).strip())
+            
+            # Timestamp (Reliable Unix Epoch from Steam)
+            ts_match = re.search(r'data-timestamp="(\d+)"', page)
+            if ts_match:
+                info["updated"] = ts_match.group(1)
             
             # Dependencies (Required Items) - Robust search
             # Look for links within the RequiredItems container
@@ -275,6 +280,7 @@ def sync_mods(resolved_info):
         lock_data = {"mods": {}}
 
     current_mods = {}
+    # ... path detection ...
     home = os.path.expanduser("~")
     possible_paths = [
         os.path.join(home, ".steam/steam/steamapps/workshop/content", STEAMAPP_ID),
@@ -291,7 +297,6 @@ def sync_mods(resolved_info):
             break
             
     if not base_workshop_path:
-        # Check if we're in a test environment to avoid exit
         if "unittest" in sys.modules or "pytest" in sys.modules:
             base_workshop_path = "/tmp/workshop_mock"
             os.makedirs(base_workshop_path, exist_ok=True)
@@ -301,7 +306,6 @@ def sync_mods(resolved_info):
 
     os.makedirs(ADDONS_DIR, exist_ok=True)
     
-    # Aggressively purge keys directory to ensure no external keys leak into the build
     if os.path.exists(KEYS_DIR):
         print(f"--- Purging {KEYS_DIR} to remove external keys ---")
         shutil.rmtree(KEYS_DIR)
@@ -309,15 +313,30 @@ def sync_mods(resolved_info):
 
     for mid, info in resolved_info.items():
         mod_path = os.path.join(base_workshop_path, mid)
+        
+        # VERSION TRACKING: Check if we can skip this mod
+        locked_info = lock_data["mods"].get(mid, {})
+        locked_ts = locked_info.get("updated", "0")
+        current_ts = info.get("updated", "1") # Default to 1 if unknown to trigger sync
+        
+        # Check if files actually exist in addons/
+        files_exist = all(os.path.exists(f) for f in locked_info.get("files", [])) if locked_info.get("files") else False
+        
+        if current_ts == locked_ts and files_exist:
+            print(f"--- Mod up to date: {info['name']} (v{current_ts}) ---")
+            current_mods[mid] = locked_info
+            continue
+
         if not os.path.exists(mod_path):
             print(f"Warning: Mod {info['name']} ({mid}) not found in workshop cache.")
             continue
             
-        print(f"--- Syncing: {info['name']} ---")
+        print(f"--- Syncing: {info['name']} (v{current_ts}) ---")
         current_mods[mid] = {
             "files": [], 
             "name": info["name"],
-            "dependencies": info["dependencies"]
+            "dependencies": info["dependencies"],
+            "updated": current_ts
         }
         
         for root, dirs, files in os.walk(mod_path):
@@ -383,7 +402,29 @@ if __name__ == "__main__":
         resolved_info = {}
         if initial_mods:
             resolved_info = resolve_dependencies(initial_mods, ignored_ids)
-            run_steamcmd(set(resolved_info.keys()))
+            
+            # 1. Load current lock to compare versions
+            lock_data = {"mods": {}}
+            if os.path.exists(LOCK_FILE):
+                with open(LOCK_FILE, "r") as f:
+                    lock_data = json.load(f)
+
+            # 2. Only download if timestamp changed or files are missing
+            needs_download = []
+            for mid, info in resolved_info.items():
+                locked_ts = lock_data["mods"].get(mid, {}).get("updated", "0")
+                if info["updated"] != locked_ts:
+                    needs_download.append(mid)
+                else:
+                    # Even if timestamp matches, check if files were deleted
+                    locked_files = lock_data["mods"].get(mid, {}).get("files", [])
+                    if not locked_files or not all(os.path.exists(f) for f in locked_files):
+                        needs_download.append(mid)
+
+            if needs_download:
+                run_steamcmd(needs_download)
+            else:
+                print("\n✅ All Workshop dependencies are already at the latest version.")
         else:
             print("No external mods defined. Running workspace maintenance...")
             
