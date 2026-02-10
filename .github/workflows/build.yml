@@ -54,10 +54,12 @@ jobs:
           if [ ! -f "$CHECKER" ]; then CHECKER="tools/mod_integrity_checker.py"; fi
           python3 "$CHECKER" .hemttout/build --unsigned
 
-      - name: Upload Build Artifact
-        if: steps.check_files.outputs.is_mod == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.event.repository.name }}-${{ github.sha }}
-          path: .hemttout/build/
-          include-hidden-files: true
+      - name: Notify Discord
+        if: always()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          CHECKER=".uksf_tools/tools/notify_discord.py"
+          if [ ! -f "$CHECKER" ]; then CHECKER="tools/notify_discord.py"; fi
+          python3 "$CHECKER"

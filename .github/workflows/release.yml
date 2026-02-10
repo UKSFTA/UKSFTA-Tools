@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup HEMTT
+        uses: arma-actions/hemtt@v1
+
+      - name: Build Release
+        run: bash build.sh release
+
+      - name: Sign Artifacts
+        run: |
+          # Placeholder for key setup - ensure secrets.BIPRIVATEKEY is set
+          if [ -n "${{ secrets.BIPRIVATEKEY }}" ]; then
+             echo "${{ secrets.BIPRIVATEKEY }}" > .biprivatekey
+             # Resign logically if needed, but build.sh release usually handles it
+          fi
+
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            git log --oneline --no-merges > changelog.txt
+          else
+            git log ${PREV_TAG}..HEAD --oneline --no-merges > changelog.txt
+          fi
+          echo "BODY_PATH=changelog.txt" >> $GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: releases/*.zip
+          body_path: ${{ env.BODY_PATH }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify Discord
+        if: always()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          CHECKER=".uksf_tools/tools/notify_discord.py"
+          if [ ! -f "$CHECKER" ]; then CHECKER="tools/notify_discord.py"; fi
+          python3 "$CHECKER"
