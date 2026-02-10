@@ -324,12 +324,14 @@ def sync_mods(resolved_info):
         
         # RETROACTIVE LOCK: If we have the files but no timestamp, lock them now to avoid a copy
         if locked_ts == "0" and files_exist:
-            print(f"--- Retroactively locking version: {info['name']} (v{current_ts}) ---")
+            ver_str = f"v{current_ts}" if current_ts != "0" else "Base Release"
+            print(f"--- Retroactively locking version: {info['name']} ({ver_str}) ---")
             locked_info["updated"] = current_ts
             locked_ts = current_ts
 
         if current_ts == locked_ts and files_exist:
-            print(f"--- Mod up to date: {info['name']} (v{current_ts}) ---")
+            ver_str = f"v{current_ts}" if current_ts != "0" else "Base Release"
+            print(f"--- Mod up to date: {info['name']} ({ver_str}) ---")
             current_mods[mid] = locked_info
             continue
 
