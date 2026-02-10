@@ -51,12 +51,15 @@ if [ $STATUS -eq 0 ]; then
         rm -rf "$STAGING_DIR"
         mkdir -p "$STAGING_DIR/$MOD_FOLDER_NAME"
         
+        echo "  - Staging release contents..."
         # Copy release contents into the @Folder
         cp -r .hemttout/release/* "$STAGING_DIR/$MOD_FOLDER_NAME/"
         
+        echo "  - Synchronizing staging metadata..."
         # Ensure staging metadata is also fixed and name is synced
         python3 tools/fix_timestamps.py "$STAGING_DIR" "$PROJECT_NAME" "$WORKSHOP_ID"
         
+        echo "  - Creating ZIP archive: $ZIP_NAME"
         (cd "$STAGING_DIR" && zip -q -r "$PROJECT_ROOT/releases/$ZIP_NAME" "$MOD_FOLDER_NAME")
         
         # Centralization support: Detect the Unit Hub
@@ -70,6 +73,7 @@ if [ $STATUS -eq 0 ]; then
         fi
 
         if [ -n "$CENTRAL_HUB" ]; then
+            echo "  - Consolidating release to Unit Hub..."
             mv "$PROJECT_ROOT/releases/$ZIP_NAME" "$CENTRAL_HUB/"
             rmdir "$PROJECT_ROOT/releases" 2>/dev/null
             echo "✨ Release consolidated to: $CENTRAL_HUB/$ZIP_NAME"

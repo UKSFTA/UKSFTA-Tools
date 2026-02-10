@@ -50,21 +50,33 @@ def fix_timestamps(directory, project_name=None, published_id=None):
     
     now = time.time()
     count = 0
+    # Use a set to avoid double-counting if walk behavior varies
+    processed = set()
+    
     for root, dirs, files in os.walk(directory):
         for d in dirs:
+            d_path = os.path.join(root, d)
             try:
-                os.utime(os.path.join(root, d), (now, now))
+                os.utime(d_path, (now, now))
                 count += 1
+                sys.stdout.write(f"\r  Normalizing timestamps: {count} items...")
+                sys.stdout.flush()
             except: pass
         for f in files:
             full_path = os.path.join(root, f)
             try:
                 if f.lower() == "meta.cpp":
+                    # Print meta.cpp fix on its own line above the progress
+                    sys.stdout.write("\r") # Clear current progress line
                     fix_meta_cpp(full_path, project_name, published_id)
                 os.utime(full_path, (now, now))
                 count += 1
+                sys.stdout.write(f"\r  Normalizing timestamps: {count} items...")
+                sys.stdout.flush()
             except: pass
-    print(f"  Normalized {count} timestamps.")
+    
+    # Final count summary
+    print(f"\n  Success: {count} items normalized in {directory}")
 
 if __name__ == "__main__":
     target = sys.argv[1] if len(sys.argv) > 1 else ".hemttout"
