@@ -43,7 +43,7 @@ def setup_project():
     os.symlink(target, python_tools_dst)
     print(f" Symlinked: tools/ directory -> {target}")
 
-    # 3. Symlink HEMTT Scripts/Hooks (Relative symlinks)
+    # 3. Copy HEMTT Scripts/Hooks (Copying for CI VFS compatibility)
     hemtt_src_dir = os.path.join(tools_dir, "hemtt")
     if os.path.exists(hemtt_src_dir):
         for category in os.listdir(hemtt_src_dir):
@@ -52,40 +52,21 @@ def setup_project():
             
             dst_cat_abs = os.path.join(project_root, ".hemtt", category)
             if os.path.exists(dst_cat_abs):
-                shutil.rmtree(dst_cat_abs)
-            os.makedirs(dst_cat_abs, exist_ok=True)
-
-            # Copy lint.toml to .hemtt root if it exists in templates
-            lint_src = os.path.join(tools_dir, "templates", "standard", ".hemtt", "lint.toml")
-            lint_dst = os.path.join(project_root, ".hemtt", "lint.toml")
-            if os.path.exists(lint_src):
-                if os.path.exists(lint_dst): os.remove(lint_dst)
-                shutil.copy2(lint_src, lint_dst)
-                print(f" Updated: .hemtt/lint.toml")
-
-            for item in os.listdir(src_cat_abs):
-                src_item_abs = os.path.join(src_cat_abs, item)
-                dst_item_abs = os.path.join(dst_cat_abs, item)
-                
-                # We want the symlink to point to the .uksf_tools relative path
-                # e.g. .hemtt/hooks/pre_build/01.rhai -> ../../../.uksf_tools/hemtt/hooks/pre_build/01.rhai
-                rel_src = os.path.relpath(src_item_abs, project_root)
-                # If we are in a project, 'tools_dir' is the absolute path to UKSFTA-Tools
-                # We need to find where UKSFTA-Tools is relative to project_root (usually .uksf_tools)
-                submodule_path = os.path.relpath(tools_dir, project_root)
-                
-                if os.path.isdir(src_item_abs):
-                    os.makedirs(dst_item_abs, exist_ok=True)
-                    for subitem in os.listdir(src_item_abs):
-                        d_abs = os.path.join(dst_item_abs, subitem)
-                        # Path from .hemtt/... to .uksf_tools/...
-                        target = os.path.join(submodule_path, "hemtt", category, item, subitem)
-                        rel_target = os.path.relpath(os.path.join(project_root, target), os.path.dirname(d_abs))
-                        os.symlink(rel_target, d_abs)
+                if os.path.islink(dst_cat_abs):
+                    os.remove(dst_cat_abs)
                 else:
-                    target = os.path.join(submodule_path, "hemtt", category, item)
-                    rel_target = os.path.relpath(os.path.join(project_root, target), os.path.dirname(dst_item_abs))
-                    os.symlink(rel_target, dst_item_abs)
+                    shutil.rmtree(dst_cat_abs)
+            
+            shutil.copytree(src_cat_abs, dst_cat_abs)
+            print(f" Copied: .hemtt/{category} directory")
+
+        # Copy lint.toml to .hemtt root if it exists in templates
+        lint_src = os.path.join(tools_dir, "templates", "standard", ".hemtt", "lint.toml")
+        lint_dst = os.path.join(project_root, ".hemtt", "lint.toml")
+        if os.path.exists(lint_src):
+            if os.path.exists(lint_dst): os.remove(lint_dst)
+            shutil.copy2(lint_src, lint_dst)
+            print(f" Updated: .hemtt/lint.toml")
 
     # 4. Copy GitHub Workflows
     workflow_src_dir = os.path.join(tools_dir, ".github", "workflows")
