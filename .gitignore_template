@@ -33,6 +33,9 @@ all_releases/
 *.bak
 __pycache__/
 .pytest_cache/
+.uksf_tools/
+tools/
+!tools/README.md
 
 # System
 .DS_Store

@@ -29,13 +29,19 @@ def setup_project():
             os.remove(d_abs)
         os.makedirs(d_abs, exist_ok=True)
 
-    # 2. Copy Tools
-    python_tools_src = os.path.join(tools_dir, "tools")
+    # 2. Symlink Tools
+    submodule_path = os.path.relpath(tools_dir, project_root)
     python_tools_dst = os.path.join(project_root, "tools")
-    if os.path.exists(python_tools_dst):
-        shutil.rmtree(python_tools_dst) if not os.path.islink(python_tools_dst) else os.remove(python_tools_dst)
-    shutil.copytree(python_tools_src, python_tools_dst)
-    print(f" Copied: tools/ directory")
+    if os.path.exists(python_tools_dst) or os.path.islink(python_tools_dst):
+        if os.path.islink(python_tools_dst):
+            os.remove(python_tools_dst)
+        else:
+            shutil.rmtree(python_tools_dst)
+    
+    # Target is .uksf_tools/tools
+    target = os.path.join(submodule_path, "tools")
+    os.symlink(target, python_tools_dst)
+    print(f" Symlinked: tools/ directory -> {target}")
 
     # 3. Symlink HEMTT Scripts/Hooks (Relative symlinks)
     hemtt_src_dir = os.path.join(tools_dir, "hemtt")
