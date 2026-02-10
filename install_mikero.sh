@@ -6,7 +6,8 @@ set -e
 
 MIKERO_VERSION="0.10.13"
 TEMP_DIR="/tmp/mikero_install"
-INSTALL_URL="https://mikero.bytex.digital/api/download?filename=depbo-tools-${MIKERO_VERSION}.tar.bz2"
+# Using the specific verified download link
+INSTALL_URL="https://mikero.bytex.digital/api/download?filename=depbo-tools-${MIKERO_VERSION}-linux-amd64.tgz"
 
 echo -e "\033[1;34m"
 echo " ⚔️  UKSF TASKFORCE ALPHA | MIKERO TOOLS INSTALLER"
@@ -18,15 +19,37 @@ echo "📂 Preparing temporary workspace..."
 rm -rf "$TEMP_DIR" && mkdir -p "$TEMP_DIR"
 cd "$TEMP_DIR"
 
-# 2. Download Tools
-echo "📥 Downloading Mikero Tools v${MIKERO_VERSION}..."
-# We use a User-Agent to bypass simple anti-leech blocks
-curl -L -A "Mozilla/5.0" -o mikero.tar.bz2 "$INSTALL_URL"
+# 2. Locate or Download Tools
+# Broad search for any existing Mikero assets to avoid blocked downloads
+echo "🔍 Searching for local Mikero assets..."
+FOUND_PATH=$(find "$HOME" -name "depbo-tools-*" -not -path "*/.local/share/Trash/*" | head -n 1)
 
-# 3. Extract
-echo "📦 Extracting binaries..."
-tar -xjf mikero.tar.bz2
-cd depbo-tools-${MIKERO_VERSION}
+if [ -n "$FOUND_PATH" ]; then
+    echo "📦 Found local asset: $FOUND_PATH"
+    if [ -d "$FOUND_PATH" ]; then
+        cp -r "$FOUND_PATH" .
+        cd "$(basename "$FOUND_PATH")"
+    else
+        cp "$FOUND_PATH" mikero_asset.tgz
+        tar -xzf mikero_asset.tgz
+        cd depbo-tools-*
+    fi
+else
+    echo "📥 Downloading Mikero Tools v${MIKERO_VERSION}..."
+    # Using the provided URL with robust headers
+    curl -L -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+         -o mikero.tgz "$INSTALL_URL"
+    
+    # Check if download was successful (not an empty or html error page)
+    if [ ! -s mikero.tgz ] || grep -q "<html" mikero.tgz; then
+        echo "❌ Error: Download blocked or failed. Please download manually and place in Downloads."
+        exit 1
+    fi
+
+    echo "📦 Extracting binaries..."
+    tar -xzf mikero.tgz
+    cd depbo-tools-*
+fi
 
 # 4. Install Libraries
 echo "🔧 Installing shared libraries (requires sudo)..."
