@@ -43,7 +43,7 @@ jobs:
         run: CHECKER=".uksf_tools/tools/sqf_validator.py"; if [ ! -f "$CHECKER" ]; then CHECKER="tools/sqf_validator.py"; fi; python3 "$CHECKER"
 
       - name: Validate Return Types
-        run: python3 tools/return_checker.py
+        run: CHECKER=".uksf_tools/tools/return_checker.py"; if [ ! -f "$CHECKER" ]; then CHECKER="tools/return_checker.py"; fi; python3 "$CHECKER"
 
       - name: Validate Unused Variables
-        run: python3 tools/search_unused_privates.py
+        run: CHECKER=".uksf_tools/tools/search_unused_privates.py"; if [ ! -f "$CHECKER" ]; then CHECKER="tools/search_unused_privates.py"; fi; python3 "$CHECKER"
