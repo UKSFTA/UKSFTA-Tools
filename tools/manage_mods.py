@@ -16,18 +16,27 @@ KEYS_DIR = "keys"
 STEAMAPP_ID = "107410"  # Arma 3
 
 def load_env():
-    env_path = os.path.join(PROJECT_ROOT, ".env")
-    if os.path.exists(env_path):
-        with open(env_path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    parts = line.split("=", 1)
-                    if len(parts) == 2:
-                        key, value = parts
-                        os.environ[key.strip()] = value.strip()
+    # 1. Check local project .env
+    env_paths = [
+        os.path.join(PROJECT_ROOT, ".env"),
+        os.path.join(PROJECT_ROOT, "..", "UKSFTA-Tools", ".env")
+    ]
+    
+    for env_path in env_paths:
+        if os.path.exists(env_path):
+            # print(f"[DEBUG] Loading credentials from: {env_path}")
+            with open(env_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        parts = line.split("=", 1)
+                        if len(parts) == 2:
+                            key, value = parts
+                            os.environ[key.strip()] = value.strip()
+            # Stop after finding the first valid .env
+            return
 
 def get_mod_ids_from_file():
     mods = {}
