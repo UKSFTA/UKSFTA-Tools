@@ -28,12 +28,12 @@ jobs:
 
       - name: Run Semgrep
         run: |
-          semgrep 
-            --sarif --output report.sarif 
-            --metrics=off 
-            --config="p/security-audit" 
-            --config="p/python" 
-            --config="p/javascript" 
+          semgrep scan \
+            --sarif --output report.sarif \
+            --metrics=off \
+            --config="p/security-audit" \
+            --config="p/python" \
+            --config="p/javascript" \
             --config="p/secrets"
 
       - name: Upload SARIF file
