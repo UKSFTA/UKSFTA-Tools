@@ -128,6 +128,7 @@ def resolve_dependencies(initial_mods, ignored_ids=None):
     resolved_info = {}
     to_check = list(initial_mods.keys())
     processed = set(ignored_ids)
+    found_as_dep = set()
     
     while to_check:
         mid = to_check.pop(0)
@@ -141,14 +142,19 @@ def resolve_dependencies(initial_mods, ignored_ids=None):
         if mid in initial_mods and initial_mods[mid]:
             meta["name"] = initial_mods[mid]
             
-        print(f"Checking {meta['name']} ({mid})...")
+        # Only print Checking if it wasn't already announced as a dependency
+        if mid not in found_as_dep:
+            print(f"Checking {meta['name']} ({mid})...")
+            
         resolved_info[mid] = meta
         processed.add(mid)
         
         for dep in meta["dependencies"]:
-            if dep["id"] not in processed:
-                print(f"  Found dependency: {dep['name']} ({dep['id']})")
-                to_check.append(dep["id"])
+            dep_id = dep["id"]
+            if dep_id not in processed and dep_id not in [m for m in to_check]:
+                print(f"  Found dependency: {dep['name']} ({dep_id})")
+                to_check.append(dep_id)
+                found_as_dep.add(dep_id)
                 
     return resolved_info
 
