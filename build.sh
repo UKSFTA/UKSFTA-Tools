@@ -52,15 +52,16 @@ if [ $STATUS -eq 0 ]; then
         mkdir -p "$STAGING_DIR/$MOD_FOLDER_NAME"
         
         echo "  - Staging release contents..."
-        # Copy release contents into the @Folder
-        cp -r .hemttout/release/* "$STAGING_DIR/$MOD_FOLDER_NAME/"
+        # Use -p to preserve timestamps during copy
+        cp -rp .hemttout/release/* "$STAGING_DIR/$MOD_FOLDER_NAME/"
         
         echo "  - Synchronizing staging metadata..."
-        # Ensure staging metadata is also fixed and name is synced
+        # Ensure staging metadata is fixed
         python3 tools/fix_timestamps.py "$STAGING_DIR" "$PROJECT_NAME" "$WORKSHOP_ID"
         
-        echo "  - Creating ZIP archive: $ZIP_NAME"
-        (cd "$STAGING_DIR" && zip -q -r "$PROJECT_ROOT/releases/$ZIP_NAME" "$MOD_FOLDER_NAME")
+        echo "  - Creating ZIP archive (Fast Mode): $ZIP_NAME"
+        # Use -1 for fastest compression to speed up the process
+        (cd "$STAGING_DIR" && zip -q -1 -r "$PROJECT_ROOT/releases/$ZIP_NAME" "$MOD_FOLDER_NAME")
         
         # Centralization support: Detect the Unit Hub
         # 1. Check parent directory (Standalone)
