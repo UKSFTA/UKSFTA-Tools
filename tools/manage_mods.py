@@ -193,31 +193,35 @@ def run_steamcmd(mod_ids):
     # Get the Workshop path to force install there
     workshop_base = get_workshop_cache_path()
     if workshop_base:
-        # Move up to the root SteamApps level for the install dir
-        install_dir = os.path.abspath(os.path.join(workshop_base, "..", "..", ".."))
+        # workshop_base is .../steamapps/workshop/content/107410
+        # We want the folder containing 'steamapps' (4 levels up)
+        install_dir = os.path.abspath(os.path.join(workshop_base, "..", "..", "..", ".."))
     else:
         install_dir = os.getcwd()
 
-    cmd = ["steamcmd", "+force_install_dir", install_dir, "+login", login_user]
+    base_cmd = ["steamcmd", "+force_install_dir", install_dir, "+login", login_user]
     if login_pass:
-        cmd.append(login_pass)
+        base_cmd.append(login_pass)
         
+    # 2. Execute with live output and retry logic
     for mid in mod_ids:
-        cmd.extend(["+workshop_download_item", STEAMAPP_ID, mid])
-    cmd.append("+quit")
+        print(f"--- Syncing Item: {mid} ---")
+        attempt = 0
+        max_attempts = 3
+        while attempt < max_attempts:
+            cmd = base_cmd + ["+workshop_download_item", STEAMAPP_ID, mid, "+quit"]
+            try:
+                subprocess.run(cmd, check=True, stdout=None, stderr=subprocess.STDOUT)
+                break # Success!
+            except subprocess.CalledProcessError as e:
+                attempt += 1
+                if attempt < max_attempts:
+                    print(f"\n⚠️  Download of {mid} timed out or failed (Code {e.returncode}). Retrying ({attempt}/{max_attempts})...")
+                else:
+                    print(f"\n❌ Failed to download {mid} after {max_attempts} attempts.")
+                    sys.exit(1)
     
-    # 2. Execute with live output for progress visibility
-    try:
-        # We use a context manager to ensure the process is handled correctly
-        # stdout=None allows the process to print directly to the user's terminal, 
-        # which preserves SteamCMD's own progress indicators and colors.
-        subprocess.run(cmd, check=True, stdout=None, stderr=subprocess.STDOUT)
-        print("\n✅ SteamCMD sync completed.")
-    except subprocess.CalledProcessError as e:
-        print(f"\n❌ SteamCMD failed with exit code {e.returncode}")
-        if login_user == "anonymous":
-            print("Try adding unit credentials to .env to bypass anonymous restrictions.")
-        sys.exit(1)
+    print("\n✅ All SteamCMD syncs completed.")
 
 def get_workshop_cache_path():
     home = os.path.expanduser("~")
