@@ -8,8 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Only run if this is a mod project (has HEMTT config)
-    if: hashFiles('.hemtt/project.toml') != ''
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -17,15 +15,31 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Check for HEMTT project
+        id: check_files
+        run: |
+          if [ -f ".hemtt/project.toml" ]; then
+            echo "is_mod=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_mod=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install dependencies
+        if: steps.check_files.outputs.is_mod == 'true'
+        run: sudo apt-get update && sudo apt-get install -y zip unzip
+
       - name: Setup HEMTT
+        if: steps.check_files.outputs.is_mod == 'true'
         uses: arma-actions/hemtt@v1
         with:
           annotate: false
 
       - name: Run HEMTT build
+        if: steps.check_files.outputs.is_mod == 'true'
         run: bash build.sh build
 
       - name: Upload Build Artifact
+        if: steps.check_files.outputs.is_mod == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.repository.name }}-${{ github.sha }}
