@@ -193,12 +193,15 @@ def run_steamcmd(mod_ids):
     # Get the Workshop path to force install there
     workshop_base = get_workshop_cache_path()
     if workshop_base:
-        # workshop_base is .../steamapps/workshop/content/107410
-        # We want the folder containing 'steamapps' (4 levels up)
         install_dir = os.path.abspath(os.path.join(workshop_base, "..", "..", "..", ".."))
     else:
         install_dir = os.getcwd()
 
+    # SYSTEM CACHE REDIRECTION:
+    # We force Steam to use the library root as its "Home" to keep manifests and temp files on /ext
+    steam_env = os.environ.copy()
+    steam_env["HOME"] = install_dir
+    
     base_cmd = ["steamcmd", "+force_install_dir", install_dir, "+login", login_user]
     if login_pass:
         base_cmd.append(login_pass)
@@ -211,7 +214,8 @@ def run_steamcmd(mod_ids):
         while attempt < max_attempts:
             cmd = base_cmd + ["+workshop_download_item", STEAMAPP_ID, mid, "+quit"]
             try:
-                subprocess.run(cmd, check=True, stdout=None, stderr=subprocess.STDOUT)
+                # We pass the custom environment here
+                subprocess.run(cmd, check=True, stdout=None, stderr=subprocess.STDOUT, env=steam_env)
                 break # Success!
             except subprocess.CalledProcessError as e:
                 attempt += 1
