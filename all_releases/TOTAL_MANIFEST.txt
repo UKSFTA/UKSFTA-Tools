@@ -1,0 +1,114 @@
+============================================================
+          UKSF TASKFORCE ALPHA - TOTAL MANIFEST             
+          Generated: 2026-02-10 00:58:04
+============================================================
+
+--- INTERNAL UNIT MODS ---
+  [x] UKSFTA-Maps
+  [x] UKSFTA-Mods
+  [x] UKSFTA-Scripts
+  [x] UKSFTA-Temp
+  [x] UKSFTA-Template
+  [x] UKSFTA-Tmp
+  [x] UKSFTA-Zeus
+
+--- EXTERNAL WORKSHOP DEPENDENCIES ---
+  Mod:    AI | AI Paths
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=3623437185
+  ID:     3623437185
+  Origin: Required by [UKSFTA-Mods]
+------------------------------
+  Mod:    AI | RHS AFRF Armor Nerf
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=3604061980
+  ID:     3604061980
+  Origin: Required by [UKSFTA-Mods]
+------------------------------
+  Mod:    Boat Mod | Forward Scan Sonar For Ships
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=2281685552
+  ID:     2281685552
+  Origin: Required by [UKSFTA-Mods]
+------------------------------
+  Mod:    Boat Mod | LHA
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=3596653038
+  ID:     3596653038
+  Origin: Required by [UKSFTA-Mods]
+------------------------------
+  Mod:    Boat Mod | Paddle Mod
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=887302721
+  ID:     887302721
+  Origin: Required by [UKSFTA-Mods]
+------------------------------
+  Mod:    Camouflage | RE: Camosys
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=2128773802
+  ID:     2128773802
+  Origin: Required by [UKSFTA-Mods]
+------------------------------
+  Mod:    CTR | Dynamic Incognito System
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=3613999293
+  ID:     3613999293
+  Origin: Required by [UKSFTA-Mods]
+------------------------------
+  Mod:    Editor Extention | 3den Enhanced
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=623475643
+  ID:     623475643
+  Origin: Required by [UKSFTA-Zeus]
+------------------------------
+  Mod:    Laws Of War | Guilt & Remembrance
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=1736188034
+  ID:     1736188034
+  Origin: Required by [UKSFTA-Mods]
+------------------------------
+  Mod:    Main Campaign Assets | Acoustic Guitar Mod
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=1378775292
+  ID:     1378775292
+  Origin: Required by [UKSFTA-Temp]
+------------------------------
+  Mod:    Main Campaign Assets | FPV Drone Crocus Enhanced
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=3302605900
+  ID:     3302605900
+  Origin: Required by [UKSFTA-Temp]
+------------------------------
+  Mod:    Main Campaign Editor Extention | Deformer
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=2822758266
+  ID:     2822758266
+  Origin: Required by [UKSFTA-Temp]
+------------------------------
+  Mod:    Main Campaign Editor Extention | Trencher - Eden Trench Generation
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=3256534418
+  ID:     3256534418
+  Origin: Required by [UKSFTA-Temp]
+------------------------------
+  Mod:    Main Campaign Faction | (CUP) Ukrainian Armed Forces
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=3312210548
+  ID:     3312210548
+  Origin: Required by [UKSFTA-Temp]
+------------------------------
+  Mod:    Main Campaign | Zagorsk
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=2852097448
+  ID:     2852097448
+  Origin: Required by [UKSFTA-Maps]
+------------------------------
+  Mod:    Side Operation Assets | Jbad
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=520618345
+  ID:     520618345
+  Origin: Required by [UKSFTA-Temp]
+------------------------------
+  Mod:    Side Operation Assets | RDS Civilian Pack
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=612930542
+  ID:     612930542
+  Origin: Required by [UKSFTA-Temp]
+------------------------------
+  Mod:    Side Operation | Chernarus Redux
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=1128256978
+  ID:     1128256978
+  Origin: Required by [UKSFTA-Maps]
+------------------------------
+  Mod:    Training Map | Dagger Island
+  Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=2983546566
+  ID:     2983546566
+  Origin: Required by [UKSFTA-Maps, UKSFTA-Template]
+------------------------------
+
+============================================================
+  Summary: 19 External Dependencies | 7 Internal Modules
+============================================================

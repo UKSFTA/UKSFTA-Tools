@@ -8,23 +8,42 @@ from pathlib import Path
 
 def get_mission_addons(pbo_path, temp_dir):
     """Extract and parse mission.sqm for required addons."""
-    sqm_path = Path(temp_dir) / "mission.sqm"
+    pbo_path = os.path.abspath(pbo_path)
+    temp_dir = os.path.abspath(temp_dir)
     
-    # 1. Extract mission.sqm from PBO
-    # -P extracts a specific file
-    try:
-        subprocess.run(["extractpbo", "-P", pbo_path, "mission.sqm", str(temp_dir)], check=True, stdout=subprocess.DEVNULL)
-    except:
-        return None
+    # Clean temp dir
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir)
 
-    if not sqm_path.exists():
+    # 1. Extract mission.sqm using Mikero's -F flag
+    # Note: ExtractPBO on Linux/Wine often expects absolute paths
+    try:
+        # We try to extract mission.sqm specifically
+        subprocess.run(["extractpbo", "-P", f"-F=mission.sqm", pbo_path, temp_dir], check=True, stdout=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        # Try case-sensitive alternative just in case
+        try:
+            subprocess.run(["extractpbo", "-P", f"-F=Mission.sqm", pbo_path, temp_dir], check=True, stdout=subprocess.DEVNULL)
+        except:
+            return None
+
+    # Find the extracted file (might be nested)
+    sqm_path = None
+    for root, _, files in os.walk(temp_dir):
+        for f in files:
+            if f.lower() == "mission.sqm":
+                sqm_path = Path(root) / f
+                break
+    
+    if not sqm_path or not sqm_path.exists():
         return None
 
     # 2. Derap if binary
     try:
         subprocess.run(["derap", str(sqm_path)], check=True, stdout=subprocess.DEVNULL)
     except:
-        pass # Might already be text
+        pass 
 
     # 3. Parse Addons
     content = sqm_path.read_text(errors='ignore')
@@ -42,15 +61,12 @@ def get_mission_addons(pbo_path, temp_dir):
 def audit_mission(pbo_path, local_patches):
     print(f"🔮 Auditing Mission: {os.path.basename(pbo_path)}")
     
-    temp_dir = Path("/tmp/uksfta_audit")
-    if temp_dir.exists(): shutil.rmtree(temp_dir)
-    temp_dir.mkdir(parents=True)
-
+    temp_dir = "/tmp/uksfta_audit"
     required = get_mission_addons(pbo_path, temp_dir)
     
     if required is None:
-        print("  ❌ Error: Could not extract or parse mission.sqm from PBO.")
-        return
+        print("  ❌ Error: Could not extract or parse mission.sqm. Verify extractpbo is installed and path is valid.")
+        return None
 
     known_externals = ["A3_", "cba_", "ace_", "task_force_radio", "acre_", "rhsusf_", "rhs_", "cup_", "uk3cb_"]
     
@@ -66,7 +82,6 @@ def audit_mission(pbo_path, local_patches):
         else:
             missing.append(req)
 
-    # Return results for the Rich Table in workspace_manager
     return {
         "required": required,
         "local": resolved_local,
@@ -75,5 +90,4 @@ def audit_mission(pbo_path, local_patches):
     }
 
 if __name__ == "__main__":
-    # Test stub
     pass

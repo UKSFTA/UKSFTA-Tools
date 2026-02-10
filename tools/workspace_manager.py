@@ -250,6 +250,8 @@ def cmd_status(args):
 def cmd_sync(args):
     console = Console(force_terminal=True); print_banner(console)
     for p in get_projects(): console.print(f"🔄 [bold cyan]Syncing Dependencies:[/bold cyan] {p.name}"); subprocess.run([sys.executable, "tools/manage_mods.py", "sync"], cwd=p)
+    from manifest_generator import generate_total_manifest
+    generate_total_manifest(Path(__file__).parent.parent)
 
 def cmd_build(args):
     console = Console(force_terminal=True); print_banner(console)
@@ -263,6 +265,8 @@ def cmd_release(args):
         if proj_releases.exists():
             for zf in proj_releases.glob("*.zip"): console.print(f"   [dim]-> Consolidating: {zf.name}[/dim]"); shutil.move(str(zf), str(central_dir / zf.name))
             shutil.rmtree(str(proj_releases), ignore_errors=True)
+    from manifest_generator import generate_total_manifest
+    generate_total_manifest(Path(__file__).parent.parent)
     console.print(f"\n[bold cyan]✨ Releases consolidated to: {central_dir}[/bold cyan]")
 
 def cmd_publish(args):
