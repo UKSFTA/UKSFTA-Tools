@@ -47,6 +47,13 @@ jobs:
             python3 tools/size_reporter.py
           fi
 
+      - name: Mod Integrity Check
+        if: steps.check_files.outputs.is_mod == 'true'
+        run: |
+          CHECKER=".uksf_tools/tools/mod_integrity_checker.py"
+          if [ ! -f "$CHECKER" ]; then CHECKER="tools/mod_integrity_checker.py"; fi
+          python3 "$CHECKER" .hemttout/build --unsigned
+
       - name: Upload Build Artifact
         if: steps.check_files.outputs.is_mod == 'true'
         uses: actions/upload-artifact@v4

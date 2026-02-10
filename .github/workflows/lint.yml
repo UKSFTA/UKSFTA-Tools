@@ -21,7 +21,10 @@ jobs:
           python-version: '3.10'
 
       - name: Validate Config
-        run: python3 tools/config_style_checker.py
+        run: |
+          CHECKER=".uksf_tools/tools/config_style_checker.py"
+          if [ ! -f "$CHECKER" ]; then CHECKER="tools/config_style_checker.py"; fi
+          python3 "$CHECKER"
 
       - name: Validate Stringtables
         run: python3 tools/stringtable_validator.py
