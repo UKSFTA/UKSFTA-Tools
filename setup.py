@@ -78,9 +78,9 @@ def setup_project():
             print(f" Copied: .github/workflows/{item}")
 
     # 5. Templates & Scripts
-    for template in ["workshop_description.txt", ".env.example", "build.sh", "release.sh", "bootstrap.sh"]:
+    for template in ["workshop_description.txt", ".env.example", "build.sh", "release.sh", "bootstrap.sh", "install_mikero.sh"]:
         dst = os.path.join(project_root, template)
-        if template in ["build.sh", "release.sh", "bootstrap.sh"]:
+        if template in ["build.sh", "release.sh", "bootstrap.sh", "install_mikero.sh"]:
             # Always overwrite core scripts
             if os.path.exists(dst):
                 os.remove(dst)

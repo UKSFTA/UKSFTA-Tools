@@ -51,18 +51,11 @@ else
 fi
 
 # Mikero's Tools (Required for Mission Auditor)
-echo "🔍 Checking for Mikero's Tools..."
-MISSING_MIKERO=0
-command -v extractpbo &> /dev/null || MISSING_MIKERO=1
-command -v derap &> /dev/null || MISSING_MIKERO=1
-
-if [ $MISSING_MIKERO -eq 1 ]; then
-    echo -e "\033[1;33m"
-    echo "⚠️  Mikero's Tools (extractpbo/derap) not found."
-    echo "👉 Manual installation required: https://mikero.bytex.digital/Downloads"
-    echo -e "\033[0m"
+echo "🔍 Setting up Mikero's Tools..."
+if [ -f "./install_mikero.sh" ]; then
+    bash ./install_mikero.sh
 else
-    echo "✅ Mikero's Tools verified."
+    echo "⚠️ install_mikero.sh not found. Skipping automatic install."
 fi
 
 # --- 4. GIT & SECURITY CONFIG ---
