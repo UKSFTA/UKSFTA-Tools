@@ -107,44 +107,59 @@ def cmd_dashboard(args):
     
     for p in projects:
         version = "0.0.0"; pbos = []; ext_count = 0; sync_state = "[bold green]OK[/bold green]"
-        
-        # 1. Internal PBOs
         addons_dir = p / "addons"
         if addons_dir.exists():
             for entry in addons_dir.iterdir():
                 if entry.is_dir() and not entry.name.startswith("."): pbos.append(entry.name)
                 elif entry.suffix.lower() == ".pbo": pbos.append(entry.stem)
-        
-        # 2. External Mods Count & Lock Status
         sources_path = p / "mod_sources.txt"
         if sources_path.exists():
             with open(sources_path, 'r') as f:
                 for line in f:
                     if re.search(r"(\d{8,})", line) and "[ignore]" not in line.lower() and "ignore=" not in line.lower(): ext_count += 1
-        
         lock_path = p / "mods.lock"
         if ext_count > 0 and not lock_path.exists(): sync_state = "[bold red]PENDING[/bold red]"
-        
-        # 3. Version
         v_paths = [p / "addons" / x / "script_version.hpp" for x in ["main", "core", "maps", "zeus", "tmp", "temp"]]
         v_path = next((path for path in v_paths if path.exists()), None)
         if v_path:
             with open(v_path, 'r') as f:
                 vc = f.read(); ma = re.search(r'#define MAJOR (.*)', vc); mi = re.search(r'#define MINOR (.*)', vc); pa = re.search(r'#define PATCHLVL (.*)', vc)
                 if ma and mi and pa: version = f"{ma.group(1).strip()}.{mi.group(1).strip()}.{pa.group(1).strip()}"
-        
         pbo_str = ", ".join(pbos[:3]) + (f" (+{len(pbos)-3})" if len(pbos)>3 else "")
         table.add_row(p.name, version, pbo_str if pbos else "-", str(ext_count) if ext_count else "-", sync_state)
     console.print(table)
 
+def cmd_gh_runs(args):
+    console = Console(force_terminal=True); print_banner(console); projects = get_projects()
+    table = Table(title="Global CI/CD Monitor", box=box.ROUNDED, header_style="bold blue", border_style="blue")
+    table.add_column("Project", style="cyan", no_wrap=True); table.add_column("Workflow", style="magenta"); table.add_column("Status", justify="center")
+    table.add_column("Branch", style="dim"); table.add_column("Last Message", style="italic"); table.add_column("Age", justify="right")
+    for p in projects:
+        try:
+            res = subprocess.run(["gh", "run", "list", "--limit", "1", "--json", "status,conclusion,workflowName,headBranch,displayTitle,createdAt"], cwd=p, capture_output=True, text=True)
+            if res.returncode == 0:
+                runs = json.loads(res.stdout)
+                if not runs: table.add_row(p.name, "-", "[dim]No Runs[/dim]", "-", "-", "-"); continue
+                run = runs[0]; status_icon = "⚪"; status_style = "white"
+                if run['status'] == "completed":
+                    if run['conclusion'] == "success": status_icon = "✅ SUCCESS"; status_style = "bold green"
+                    elif run['conclusion'] == "failure": status_icon = "❌ FAILED"; status_style = "bold red"
+                    else: status_icon = f"❓ {run['conclusion'].upper()}"; status_style = "yellow"
+                else: status_icon = "⏳ RUNNING"; status_style = "bold cyan"
+                created = datetime.fromisoformat(run['createdAt'].replace('Z', '+00:00'))
+                diff = datetime.now(created.tzinfo) - created
+                age = f"{diff.days}d" if diff.days > 0 else (f"{diff.seconds // 3600}h" if diff.seconds > 3600 else f"{diff.seconds // 60}m")
+                table.add_row(p.name, run['workflowName'], f"[{status_style}]{status_icon}[/{status_style}]", run['headBranch'], run['displayTitle'][:30], age)
+            else: table.add_row(p.name, "[red]Error[/red]", "Check Auth", "-", "-", "-")
+        except Exception: table.add_row(p.name, "[red]Failed[/red]", "-", "-", "-", "-")
+    console.print(table)
+
 def cmd_audit_updates(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects()
-    table = Table(title="Steam Workshop Update Audit", box=box.ROUNDED, border_style="yellow")
+    table = Table(title="Workshop Update Audit", box=box.ROUNDED, border_style="yellow")
     table.add_column("Project", style="cyan"); table.add_column("Mod Name", style="magenta"); table.add_column("Current Version", justify="center")
     table.add_column("Live Version", justify="center"); table.add_column("Status", justify="center")
-    
-    # Aggregated list of all unique external mods across all projects
-    mod_registry = {} # ID -> {"name": str, "locked": str, "project": str}
+    mod_registry = {}
     for p in projects:
         lock_path = p / "mods.lock"
         if lock_path.exists():
@@ -152,25 +167,16 @@ def cmd_audit_updates(args):
                 data = json.load(f).get("mods", {})
                 for mid, info in data.items():
                     if mid not in mod_registry: mod_registry[mid] = {"name": info['name'], "locked": info.get('updated', '0'), "project": p.name}
-
-    if not mod_registry:
-        console.print("[yellow]No locked Workshop mods found. Run 'sync' first.[/yellow]"); return
-
+    if not mod_registry: console.print("[yellow]No locked mods found.[/yellow]"); return
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
-        task = progress.add_task(f"Checking {len(mod_registry)} mods on Workshop...", total=len(mod_registry))
+        task = progress.add_task(f"Checking Workshop...", total=len(mod_registry))
         def check_mod(mid):
-            live_ts = get_live_timestamp(mid)
-            progress.advance(task)
-            return mid, live_ts
-
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            live_results = dict(executor.map(check_mod, mod_registry.keys()))
-
+            live_ts = get_live_timestamp(mid); progress.advance(task); return mid, live_ts
+        with ThreadPoolExecutor(max_workers=10) as executor: live_results = dict(executor.map(check_mod, mod_registry.keys()))
     for mid, data in mod_registry.items():
         live_ts = live_results.get(mid, "0")
         status = "[bold green]LATEST[/bold green]" if data['locked'] == live_ts else "[bold red]UPDATE AVAILABLE[/bold red]"
         table.add_row(data['project'], data['name'], data['locked'], live_ts, status)
-    
     console.print(table)
 
 def cmd_audit_deps(args):
@@ -185,7 +191,7 @@ def cmd_audit_deps(args):
     table = Table(title="Dependency Scan", box=box.ROUNDED, border_style="blue")
     table.add_column("Config File", style="dim"); table.add_column("Health", justify="center"); table.add_column("Issues", style="bold red")
     for cfg, reqs in dependencies.items():
-        rel = cfg.relative_to(Path(__file__).parent.parent.parent); exts = ["A3_", "cba_", "ace_", "task_force_radio", "acre_", "rhsusf_", "rhs_"]
+        rel = cfg.relative_to(Path(__file__).parent.parent.parent); exts = ["A3_", "cba_", "ace_", "task_force_radio", "acre_", "rhsusf_", "rhs_", "cup_", "uk3cb_"]
         miss = [r for r in reqs if r not in defined_patches and not any(r.lower().startswith(x.lower()) for x in exts)]
         if miss: table.add_row(str(rel), "❌ [bold red]FAIL[/bold red]", ", ".join(miss))
         else: table.add_row(str(rel), "✅ [bold green]PASS[/bold green]", "[dim]Healthy[/dim]")
@@ -302,34 +308,11 @@ def cmd_workshop_tags(args):
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Manager", add_help=False)
     subparsers = parser.add_subparsers(dest="command")
-    
-    # Register commands explicitly to avoid subparser conflicts
-    subparsers.add_parser("dashboard")
-    subparsers.add_parser("status")
-    subparsers.add_parser("sync")
-    subparsers.add_parser("pull-mods")
-    subparsers.add_parser("build")
-    subparsers.add_parser("release")
-    subparsers.add_parser("test")
-    subparsers.add_parser("clean")
-    subparsers.add_parser("cache")
-    subparsers.add_parser("validate")
-    subparsers.add_parser("audit-updates")
-    subparsers.add_parser("audit-deps")
-    subparsers.add_parser("audit-assets")
-    subparsers.add_parser("audit-strings")
-    subparsers.add_parser("audit-security")
-    subparsers.add_parser("generate-docs")
-    subparsers.add_parser("generate-manifest")
-    subparsers.add_parser("update")
-    subparsers.add_parser("workshop-tags")
-    subparsers.add_parser("gh-runs")
-    subparsers.add_parser("help")
-    
+    simple_cmds = ["dashboard", "status", "sync", "pull-mods", "build", "release", "test", "clean", "cache", "validate", "audit-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "generate-manifest", "update", "workshop-tags", "gh-runs", "help"]
+    for cmd in simple_cmds: subparsers.add_parser(cmd)
     p_pub = subparsers.add_parser("publish"); p_pub.add_argument("--dry-run", action="store_true")
     p_conv = subparsers.add_parser("convert"); p_conv.add_argument("files", nargs="+")
     p_miss = subparsers.add_parser("audit-mission"); p_miss.add_argument("pbo", help="Path to mission PBO")
-
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
         "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
