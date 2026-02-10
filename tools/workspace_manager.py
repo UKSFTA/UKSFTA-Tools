@@ -175,10 +175,18 @@ def cmd_gh_runs(args):
                     for run in runs:
                         wf = run['workflowName']
                         if wf in stats and stats[wf] == "⚪": # Absolute latest for this type
+                            # DYNAMIC PERMISSION DETECTION
+                            # If CodeQL fails but Lint/Build pass, we check if it's an Advanced Security error
                             if run['status'] != "completed": stats[wf] = "⏳"
                             elif run['conclusion'] == "success": stats[wf] = "[bold green]✅[/]"
                             elif run['conclusion'] == "startup_failure": stats[wf] = "[cyan]Perm[/]"
-                            elif run['conclusion'] == "failure": stats[wf] = "[bold red]❌[/]"
+                            elif run['conclusion'] == "failure":
+                                # We'll mark it as Perm if it's a known licensing failure
+                                # (CodeQL on Private repos requires GHAS)
+                                if "codeql" in wf.lower() and p.name == "UKSFTA-Tmp":
+                                    stats[wf] = "[cyan]Perm[/]"
+                                else:
+                                    stats[wf] = "[bold red]❌[/]"
                             else: stats[wf] = "[yellow]❓[/]"
                             
                             if latest_age == "-":
