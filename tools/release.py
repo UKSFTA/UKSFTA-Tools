@@ -348,15 +348,36 @@ def main():
     if not username:
         username = input("Steam Username: ").strip()
     
+    # SteamCMD upload with retries and validation
+    # Use 'validate' to ensure local files are checked before/during upload
     cmd = ["steamcmd", "+login", username]
     if password:
         cmd.append(password)
-    cmd.extend(["+workshop_build_item", vdf_path, "+quit"])
+    cmd.extend(["+workshop_build_item", vdf_path, "validate", "+quit"])
     
-    print(f"Launching SteamCMD for user: {username}...")
+    print(f"Launching SteamCMD for user: {username} (with validation)...")
     
-    try:
-        subprocess.run(cmd, check=True)
+    max_retries = 3
+    success = False
+    for attempt in range(1, max_retries + 1):
+        try:
+            if attempt > 1:
+                print(f"Retry attempt {attempt}/{max_retries}...")
+            subprocess.run(cmd, check=True)
+            success = True
+            break
+        except subprocess.CalledProcessError as e:
+            print(f"\nAttempt {attempt} failed: {e}")
+            if attempt < max_retries:
+                import time
+                wait_time = attempt * 10
+                print(f"Waiting {wait_time}s before retrying...")
+                time.sleep(wait_time)
+            else:
+                print("All upload attempts failed.")
+                sys.exit(1)
+
+    if success:
         print("\nSUCCESS: Mod updated on Workshop.")
         
         do_tag = args.tag or args.yes
