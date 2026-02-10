@@ -177,6 +177,7 @@ def cmd_gh_runs(args):
                         if wf in stats and stats[wf] == "⚪": # Absolute latest for this type
                             if run['status'] != "completed": stats[wf] = "⏳"
                             elif run['conclusion'] == "success": stats[wf] = "[bold green]✅[/]"
+                            elif run['conclusion'] == "startup_failure": stats[wf] = "[cyan]Perm[/]"
                             elif run['conclusion'] == "failure": stats[wf] = "[bold red]❌[/]"
                             else: stats[wf] = "[yellow]❓[/]"
                             
