@@ -190,7 +190,15 @@ def run_steamcmd(mod_ids):
         print(f"\n--- Updating {len(mod_ids)} mods via SteamCMD (as anonymous) ---")
         print("[!] Warning: Anonymous downloads are often throttled. Add credentials to .env for maximum speed.")
 
-    cmd = ["steamcmd", "+login", login_user]
+    # Get the Workshop path to force install there
+    workshop_base = get_workshop_cache_path()
+    if workshop_base:
+        # Move up to the root SteamApps level for the install dir
+        install_dir = os.path.abspath(os.path.join(workshop_base, "..", "..", ".."))
+    else:
+        install_dir = os.getcwd()
+
+    cmd = ["steamcmd", "+force_install_dir", install_dir, "+login", login_user]
     if login_pass:
         cmd.append(login_pass)
         
