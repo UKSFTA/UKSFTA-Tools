@@ -40,7 +40,12 @@ jobs:
 
       - name: Mod Size Report
         if: steps.check_files.outputs.is_mod == 'true'
-        run: python3 tools/size_reporter.py
+        run: |
+          if [ -f ".uksf_tools/tools/size_reporter.py" ]; then
+            python3 .uksf_tools/tools/size_reporter.py
+          else
+            python3 tools/size_reporter.py
+          fi
 
       - name: Upload Build Artifact
         if: steps.check_files.outputs.is_mod == 'true'
