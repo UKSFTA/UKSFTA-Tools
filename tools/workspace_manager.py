@@ -131,44 +131,57 @@ def cmd_dashboard(args):
 
 def cmd_gh_runs(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects()
-    table = Table(title="Unit Pipeline Matrix (Lint | CodeQL | Build)", box=box.ROUNDED, header_style="bold blue", border_style="blue")
+    
+    # 1. Discover all unique workflow names across all repos
+    workflow_names = set()
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
+        task = progress.add_task("[cyan]Scanning for unique workflows...", total=len(projects))
+        for p in projects:
+            try:
+                res = subprocess.run(["gh", "run", "list", "--limit", "15", "--json", "workflowName"], cwd=p, capture_output=True, text=True)
+                if res.returncode == 0:
+                    runs = json.loads(res.stdout)
+                    for r in runs: workflow_names.add(r['workflowName'])
+            except: pass
+            progress.update(task, advance=1)
+    
+    sorted_workflows = sorted(list(workflow_names))
+    if not sorted_workflows:
+        console.print("[yellow]⚠️  No GitHub Actions runs found in the workspace.[/yellow]")
+        return
+
+    table = Table(title="Global Unit Pipeline Matrix", box=box.ROUNDED, header_style="bold blue", border_style="blue")
     table.add_column("Project", style="cyan", no_wrap=True)
-    table.add_column("Lint", justify="center")
-    table.add_column("CodeQL", justify="center")
-    table.add_column("Build", justify="center")
+    for wf in sorted_workflows:
+        table.add_column(wf, justify="center")
     table.add_column("Age", justify="right", style="dim")
 
+    # 2. Audit statuses for each project
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
-        task = progress.add_task("[cyan]Auditing GitHub Runners...", total=len(projects))
-        
+        task = progress.add_task("[cyan]Auditing individual runners...", total=len(projects))
         for p in projects:
-            stats = {"Lint": "⚪", "CodeQL": "⚪", "Build": "⚪", "Age": "-"}
+            stats = {wf: "⚪" for wf in sorted_workflows}
+            latest_age = "-"
             try:
-                # We pull the 5 most recent runs to find the latest state of each unique workflow
-                res = subprocess.run(["gh", "run", "list", "--limit", "10", "--json", "workflowName,conclusion,status,createdAt"], cwd=p, capture_output=True, text=True)
+                res = subprocess.run(["gh", "run", "list", "--limit", "20", "--json", "workflowName,conclusion,status,createdAt"], cwd=p, capture_output=True, text=True)
                 if res.returncode == 0:
                     runs = json.loads(res.stdout)
                     for run in runs:
-                        name = run['workflowName'].lower()
-                        key = None
-                        if "lint" in name: key = "Lint"
-                        elif "codeql" in name: key = "CodeQL"
-                        elif "build" in name or "release" in name: key = "Build"
-                        
-                        if key and stats[key] == "⚪": # Only take the absolute latest for this type
-                            if run['status'] != "completed": stats[key] = "⏳"
-                            elif run['conclusion'] == "success": stats[key] = "[bold green]✅[/]"
-                            elif run['conclusion'] == "failure": stats[key] = "[bold red]❌[/]"
-                            else: stats[key] = "[yellow]❓[/]"
+                        wf = run['workflowName']
+                        if wf in stats and stats[wf] == "⚪": # Absolute latest for this type
+                            if run['status'] != "completed": stats[wf] = "⏳"
+                            elif run['conclusion'] == "success": stats[wf] = "[bold green]✅[/]"
+                            elif run['conclusion'] == "failure": stats[wf] = "[bold red]❌[/]"
+                            else: stats[wf] = "[yellow]❓[/]"
                             
-                            if stats["Age"] == "-":
+                            if latest_age == "-":
                                 created = datetime.fromisoformat(run['createdAt'].replace('Z', '+00:00'))
                                 diff = datetime.now(created.tzinfo) - created
-                                stats["Age"] = f"{diff.days}d" if diff.days > 0 else (f"{diff.seconds // 3600}h" if diff.seconds > 3600 else f"{diff.seconds // 60}m")
+                                latest_age = f"{diff.days}d" if diff.days > 0 else (f"{diff.seconds // 3600}h" if diff.seconds > 3600 else f"{diff.seconds // 60}m")
                 
-                table.add_row(p.name, stats["Lint"], stats["CodeQL"], stats["Build"], stats["Age"])
+                table.add_row(p.name, *[stats[wf] for wf in sorted_workflows], latest_age)
             except Exception:
-                table.add_row(p.name, "[red]Err[/]", "[red]Err[/]", "[red]Err[/]", "-")
+                table.add_row(p.name, *(["[red]Err[/]"] * len(sorted_workflows)), "-")
             progress.update(task, advance=1)
 
     console.print(table)
