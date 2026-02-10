@@ -22,7 +22,7 @@ jobs:
           python-version: '3.10'
 
       - name: Audit Assets (Orphans)
-        run: python3 tools/asset_auditor.py .
+        run: CHECKER=".uksf_tools/tools/asset_auditor.py"; if [ ! -f "$CHECKER" ]; then CHECKER="tools/asset_auditor.py"; fi; python3 "$CHECKER" .
 
       - name: Audit Localization (Strings)
-        run: python3 tools/string_auditor.py .
+        run: CHECKER=".uksf_tools/tools/string_auditor.py"; if [ ! -f "$CHECKER" ]; then CHECKER="tools/string_auditor.py"; fi; python3 "$CHECKER" .
