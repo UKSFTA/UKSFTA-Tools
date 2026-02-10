@@ -13,7 +13,8 @@ PATTERNS = {
 }
 
 def audit_security(project_path):
-    print(f"🛡️  Guardian Security Audit: {os.path.basename(project_path)}")
+    # Use ASCII characters only for maximum CI compatibility
+    print(f"[SECURITY] Guardian Scan: {os.path.basename(project_path)}")
     leaks = []
     
     # 1. Check for un-ignored .env files
@@ -27,7 +28,7 @@ def audit_security(project_path):
                 is_ignored = True
         
         if not is_ignored:
-            leaks.append(f"CRITICAL: .env file found and NOT ignored in .gitignore")
+            leaks.append("CRITICAL: .env file found and NOT ignored in .gitignore")
 
     # 2. Scan code for hardcoded secrets
     code_exts = {".cpp", ".hpp", ".sqf", ".py", ".sh", ".yml", ".json", ".xml"}
@@ -44,12 +45,12 @@ def audit_security(project_path):
                 except: pass
 
     if leaks:
-        print(f"  ❌ Security risks identified!")
+        print("  [!] Security risks identified!")
         for l in leaks:
             print(f"     - {l}")
         return False
     else:
-        print("  ✅ No secrets detected. Repository is clean.")
+        print("  [OK] No secrets detected. Repository is clean.")
         return True
 
 if __name__ == "__main__":
