@@ -119,9 +119,8 @@ def cmd_dashboard(args):
                     if re.search(r"(\d{8,})", line) and "[ignore]" not in line.lower() and "ignore=" not in line.lower(): ext_count += 1
         lock_path = p / "mods.lock"
         if ext_count > 0 and not lock_path.exists(): sync_state = "[bold red]PENDING[/bold red]"
-        v_paths = [p / "addons" / x / "script_version.hpp" for x in ["main", "core", "maps", "zeus", "tmp", "temp"]]
-        v_path = next((path for path in v_paths if path.exists()), None)
-        if v_path:
+        v_path = p / "addons" / "main" / "script_version.hpp"
+        if v_path.exists():
             with open(v_path, 'r') as f:
                 vc = f.read(); ma = re.search(r'#define MAJOR (.*)', vc); mi = re.search(r'#define MINOR (.*)', vc); pa = re.search(r'#define PATCHLVL (.*)', vc)
                 if ma and mi and pa: version = f"{ma.group(1).strip()}.{mi.group(1).strip()}.{pa.group(1).strip()}"

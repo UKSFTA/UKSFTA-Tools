@@ -1,8 +1,39 @@
-__pycache__/
-*.pyc
-.pytest_cache/
-.uksf_tools/
+# UKSFTA Diamond Grade GitIgnore
+# Blocks all production artifacts and local environment files
+
+# HEMTT Artifacts
 .hemttout/
+.hemtt/
+!.hemtt/project.toml
+!.hemtt/launch.toml
+!.hemtt/lint.toml
+!.hemtt/scripts/
+!.hemtt/hooks/
+
+# Build Artifacts
 *.pbo
 *.bisign
+*.bikey
+*.zip
+*.log
+*.rpt
+*.bidry
+
+# Releases
+releases/
+all_releases/
+
+# Local Environment
 .env
+.vscode/
+.idea/
+*.swp
+*.bak
+__pycache__/
+.pytest_cache/
+
+# System
+.DS_Store
+Thumbs.db
+all_releases/*.zip
+all_releases/*.zip

@@ -4,7 +4,7 @@
 The Arma 3 engine (Real Virtuality) utilizes a **Virtual File System (VFS)**. To prevent "Corrupt Mod" errors and performance bottlenecks, UKSFTA mods strictly adhere to these VFS standards:
 
 ### **Prefix Mapping ($PBOPREFIX$)**
-Every PBO must contain a `$PBOPREFIX$` file in its root. This defines the virtual path (e.g., `z\uksfta\addons\main`). 
+Every PBO must contain a `$PBOPREFIX$` file in its root. This defines the virtual path (e.g., `z\uksfta\main`). 
 - **Requirement:** All internal references (includes, paths) must use the absolute virtual path. 
 - **Validation:** Running `hemtt script check_prefixes` verifies this across the workspace.
 

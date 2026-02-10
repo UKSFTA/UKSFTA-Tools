@@ -1,0 +1,30 @@
+# UKSFTA Diamond Grade Linting Configuration
+# Standards for the unit mod suite
+
+[cfg]
+# CfgPatches check
+cfg_patches = true
+# CfgVehicles check
+cfg_vehicles = true
+# Check for missing semi-colons
+missing_semicolon = true
+
+[sqf]
+# Check for undefined variables
+undefined_variable = true
+# Check for unused variables
+unused_variable = true
+# Check for private variable isolation
+private_variable_isolation = true
+# Check for BIS documentation headers
+bis_headers = true
+# Check for optimized count comparison
+count_comparison = true
+# Check for assigned if replacement
+if_replacement = true
+
+[stringtable]
+# Check for missing localization keys
+missing_keys = true
+# Check for duplicate keys
+duplicate_keys = true

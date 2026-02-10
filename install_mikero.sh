@@ -48,17 +48,24 @@ else
 
     echo "📦 Extracting binaries..."
     tar -xzf mikero.tgz
-    cd depbo-tools-*
+    # Find the extracted directory name dynamically
+    VERSION_DIR=$(find . -maxdepth 1 -type d -name "depbo-tools-*" | head -n 1)
+    if [ -z "$VERSION_DIR" ]; then
+        echo "❌ Error: Could not find extracted directory."
+        exit 1
+    fi
+    cd "$VERSION_DIR"
 fi
 
 # 4. Install Libraries
 echo "🔧 Installing shared libraries (requires sudo)..."
-sudo cp -v lib/*.so /usr/local/lib/
+# Use find to be path-agnostic
+sudo find lib -name "*.so*" -exec cp -v {} /usr/local/lib/ \;
 sudo ldconfig
 
 # 5. Install Binaries
 echo "🚀 Installing command-line tools..."
-sudo cp -v bin/* /usr/local/bin/
+sudo find bin -type f -exec cp -v {} /usr/local/bin/ \;
 
 # 6. Cleanup
 echo "🧹 Cleaning up..."

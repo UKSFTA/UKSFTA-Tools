@@ -1,6 +1,6 @@
 ============================================================
           UKSF TASKFORCE ALPHA - TOTAL MANIFEST             
-          Generated: 2026-02-10 00:58:04
+          Generated: 2026-02-10 20:23:15
 ============================================================
 
 --- INTERNAL UNIT MODS ---
@@ -106,7 +106,7 @@
   Mod:    Training Map | Dagger Island
   Link:   https://steamcommunity.com/sharedfiles/filedetails/?id=2983546566
   ID:     2983546566
-  Origin: Required by [UKSFTA-Maps, UKSFTA-Template]
+  Origin: Required by [UKSFTA-Maps]
 ------------------------------
 
 ============================================================

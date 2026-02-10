@@ -49,6 +49,14 @@ def setup_project():
                 shutil.rmtree(dst_cat_abs)
             os.makedirs(dst_cat_abs, exist_ok=True)
 
+            # Copy lint.toml to .hemtt root if it exists in templates
+            lint_src = os.path.join(tools_dir, "templates", "standard", ".hemtt", "lint.toml")
+            lint_dst = os.path.join(project_root, ".hemtt", "lint.toml")
+            if os.path.exists(lint_src):
+                if os.path.exists(lint_dst): os.remove(lint_dst)
+                shutil.copy2(lint_src, lint_dst)
+                print(f" Updated: .hemtt/lint.toml")
+
             for item in os.listdir(src_cat_abs):
                 src_item_abs = os.path.join(src_cat_abs, item)
                 dst_item_abs = os.path.join(dst_cat_abs, item)
@@ -92,14 +100,21 @@ def setup_project():
             shutil.copy(os.path.join(tools_dir, template), dst)
             print(f" Copied: {template}")
 
-    gitignore_path = os.path.join(project_root, ".gitignore")
-    if os.path.exists(gitignore_path):
-        with open(gitignore_path, "r") as f:
-            content = f.read()
-        if "releases/" not in content:
-            with open(gitignore_path, "a") as f:
-                f.write("\nreleases/\n")
-            print(f" Updated: .gitignore")
+    # 6. Enforce Standard .gitignore
+    gitignore_src = os.path.join(tools_dir, ".gitignore_template")
+    gitignore_dst = os.path.join(project_root, ".gitignore")
+    if os.path.exists(gitignore_src):
+        shutil.copy2(gitignore_src, gitignore_dst)
+        print(f" Updated: .gitignore (Enforced Diamond Standard)")
+
+    # 7. Cleanup Git Index (Remove accidental binaries)
+    if os.path.exists(os.path.join(project_root, ".git")):
+        # We run this to ensure no PBOs or ZIPs are being tracked
+        try:
+            # Silence output to keep the setup log clean
+            subprocess.run("git rm --cached -r *.pbo *.zip .hemttout/ releases/ 2>/dev/null", 
+                           shell=True, cwd=project_root)
+        except: pass
 
     print("\nSetup complete! Project is now production-ready.")
 

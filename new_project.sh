@@ -39,11 +39,12 @@ git submodule add git@github.com:UKSFTA/UKSFTA-Tools.git .uksf_tools
 python3 .uksf_tools/setup.py
 
 # 4. Customize metadata
+sed -i "s/Project/$PROJECT_NAME/g" mod.cpp
 sed -i "s/Project/$PROJECT_NAME/g" .hemtt/project.toml
 sed -i "s/Project/$PROJECT_NAME/g" addons/main/script_version.hpp 2>/dev/null
+sed -i "s/Project/$PROJECT_NAME/g" addons/main/\$PBOPREFIX\$ 2>/dev/null
+sed -i "s/Project/$PROJECT_NAME/g" addons/main/config.cpp 2>/dev/null
 if [ "$TEMPLATE" == "cba" ]; then
-    sed -i "s/Project/$PROJECT_NAME/g" addons/main/\$PBOPREFIX\$
-    sed -i "s/Project/$PROJECT_NAME/g" addons/main/config.cpp
     sed -i "s/project/${PROJECT_NAME,,}/g" addons/main/script_macros.hpp
 fi
 

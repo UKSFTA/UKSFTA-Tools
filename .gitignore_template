@@ -1,21 +1,39 @@
-# Arma 3 Files
-*.pbo
-*.bisign
-*.vdf
-*.biprivatekey
-*.hemttprivatekey
+# UKSFTA Diamond Grade GitIgnore
+# Blocks all production artifacts and local environment files
 
-# Project Configuration
-.env
-.env.example
-mods.lock
-__pycache__/
-
-# HEMTT
-.hemttout
-hemtt
-hemtt.exe
+# HEMTT Artifacts
+.hemttout/
+.hemtt/
+.hemttprivatekey
+!.hemtt/project.toml
+!.hemtt/launch.toml
+!.hemtt/lint.toml
+!.hemtt/scripts/
+!.hemtt/hooks/
 
 # Build Artifacts
+*.pbo
+*.bisign
+*.bikey
+*.biprivatekey
+*.zip
+*.log
+*.rpt
+*.bidry
+
+# Releases
 releases/
-/keys/
+all_releases/
+
+# Local Environment
+.env
+.vscode/
+.idea/
+*.swp
+*.bak
+__pycache__/
+.pytest_cache/
+
+# System
+.DS_Store
+Thumbs.db
