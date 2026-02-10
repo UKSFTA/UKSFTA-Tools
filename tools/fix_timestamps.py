@@ -2,6 +2,11 @@ import os
 import sys
 import time
 import re
+from datetime import datetime, timedelta
+
+def win_filetime_to_datetime(ft):
+    # Windows FileTime is 100ns intervals since Jan 1, 1601
+    return datetime(1601, 1, 1) + timedelta(microseconds=ft // 10)
 
 def get_win32_timestamp():
     unix_now = time.time()
@@ -32,7 +37,10 @@ def fix_meta_cpp(file_path, project_name=None, published_id=None):
         
         with open(file_path, "w") as f:
             f.write(content)
-        print(f"  Normalized meta.cpp (ID: {published_id}, Time: {new_timestamp})")
+        
+        # Display readable time for log auditing
+        readable = win_filetime_to_datetime(new_timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        print(f"  Normalized meta.cpp (ID: {published_id}, Time: {new_timestamp} | {readable})")
     except Exception as e:
         print(f"  Warning: Could not update meta.cpp: {e}")
 
