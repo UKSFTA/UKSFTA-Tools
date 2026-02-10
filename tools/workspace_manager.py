@@ -150,10 +150,16 @@ def cmd_gh_runs(args):
         console.print("[yellow]⚠️  No GitHub Actions runs found in the workspace.[/yellow]")
         return
 
+    # Clean display names for headers
+    display_names = {}
+    for wf in sorted_workflows:
+        clean_name = os.path.basename(wf).replace(".yml", "").replace(".yaml", "").capitalize()
+        display_names[wf] = clean_name
+
     table = Table(title="Global Unit Pipeline Matrix", box=box.ROUNDED, header_style="bold blue", border_style="blue")
     table.add_column("Project", style="cyan", no_wrap=True)
     for wf in sorted_workflows:
-        table.add_column(wf, justify="center")
+        table.add_column(display_names[wf], justify="center")
     table.add_column("Age", justify="right", style="dim")
 
     # 2. Audit statuses for each project
