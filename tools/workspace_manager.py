@@ -249,7 +249,11 @@ def cmd_status(args):
 
 def cmd_sync(args):
     console = Console(force_terminal=True); print_banner(console)
-    for p in get_projects(): console.print(f"🔄 [bold cyan]Syncing Dependencies:[/bold cyan] {p.name}"); subprocess.run([sys.executable, "tools/manage_mods.py", "sync"], cwd=p)
+    for p in get_projects(): 
+        console.print(f"🔄 [bold cyan]Syncing Dependencies:[/bold cyan] {p.name}")
+        cmd = [sys.executable, "tools/manage_mods.py", "sync"]
+        if args.offline: cmd.append("--offline")
+        subprocess.run(cmd, cwd=p)
     from manifest_generator import generate_total_manifest
     generate_total_manifest(Path(__file__).parent.parent)
 
@@ -312,8 +316,16 @@ def cmd_workshop_tags(args):
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Manager", add_help=False)
     subparsers = parser.add_subparsers(dest="command")
-    simple_cmds = ["dashboard", "status", "sync", "pull-mods", "build", "release", "test", "clean", "cache", "validate", "audit-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "generate-manifest", "update", "workshop-tags", "gh-runs", "help"]
+    
+    # Simple commands
+    simple_cmds = ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "generate-manifest", "update", "workshop-tags", "gh-runs", "help"]
     for cmd in simple_cmds: subparsers.add_parser(cmd)
+    
+    # Sync commands with offline flag
+    for cmd in ["sync", "pull-mods"]:
+        p_sync = subparsers.add_parser(cmd)
+        p_sync.add_argument("--offline", action="store_true", help="Skip SteamCMD downloads")
+
     p_pub = subparsers.add_parser("publish"); p_pub.add_argument("--dry-run", action="store_true")
     p_conv = subparsers.add_parser("convert"); p_conv.add_argument("files", nargs="+")
     p_miss = subparsers.add_parser("audit-mission"); p_miss.add_argument("pbo", help="Path to mission PBO")
