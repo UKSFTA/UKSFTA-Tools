@@ -418,19 +418,28 @@ if __name__ == "__main__":
             # 2. Only download if timestamp changed or files are missing
             needs_download = []
             for mid, info in resolved_info.items():
-                locked_ts = lock_data["mods"].get(mid, {}).get("updated", "0")
-                if info["updated"] != locked_ts:
+                locked_mod = lock_data["mods"].get(mid, {})
+                locked_ts = locked_mod.get("updated", "0")
+                current_ts = info["updated"]
+                
+                # Check if files actually exist in addons/
+                files_exist = all(os.path.exists(f) for f in locked_mod.get("files", [])) if locked_mod.get("files") else False
+                
+                # RETROACTIVE LOCK: If we have files but no TS, we don't need to download
+                if locked_ts == "0" and files_exist:
+                    # We still want to run sync_mods later to write the new lock, 
+                    # but we don't need SteamCMD
+                    continue
+
+                if current_ts != locked_ts:
                     needs_download.append(mid)
-                else:
-                    # Even if timestamp matches, check if files were deleted
-                    locked_files = lock_data["mods"].get(mid, {}).get("files", [])
-                    if not locked_files or not all(os.path.exists(f) for f in locked_files):
-                        needs_download.append(mid)
+                elif not files_exist:
+                    needs_download.append(mid)
 
             if needs_download:
                 run_steamcmd(needs_download)
             else:
-                print("\n✅ All Workshop dependencies are already at the latest version.")
+                print("\n✅ All Workshop dependencies are already at the latest version or locked.")
         else:
             print("No external mods defined. Running workspace maintenance...")
             
