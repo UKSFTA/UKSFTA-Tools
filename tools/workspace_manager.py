@@ -93,6 +93,7 @@ def cmd_help(console):
     util_table.add_row("[bold cyan]convert          [/]", "[dim]Optimize media for Arma (WAV/PNG -> OGG/PAA)[/]")
     util_table.add_row("[bold cyan]generate-docs    [/]", "[dim]Auto-generate API Manual from SQF headers[/]")
     util_table.add_row("[bold cyan]generate-manifest[/]", "[dim]Create unit-wide manifest of all mods and PBOs[/]")
+    util_table.add_row("[bold cyan]modlist-size     [/]", "[dim]Calculate total data size of any Arma 3 modlist[/]")
     util_table.add_row("[bold cyan]workshop-tags    [/]", "[dim]List all valid Arma 3 Steam Workshop tags[/]")
     util_table.add_row("[bold cyan]update           [/]", "[dim]Push latest UKSFTA-Tools to all projects[/]")
     util_table.add_row("[bold cyan]cache            [/]", "[dim]Show disk space usage of build artifacts[/]")
