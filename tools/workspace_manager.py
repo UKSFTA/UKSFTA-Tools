@@ -87,6 +87,7 @@ def cmd_help(console):
     audit_table.add_row("[bold cyan]audit-security[/]", "[dim]Scan for leaked tokens, webhooks, or private keys[/]")
     audit_table.add_row("[bold cyan]audit-mission [/]", "[dim]Verify a Mission PBO against workspace and externals[/]")
     audit_table.add_row("[bold cyan]gh-runs       [/]", "[dim]Real-time monitoring of GitHub Actions runners[/]")
+    audit_table.add_row("[bold cyan]workshop-info [/]", "[dim]Query live versions and timestamps from Steam Workshop[/]")
     
     util_table = Table(title="🛠️  Utilities & Tools", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold cyan")
     util_table.add_row("[bold cyan]convert          [/]", "[dim]Optimize media for Arma (WAV/PNG -> OGG/PAA)[/]")
@@ -360,12 +361,16 @@ def cmd_workshop_tags(args):
     console = Console(force_terminal=True); print_banner(console); tags = Path(__file__).parent / "workshop_tags.txt"
     if tags.exists(): console.print(Panel(tags.read_text(), title="Valid Workshop Tags", border_style="blue"))
 
+def cmd_workshop_info(args):
+    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "workshop_inspector.py"
+    subprocess.run([sys.executable, str(auditor)])
+
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Manager", add_help=False)
     subparsers = parser.add_subparsers(dest="command")
     
     # Simple commands
-    simple_cmds = ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "generate-manifest", "update", "workshop-tags", "gh-runs", "help"]
+    simple_cmds = ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "generate-manifest", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]
     for cmd in simple_cmds: subparsers.add_parser(cmd)
     
     # Sync commands with offline flag
@@ -383,7 +388,7 @@ def main():
         "cache": lambda a: [subprocess.run(["du", "-sh", ".hemttout"], cwd=p) for p in get_projects() if (p/".hemttout").exists()],
         "publish": cmd_publish, "audit-updates": cmd_audit_updates, "audit-deps": cmd_audit_deps, "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings,
         "audit-security": cmd_audit_security, "audit-mission": cmd_audit_mission, "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest,
-        "update": cmd_update, "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "convert": cmd_convert, "help": lambda a: cmd_help(console)
+        "update": cmd_update, "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "convert": cmd_convert, "help": lambda a: cmd_help(console)
     }
     if args.command in cmds: cmds[args.command](args)
     else: cmd_help(console)
