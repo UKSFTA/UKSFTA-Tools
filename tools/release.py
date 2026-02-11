@@ -169,11 +169,16 @@ def generate_content_list():
 def generate_changelog(last_tag):
     try:
         if last_tag == "HEAD":
-            cmd = ["git", "log", "--oneline", "--no-merges"]
+            cmd = ["git", "log", "--oneline", "--no-merges", "-n", "10"]
         else:
             cmd = ["git", "log", f"{last_tag}..HEAD", "--oneline", "--no-merges"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return result.stdout.strip()
+        # Final safety truncation
+        lines = result.stdout.strip().split("\n")
+        if len(lines) > 10:
+            lines = lines[:10]
+            lines.append("... [truncated]")
+        return "\n".join(lines)
     except:
         return "Maintenance update."
 
@@ -184,8 +189,8 @@ def create_vdf(app_id, workshop_id, content_path, changelog, preview_image=None)
             description = f.read()
 
     included_content = generate_content_list()
-    content_str = "\n".join([f" - {item}" for item in included_content])
-    description = description.replace("{{INCLUDED_CONTENT}}", content_str)
+    # Fix: generate_content_list already returns a formatted string with [*]
+    description = description.replace("{{INCLUDED_CONTENT}}", included_content)
 
     config = get_workshop_config()
     tags_vdf = ""
