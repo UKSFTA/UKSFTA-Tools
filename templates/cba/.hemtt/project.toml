@@ -28,3 +28,4 @@ authority = "UKSFTA"
 
 [hemtt.include]
 "include" = ""
+"include/x/cba/addons/main" = "x/cba/addons/main"
