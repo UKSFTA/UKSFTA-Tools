@@ -49,7 +49,10 @@ let addons_dir = HEMTT_RFS.join("addons");
 if addons_dir.exists() {
     for addon in addons_dir.list() {
         if addon.is_dir() {
-            process_addon(addon.name());
+            // In Rhai PathBuf, to_string() gives full path, we need the leaf name
+            let full_path = addon.to_string();
+            let name = full_path.regex_match("[^\\\\/]+$", "m")[0];
+            process_addon(name);
         }
     }
 }
