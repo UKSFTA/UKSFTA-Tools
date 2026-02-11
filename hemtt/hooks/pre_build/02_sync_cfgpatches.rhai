@@ -23,8 +23,8 @@ fn extract_top_level_classes(content, section) {
         "AcreRacks", "complexGearbox", "Wheels"
     ];
 
-    for line in lines {
-        // Must contain 'class', '{', and usually ':' for an overwrite or inheritance
+    for i in 0..lines.len() {
+        let line = lines[i];
         if line.contains("class") && line.contains("{") && !line.contains(section) {
             let c_idx = line.index_of("class");
             let colon_idx = line.index_of(":");
@@ -37,8 +37,8 @@ fn extract_top_level_classes(content, section) {
                 
                 // Manual trim
                 let clean_name = "";
-                let parts = name.split(" ");
-                for p in parts { if p.len() > 0 { clean_name = p; } }
+                let name_parts = name.split(" ");
+                for p in name_parts { if p.len() > 0 { clean_name = p; } }
                 
                 if clean_name.len() > 0 && !clean_name.contains("Cfg") {
                     let is_internal = false;
@@ -47,7 +47,27 @@ fn extract_top_level_classes(content, section) {
                     }
                     
                     if !is_internal {
-                        classes.push(clean_name);
+                        // SCOPED CHECK: find the end of THIS class block
+                        let has_display_name = false;
+                        let look_ahead = 0;
+                        
+                        // We search for displayName until we hit the class closure };
+                        for j in i..lines.len() {
+                            let l = lines[j];
+                            if l.contains("displayName") {
+                                has_display_name = true;
+                                break;
+                            }
+                            if l.contains("};") && j > i {
+                                break;
+                            }
+                            // Safety break to avoid infinite scan
+                            if (j - i) > 50 { break; }
+                        }
+
+                        if has_display_name {
+                            classes.push(clean_name);
+                        }
                     }
                 }
             }
@@ -71,42 +91,44 @@ if (addons_dir.exists()) {
                     let units = extract_top_level_classes(content, "CfgVehicles");
                     let weapons = extract_top_level_classes(content, "CfgWeapons");
 
-                    print("  - " + name + ": Syncing " + units.len() + " units and " + weapons.len() + " weapons");
-                    
-                    let units_str = "units[] = {";
-                    let first_u = true;
-                    for u in units {
-                        if !first_u { units_str = units_str + ","; }
-                        units_str = units_str + "\"" + u + "\"";
-                        first_u = false;
-                    }
-                    units_str = units_str + "};";
+                    if (units.len() > 0 || weapons.len() > 0) {
+                        print("  - " + name + ": Syncing " + units.len() + " units and " + weapons.len() + " weapons");
+                        
+                        let units_str = "units[] = {";
+                        let first_u = true;
+                        for u in units {
+                            if !first_u { units_str = units_str + ","; }
+                            units_str = units_str + "\"" + u + "\"";
+                            first_u = false;
+                        }
+                        units_str = units_str + "};";
 
-                    let weapons_str = "weapons[] = {";
-                    let first_w = true;
-                    for w in weapons {
-                        if !first_w { weapons_str = weapons_str + ","; }
-                        weapons_str = weapons_str + "\"" + w + "\"";
-                        first_w = false;
-                    }
-                    weapons_str = weapons_str + "};";
+                        let weapons_str = "weapons[] = {";
+                        let first_w = true;
+                        for w in weapons {
+                            if !first_w { weapons_str = weapons_str + ","; }
+                            weapons_str = weapons_str + "\"" + w + "\"";
+                            first_w = false;
+                        }
+                        weapons_str = weapons_str + "};";
 
-                    // Update metadata
-                    let u_idx = content.index_of("units[]");
-                    if (u_idx >= 0) {
-                        let end = content.index_of("};", u_idx);
-                        let old = content.sub_string(u_idx, end - u_idx + 2);
-                        content.replace(old, units_str);
-                    }
+                        let u_idx = content.index_of("units[]");
+                        if (u_idx >= 0) {
+                            let end_u = content.index_of("};", u_idx);
+                            let old_u = content.sub_string(u_idx, end_u - u_idx + 2);
+                            content.replace(old_u, units_str);
+                        }
 
-                    let w_idx = content.index_of("weapons[]");
-                    if (w_idx >= 0) {
-                        let end = content.index_of("};", w_idx);
-                        let old = content.sub_string(w_idx, end - w_idx + 2);
-                        content.replace(old, weapons_str);
+                        let w_idx = content.index_of("weapons[]");
+                        if (w_idx >= 0) {
+                            let end_w = content.index_of("};", w_idx);
+                            let old_w = content.sub_string(w_idx, end_w - w_idx + 2);
+                            content.replace(old_w, weapons_str);
+                        }
+                        
+                        config_path.create_file().write(content);
+                        print("    [!] Metadata synchronized.");
                     }
-                    
-                    config_path.create_file().write(content);
                 }
             }
         }
