@@ -205,7 +205,7 @@ def run_steamcmd(mod_ids):
         
     for mid in mod_ids:
         print(f"--- Syncing Item: {mid} ---")
-        cmd = base_cmd + ["+workshop_download_item", STEAMAPP_ID, mid, "+validate", "+quit"]
+        cmd = base_cmd + ["+workshop_download_item", STEAMAPP_ID, mid, "validate", "+quit"]
         try:
             subprocess.run(cmd, check=True, stdout=None, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as e:

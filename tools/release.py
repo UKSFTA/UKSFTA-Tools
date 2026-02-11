@@ -350,11 +350,11 @@ def main():
         username = input("Steam Username: ").strip()
     
     # SteamCMD upload with retries and validation
-    # Use '+validate' to ensure local files are checked before/during upload
+    # Use 'validate' to ensure local files are checked before/during upload
     cmd = ["steamcmd", "+login", username]
     if password:
         cmd.append(password)
-    cmd.extend(["+workshop_build_item", vdf_path, "+validate", "+quit"])
+    cmd.extend(["+workshop_build_item", vdf_path, "validate", "+quit"])
     
     print(f"Launching SteamCMD for user: {username} (with validation)...")
     
