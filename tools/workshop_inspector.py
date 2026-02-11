@@ -76,27 +76,32 @@ def main():
                     "title": detail.get("title", "Unknown"),
                     "updated": datetime.fromtimestamp(updated) if updated else "Never",
                     "size": f"{int(detail.get('file_size', 0)) / (1024*1024):.2f} MB",
-                    "status": "Live",
+                    "status": "Public",
                     "link": f"https://steamcommunity.com/sharedfiles/filedetails/?id={pid}"
                 })
             else:
+                # result 9 usually means access denied (Unlisted/Private)
                 results.append({
                     "name": proj["name"],
                     "id": pid,
                     "title": "N/A",
-                    "updated": "N/A",
+                    "updated": "Check Link",
                     "size": "N/A",
-                    "status": "Hidden/Private",
+                    "status": "Unlisted/Priv",
                     "link": f"https://steamcommunity.com/sharedfiles/filedetails/?id={pid}"
                 })
 
     # 3. Display Table
-    print(f" {'Project':<18} │ {'Status':<14} │ {'Last Updated':<20} │ {'Link'}")
-    print(f" {'─'*18}┼{'─'*16}┼{'─'*22}┼{'─'*40}")
+    print(f" {'Project':<18} │ {'Status':<14} │ {'Last Updated':<20} │ {'Workshop Link'}")
+    print(f" {'─'*18}┼{'─'*16}┼{'─'*22}┼{'─'*50}")
     
     for r in sorted(results, key=lambda x: x['name']):
-        status_icon = "✅" if r["status"] == "Live" else "🔒"
+        status_icon = "✅" if r["status"] == "Public" else "🔗"
         print(f" {r['name']:<18} │ {status_icon} {r['status']:<12} │ {str(r['updated']):<20} │ {r['link']}")
+
+    print("\n [!] Note: 'Unlisted' items may return 'Check Link' due to Steam API restrictions.")
+    print("     You can verify them manually using the direct links provided above.")
+    print("\n ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
     print("\n ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
