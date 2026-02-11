@@ -80,14 +80,15 @@ def setup_project():
             print(f" Copied: .github/workflows/{item}")
 
     # 5. Templates & Scripts
-    for template in ["workshop_description.txt", ".env.example", "build.sh", "release.sh", "bootstrap.sh", "install_mikero.sh"]:
+    for template in ["workshop_description.txt", ".env.example", "build.sh", "release.sh", "bootstrap.sh", "install_mikero.sh", "CODE_OF_CONDUCT.md", "SECURITY.md", "CONTRIBUTORS"]:
         dst = os.path.join(project_root, template)
-        if template in ["build.sh", "release.sh", "bootstrap.sh", "install_mikero.sh"]:
-            # Always overwrite core scripts
+        if template in ["build.sh", "release.sh", "bootstrap.sh", "install_mikero.sh", "CODE_OF_CONDUCT.md", "SECURITY.md", "CONTRIBUTORS"]:
+            # Always overwrite core scripts and integrity files
             if os.path.exists(dst):
                 os.remove(dst)
             shutil.copy(os.path.join(tools_dir, template), dst)
-            os.chmod(dst, 0o755) # Ensure executable
+            if template.endswith(".sh"):
+                os.chmod(dst, 0o755) # Ensure executable
             print(f" Updated: {template}")
         elif not os.path.exists(dst):
             # Only copy templates if missing
