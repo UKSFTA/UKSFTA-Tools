@@ -184,7 +184,8 @@ def create_vdf(app_id, workshop_id, content_path, changelog, preview_image=None)
             description = f.read()
 
     included_content = generate_content_list()
-    description = description.replace("{{INCLUDED_CONTENT}}", included_content)
+    content_str = "\n".join([f" - {item}" for item in included_content])
+    description = description.replace("{{INCLUDED_CONTENT}}", content_str)
 
     config = get_workshop_config()
     tags_vdf = ""
@@ -349,11 +350,11 @@ def main():
         username = input("Steam Username: ").strip()
     
     # SteamCMD upload with retries and validation
-    # Use 'validate' to ensure local files are checked before/during upload
+    # Use '+validate' to ensure local files are checked before/during upload
     cmd = ["steamcmd", "+login", username]
     if password:
         cmd.append(password)
-    cmd.extend(["+workshop_build_item", vdf_path, "validate", "+quit"])
+    cmd.extend(["+workshop_build_item", vdf_path, "+validate", "+quit"])
     
     print(f"Launching SteamCMD for user: {username} (with validation)...")
     
