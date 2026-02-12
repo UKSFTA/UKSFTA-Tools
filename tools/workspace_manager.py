@@ -271,7 +271,8 @@ def cmd_audit_mission(args):
         for config in p.glob("addons/*/config.cpp"):
             with open(config, 'r', errors='ignore') as f:
                 for m in re.finditer(r'class\s+CfgPatches\s*\{[^}]*class\s+([a-zA-Z0-9_]+)', f.read(), re.MULTILINE | re.DOTALL): defined_patches.add(m.group(1))
-    results = audit_mission(args.pbo, defined_patches); if not results: return
+    results = audit_mission(args.pbo, defined_patches)
+    if not results: return
     table = Table(title="Mission Analysis", box=box.ROUNDED, border_style="blue")
     for m in results["missing"]: table.add_row("Missing", m, "[bold red]❌[/bold red]")
     for l in results["local"]: table.add_row("UKSFTA", l, "[bold green]✅[/bold green]")
