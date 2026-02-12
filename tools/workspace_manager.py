@@ -72,83 +72,45 @@ def print_banner(console):
     console.print(banner)
 
 def cmd_help(console):
-
     print_banner(console)
-
     
-
     # 1. Workspace Operations
-
     ws_table = Table(title="🌐  Workspace Operations", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold cyan")
-
     ws_table.add_row("[bold cyan]status   [/]", "[dim]Show git status summary for every repository[/]")
-
     ws_table.add_row("[bold cyan]sync     [/]", "[dim]Pull latest Workshop updates and synchronize mods[/]")
-
     ws_table.add_row("[bold cyan]update   [/]", "[dim]Propagate latest UKSFTA-Tools to all projects[/]")
-
     ws_table.add_row("[bold cyan]clean    [/]", "[dim]Wipe all .hemttout build artifacts[/]")
-
     ws_table.add_row("[bold cyan]cache    [/]", "[dim]Show disk space usage of build artifacts[/]")
-
     
-
     # 2. Intelligence & Oversight
-
     intel_table = Table(title="🧠  Unit Intelligence", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold magenta")
-
     intel_table.add_row("[bold cyan]dashboard    [/]", "[dim]Visual overview of all projects, components, and versions[/]")
-
     intel_table.add_row("[bold cyan]workshop-info[/]", "[dim]Query live versions and timestamps from Steam Workshop[/]")
-
     intel_table.add_row("[bold cyan]modlist-size [/]", "[dim]Calculate total data size of any Arma 3 modlist[/]")
-
     intel_table.add_row("[bold cyan]audit-updates[/]", "[dim]Check live Workshop for pending mod updates[/]")
-
     intel_table.add_row("[bold cyan]gh-runs      [/]", "[dim]Real-time monitoring of GitHub Actions runners[/]")
-
     
-
     # 3. Assurance & Quality
-
     audit_table = Table(title="🔍  Assurance & Quality", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold yellow")
-
+    audit_table.add_row("[bold cyan]audit         [/]", "[dim]Master Audit: Run all health and security checks[/]")
     audit_table.add_row("[bold cyan]test          [/]", "[dim]Run full suite (pytest, hemtt check, sqflint)[/]")
-
     audit_table.add_row("[bold cyan]audit-deps    [/]", "[dim]Scan requiredAddons for missing dependencies[/]")
-
     audit_table.add_row("[bold cyan]audit-assets  [/]", "[dim]Detect orphaned/unused binary files (PAA, P3D)[/]")
-
     audit_table.add_row("[bold cyan]audit-strings [/]", "[dim]Validate stringtable keys vs SQF usage[/]")
-
     audit_table.add_row("[bold cyan]audit-security[/]", "[dim]Scan for leaked tokens, webhooks, or private keys[/]")
-
     audit_table.add_row("[bold cyan]audit-mission [/]", "[dim]Verify a Mission PBO against workspace and externals[/]")
-
     
-
     # 4. Production & Utilities
-
     prod_table = Table(title="🏗️  Production & Utilities", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold green")
-
     prod_table.add_row("[bold cyan]build            [/]", "[dim]Execute HEMTT build on all projects[/]")
-
     prod_table.add_row("[bold cyan]release          [/]", "[dim]Generate signed/packaged release ZIPs[/]")
-
     prod_table.add_row("[bold cyan]publish          [/]", "[dim]Upload projects to Steam Workshop[/]")
-
     prod_table.add_row("[bold cyan]generate-manifest[/]", "[dim]Create unit-wide manifest of all mods and PBOs[/]")
-
     prod_table.add_row("[bold cyan]generate-docs    [/]", "[dim]Auto-generate API Manual from SQF headers[/]")
-
     prod_table.add_row("[bold cyan]convert          [/]", "[dim]Optimize media for Arma (WAV/PNG -> OGG/PAA)[/]")
-
     prod_table.add_row("[bold cyan]workshop-tags    [/]", "[dim]List all valid Arma 3 Steam Workshop tags[/]")
 
-
-
     console.print(ws_table); console.print(intel_table); console.print(audit_table); console.print(prod_table)
-
     console.print("\n[dim]Usage: ./tools/workspace_manager.py <command> [args][/]\n")
 
 def cmd_dashboard(args):
@@ -184,7 +146,6 @@ def cmd_dashboard(args):
 def cmd_gh_runs(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects()
     
-    # 1. Discover all unique workflow names across all repos
     workflow_names = set()
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
         task = progress.add_task("[cyan]Scanning for unique workflows...", total=len(projects))
@@ -202,7 +163,6 @@ def cmd_gh_runs(args):
         console.print("[yellow]⚠️  No GitHub Actions runs found in the workspace.[/yellow]")
         return
 
-    # Clean display names for headers
     display_names = {}
     for wf in sorted_workflows:
         clean_name = os.path.basename(wf).replace(".yml", "").replace(".yaml", "").capitalize()
@@ -214,7 +174,6 @@ def cmd_gh_runs(args):
         table.add_column(display_names[wf], justify="center")
     table.add_column("Age", justify="right", style="dim")
 
-    # 2. Audit statuses for each project
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
         task = progress.add_task("[cyan]Auditing individual runners...", total=len(projects))
         for p in projects:
@@ -226,15 +185,11 @@ def cmd_gh_runs(args):
                     runs = json.loads(res.stdout)
                     for run in runs:
                         wf = run['workflowName']
-                        if wf in stats and stats[wf] == "⚪": # Absolute latest for this type
-                            # DYNAMIC PERMISSION DETECTION
-                            # If CodeQL fails but Lint/Build pass, we check if it's an Advanced Security error
+                        if wf in stats and stats[wf] == "⚪":
                             if run['status'] != "completed": stats[wf] = "⏳"
                             elif run['conclusion'] == "success": stats[wf] = "[bold green]✅[/]"
                             elif run['conclusion'] == "startup_failure": stats[wf] = "[cyan]Perm[/]"
                             elif run['conclusion'] == "failure":
-                                # We'll mark it as Perm if it's a known licensing failure
-                                # (CodeQL on Private repos requires GHAS)
                                 if "codeql" in wf.lower() and p.name == "UKSFTA-Tmp":
                                     stats[wf] = "[cyan]Perm[/]"
                                 else:
@@ -343,6 +298,16 @@ def cmd_audit_security(args):
         table.add_row(p.name, "[bold red]❌ LEAK[/bold red]" if "LEAK" in res.stdout or "CRITICAL" in res.stdout else "[bold green]✅ SECURE[/bold green]")
     console.print(table)
 
+def cmd_audit_full(args):
+    console = Console(force_terminal=True); print_banner(console)
+    console.print(Panel("[bold yellow]🚀 STARTING GLOBAL UNIT AUDIT[/bold yellow]", border_style="yellow"))
+    console.print("\n[bold cyan]1. Auditing Workshop Updates...[/bold cyan]"); cmd_audit_updates(args)
+    console.print("\n[bold cyan]2. Auditing Dependency Health...[/bold cyan]"); cmd_audit_deps(args)
+    console.print("\n[bold cyan]3. Auditing Resource Bloat (Assets)...[/bold cyan]"); cmd_audit_assets(args)
+    console.print("\n[bold cyan]4. Auditing Localization (Strings)...[/bold cyan]"); cmd_audit_strings(args)
+    console.print("\n[bold cyan]5. Auditing Security (Secrets/Leaks)...[/bold cyan]"); cmd_audit_security(args)
+    console.print("\n[bold green]✅ GLOBAL AUDIT COMPLETE[/bold green]")
+
 def cmd_status(args):
     console = Console(force_terminal=True); print_banner(console)
     for p in get_projects(): console.print(Panel(f"[dim]Root: {p}[/dim]", title=f"📦 {p.name}", border_style="cyan")); subprocess.run(["git", "status", "-s"], cwd=p)
@@ -422,7 +387,7 @@ def main():
     subparsers = parser.add_subparsers(dest="command")
     
     # Simple commands
-    simple_cmds = ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "generate-manifest", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]
+    simple_cmds = ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "generate-manifest", "update", "workshop-tags", "gh-runs", "workshop-info", "modlist-size", "help"]
     for cmd in simple_cmds: subparsers.add_parser(cmd)
     
     # Sync commands with offline flag
@@ -439,7 +404,7 @@ def main():
         "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
         "test": lambda a: subprocess.run(["pytest"]), "clean": lambda a: [subprocess.run(["rm", "-rf", ".hemttout"], cwd=p) for p in get_projects()],
         "cache": lambda a: [subprocess.run(["du", "-sh", ".hemttout"], cwd=p) for p in get_projects() if (p/".hemttout").exists()],
-        "publish": cmd_publish, "audit-updates": cmd_audit_updates, "audit-deps": cmd_audit_deps, "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings,
+        "publish": cmd_publish, "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "audit-deps": cmd_audit_deps, "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings,
         "audit-security": cmd_audit_security, "audit-mission": cmd_audit_mission, "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest,
         "update": cmd_update, "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "convert": cmd_convert, "help": lambda a: cmd_help(console)
     }
