@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # UKSFTA New Project Scaffold
-# Usage: ./new_project.sh [PROJECT_NAME] [TEMPLATE: standard|cba]
+# Usage: ./new_project.sh [PROJECT_NAME] [TEMPLATE: standard|cba|mission|ui]
 
 if [ -z "$1" ]; then
-    echo "Usage: ./new_project.sh [PROJECT_NAME] [TEMPLATE: standard|cba]"
+    echo "Usage: ./new_project.sh [PROJECT_NAME] [TEMPLATE: standard|cba|mission|ui]"
     exit 1
 fi
 
@@ -13,7 +13,7 @@ TEMPLATE=${2:-standard}
 TOOLS_DIR=$(pwd)
 PROJECT_DIR="../$PROJECT_NAME"
 
-if [[ "$TEMPLATE" != "standard" && "$TEMPLATE" != "cba" ]]; then
+if [[ "$TEMPLATE" != "standard" && "$TEMPLATE" != "cba" && "$TEMPLATE" != "mission" && "$TEMPLATE" != "ui" ]]; then
     echo "Error: Template must be 'standard' or 'cba'."
     exit 1
 fi
