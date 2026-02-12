@@ -86,6 +86,7 @@ def cmd_help(console):
     intel_table.add_row("[bold cyan]dashboard    [/]", "[dim]Visual overview of all projects, components, and versions[/]")
     intel_table.add_row("[bold cyan]workshop-info[/]", "[dim]Query live versions and timestamps from Steam Workshop[/]")
     intel_table.add_row("[bold cyan]modlist-size [/]", "[dim]Calculate total data size of any Arma 3 modlist[/]")
+    intel_table.add_row("[bold cyan]classify-mod [/]", "[dim]Determine if a mod is client or server side[/]")
     intel_table.add_row("[bold cyan]audit-updates[/]", "[dim]Check live Workshop for pending mod updates[/]")
     intel_table.add_row("[bold cyan]apply-updates[/]", "[dim]Automatically update and sync all out-of-date mods[/]")
     intel_table.add_row("[bold cyan]gh-runs      [/]", "[dim]Real-time monitoring of GitHub Actions runners[/]")
@@ -108,7 +109,6 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]generate-preset  [/]", "[dim]Create master HTML preset of all unit dependencies[/]")
     prod_table.add_row("[bold cyan]generate-report  [/]", "[dim]Create a Markdown health report for the entire unit[/]")
     prod_table.add_row("[bold cyan]generate-manifest[/]", "[dim]Create unit-wide manifest of all mods and PBOs[/]")
-    prod_table.add_row("[bold cyan]generate-changelog[/]", "[dim]Generate CHANGELOG.md from git commit history[/]")
     prod_table.add_row("[bold cyan]generate-vscode  [/]", "[dim]Setup VS Code Tasks for one-click development[/]")
     prod_table.add_row("[bold cyan]setup-git-hooks  [/]", "[dim]Install local pre-commit quality/security guards[/]")
     prod_table.add_row("[bold cyan]fix-syntax       [/]", "[dim]Standardize indentation and formatting in all repos[/]")
@@ -218,21 +218,6 @@ def cmd_audit_updates(args):
         table.add_row(r["project"], r["name"], r["locked"], r["live"], status)
     console.print(table)
 
-def cmd_apply_updates(args):
-    console = Console(force_terminal=True); print_banner(console); projects = get_projects()
-    for p in projects:
-        lock_path = p / "mods.lock"
-        if not lock_path.exists(): continue
-        with open(lock_path, 'r') as f: data = json.load(f).get("mods", {})
-        updates_found = False
-        for mid, info in data.items():
-            live_ts = get_live_timestamp(mid)
-            if live_ts != "0" and info.get("updated") != live_ts:
-                console.print(f"   [bold green]UPDATE[/bold green]: {info['name']} in {p.name}"); info["updated"] = live_ts; updates_found = True
-        if updates_found:
-            with open(lock_path, 'w') as f: json.dump({"mods": data}, f, indent=2)
-            subprocess.run([sys.executable, "tools/manage_mods.py", "sync"], cwd=p); subprocess.run(["git", "add", "mods.lock"], cwd=p); subprocess.run(["git", "commit", "-S", "-m", "chore: automated workshop updates"], cwd=p); subprocess.run(["git", "push", "origin", "main"], cwd=p)
-
 def cmd_status(args):
     projects = get_projects(); all_status = []
     for p in projects:
@@ -314,6 +299,9 @@ def cmd_clean_strings(args):
 def cmd_audit_performance(args):
     console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "performance_auditor.py"
     for p in get_projects(): subprocess.run([sys.executable, str(auditor), str(p)])
+
+def cmd_classify_mod(args):
+    tool = Path(__file__).parent / "mod_classifier.py"; subprocess.run([sys.executable, str(tool), args.id])
 
 def cmd_audit_deps(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects(); defined_patches = set(); dependencies = {}
@@ -423,6 +411,7 @@ def main():
     p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO"); p_miss.add_argument("pbo")
     p_size = subparsers.add_parser("modlist-size", help="Calculate size"); p_size.add_argument("file", nargs="?", default="mod_sources.txt")
     p_notify = subparsers.add_parser("notify", help="Discord update"); p_notify.add_argument("message"); p_notify.add_argument("--type", choices=["update", "release", "alert"], default="update"); p_notify.add_argument("--title")
+    p_class = subparsers.add_parser("classify-mod", help="Classify mod side requirement"); p_class.add_argument("id", help="Steam Workshop ID or URL")
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
         "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
@@ -434,7 +423,7 @@ def main():
         "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest, "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, 
         "generate-vscode": cmd_generate_vscode, "generate-changelog": cmd_generate_changelog, "setup-git-hooks": cmd_setup_git_hooks,
         "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
-        "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info,
+        "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "classify-mod": cmd_classify_mod,
         "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console)
     }
     if args.command in cmds: cmds[args.command](args)
