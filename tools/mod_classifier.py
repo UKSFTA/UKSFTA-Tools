@@ -137,10 +137,10 @@ def main():
     parser.add_argument("url_or_id", help="Steam Workshop URL or ID")
     args = parser.parse_args()
 
-    # Extract ID
-    mid_match = re.search(r"(\d{8,})", args.url_or_id)
+    # Extract ID from URL or raw ID
+    mid_match = re.search(r"(?:id=)?(\d{8,})", args.url_or_id)
     if not mid_match:
-        print("Error: Could not find a valid Workshop ID.")
+        print("Error: Could not find a valid Workshop ID in the provided link or ID.")
         sys.exit(1)
     
     mid = mid_match.group(1)
