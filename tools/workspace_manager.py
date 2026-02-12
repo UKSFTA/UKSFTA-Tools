@@ -79,26 +79,26 @@ def cmd_help(console):
     ws_table.add_row("[bold cyan]status   [/]", "[dim]Show git status summary for every repository[/]")
     ws_table.add_row("[bold cyan]sync     [/]", "[dim]Pull latest Workshop updates and synchronize mods[/]")
     ws_table.add_row("[bold cyan]update   [/]", "[dim]Propagate latest UKSFTA-Tools to all projects[/]")
-    ws_table.add_row("[bold cyan]clean    [/]", "[dim]Wipe all .hemttout build artifacts[/]")
     ws_table.add_row("[bold cyan]cache    [/]", "[dim]Show disk space usage of build artifacts[/]")
+    ws_table.add_row("[bold cyan]clean    [/]", "[dim]Wipe all .hemttout build artifacts[/]")
     
     # 2. Intelligence & Oversight
     intel_table = Table(title="🧠  Unit Intelligence", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold magenta")
     intel_table.add_row("[bold cyan]dashboard    [/]", "[dim]Visual overview of all projects, components, and versions[/]")
-    intel_table.add_row("[bold cyan]workshop-info[/]", "[dim]Query live versions and timestamps from Steam Workshop[/]")
-    intel_table.add_row("[bold cyan]modlist-size [/]", "[dim]Calculate total data size of any Arma 3 modlist[/]")
     intel_table.add_row("[bold cyan]audit-updates[/]", "[dim]Check live Workshop for pending mod updates[/]")
     intel_table.add_row("[bold cyan]gh-runs      [/]", "[dim]Real-time monitoring of GitHub Actions runners[/]")
+    intel_table.add_row("[bold cyan]modlist-size [/]", "[dim]Calculate total data size of any Arma 3 modlist[/]")
+    intel_table.add_row("[bold cyan]workshop-info[/]", "[dim]Query live versions and timestamps from Steam Workshop[/]")
     
     # 3. Assurance & Quality
     audit_table = Table(title="🔍  Assurance & Quality", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold yellow")
     audit_table.add_row("[bold cyan]audit         [/]", "[dim]Master Audit: Run all health and security checks[/]")
-    audit_table.add_row("[bold cyan]test          [/]", "[dim]Run full suite (pytest, hemtt check, sqflint)[/]")
-    audit_table.add_row("[bold cyan]audit-deps    [/]", "[dim]Scan requiredAddons for missing dependencies[/]")
     audit_table.add_row("[bold cyan]audit-assets  [/]", "[dim]Detect orphaned/unused binary files (PAA, P3D)[/]")
-    audit_table.add_row("[bold cyan]audit-strings [/]", "[dim]Validate stringtable keys vs SQF usage[/]")
-    audit_table.add_row("[bold cyan]audit-security[/]", "[dim]Scan for leaked tokens, webhooks, or private keys[/]")
+    audit_table.add_row("[bold cyan]audit-deps    [/]", "[dim]Scan requiredAddons for missing dependencies[/]")
     audit_table.add_row("[bold cyan]audit-mission [/]", "[dim]Verify a Mission PBO against workspace and externals[/]")
+    audit_table.add_row("[bold cyan]audit-security[/]", "[dim]Scan for leaked tokens, webhooks, or private keys[/]")
+    audit_table.add_row("[bold cyan]audit-strings [/]", "[dim]Validate stringtable keys vs SQF usage[/]")
+    audit_table.add_row("[bold cyan]test          [/]", "[dim]Run full suite (pytest, hemtt check, sqflint)[/]")
     
     # 4. Production & Utilities
     prod_table = Table(title="🏗️  Production & Utilities", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold green")
