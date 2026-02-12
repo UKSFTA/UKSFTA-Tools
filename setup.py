@@ -1,117 +1,101 @@
+#!/usr/bin/env python3
 import os
 import shutil
 import sys
+from pathlib import Path
 
-def setup_project():
-    project_root = os.getcwd()
-    tools_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    if os.path.abspath(project_root) == os.path.abspath(tools_dir):
-        print("Running from within Tools repository. Skipping setup.")
-        return
+# UKSFTA Project Setup & Tooling Sync
+# Physically copies hooks/scripts for CI compatibility, symlinks tools for development.
 
-    print(f"Setting up UKSFTA Tools in: {project_root}")
-    
-    # 1. Create directory structure (ensure these are REAL directories)
-    dirs = [
-        "tools",
-        "releases",
-        "include",
-        ".hemtt/scripts",
-        ".hemtt/hooks/pre_build",
-        ".hemtt/hooks/post_build",
-        ".hemtt/hooks/post_release",
-        ".github/workflows"
-    ]
-    for d in dirs:
-        d_abs = os.path.join(project_root, d)
-        if os.path.islink(d_abs):
-            os.remove(d_abs)
-        os.makedirs(d_abs, exist_ok=True)
+class SetupTools:
+    def __init__(self, target_dir):
+        self.target = Path(target_dir).resolve()
+        self.tools_src = Path(__file__).parent / "tools"
+        self.hooks_src = Path(__file__).parent / "hemtt" / "hooks"
+        self.scripts_src = Path(__file__).parent / "hemtt" / "scripts"
+        
+        if not self.tools_src.exists():
+            print(f"Error: Tools source not found at {self.tools_src}")
+            sys.exit(1)
 
-    # 2. Symlink Tools
-    submodule_path = os.path.relpath(tools_dir, project_root)
-    python_tools_dst = os.path.join(project_root, "tools")
-    if os.path.exists(python_tools_dst) or os.path.islink(python_tools_dst):
-        if os.path.islink(python_tools_dst):
-            os.remove(python_tools_dst)
-        else:
-            shutil.rmtree(python_tools_dst)
-    
-    # Target is .uksf_tools/tools
-    target = os.path.join(submodule_path, "tools")
-    os.symlink(target, python_tools_dst)
-    print(f" Symlinked: tools/ directory -> {target}")
-
-    # 3. Copy HEMTT Scripts/Hooks (Copying for CI VFS compatibility)
-    hemtt_src_dir = os.path.join(tools_dir, "hemtt")
-    if os.path.exists(hemtt_src_dir):
-        for category in os.listdir(hemtt_src_dir):
-            src_cat_abs = os.path.join(hemtt_src_dir, category)
-            if not os.path.isdir(src_cat_abs): continue
-            
-            dst_cat_abs = os.path.join(project_root, ".hemtt", category)
-            if os.path.exists(dst_cat_abs):
-                if os.path.islink(dst_cat_abs):
-                    os.remove(dst_cat_abs)
-                else:
-                    shutil.rmtree(dst_cat_abs)
-            
-            shutil.copytree(src_cat_abs, dst_cat_abs)
-            print(f" Copied: .hemtt/{category} directory")
-
-        # Copy lint.toml to .hemtt root if it exists in templates
-        lint_src = os.path.join(tools_dir, "templates", "standard", ".hemtt", "lint.toml")
-        lint_dst = os.path.join(project_root, ".hemtt", "lint.toml")
-        if os.path.exists(lint_src):
-            if os.path.exists(lint_dst): os.remove(lint_dst)
-            shutil.copy2(lint_src, lint_dst)
-            print(f" Updated: .hemtt/lint.toml")
-
-    # 4. Copy GitHub Workflows
-    workflow_src_dir = os.path.join(tools_dir, ".github", "workflows")
-    if os.path.exists(workflow_src_dir):
-        for item in os.listdir(workflow_src_dir):
-            src = os.path.join(workflow_src_dir, item)
-            dst = os.path.join(project_root, ".github", "workflows", item)
-            if os.path.exists(dst) or os.path.islink(dst):
-                os.remove(dst) if not os.path.isdir(dst) or os.path.islink(dst) else shutil.rmtree(dst)
-            shutil.copy2(src, dst)
-            print(f" Copied: .github/workflows/{item}")
-
-    # 5. Templates & Scripts
-    for template in ["workshop_description.txt", ".env.example", "build.sh", "release.sh", "bootstrap.sh", "install_mikero.sh", "CODE_OF_CONDUCT.md", "SECURITY.md", "CONTRIBUTORS"]:
-        dst = os.path.join(project_root, template)
-        if template in ["build.sh", "release.sh", "bootstrap.sh", "install_mikero.sh", "CODE_OF_CONDUCT.md", "SECURITY.md", "CONTRIBUTORS"]:
-            # Always overwrite core scripts and integrity files
-            if os.path.exists(dst):
-                os.remove(dst)
-            shutil.copy(os.path.join(tools_dir, template), dst)
-            if template.endswith(".sh"):
-                os.chmod(dst, 0o755) # Ensure executable
-            print(f" Updated: {template}")
-        elif not os.path.exists(dst):
-            # Only copy templates if missing
-            shutil.copy(os.path.join(tools_dir, template), dst)
-            print(f" Copied: {template}")
-
-    # 6. Enforce Standard .gitignore
-    gitignore_src = os.path.join(tools_dir, ".gitignore_template")
-    gitignore_dst = os.path.join(project_root, ".gitignore")
-    if os.path.exists(gitignore_src):
-        shutil.copy2(gitignore_src, gitignore_dst)
-        print(f" Updated: .gitignore (Enforced Diamond Standard)")
-
-    # 7. Cleanup Git Index (Remove accidental binaries)
-    if os.path.exists(os.path.join(project_root, ".git")):
-        # We run this to ensure no PBOs or ZIPs are being tracked
+    def setup(self):
+        print(f"Setting up UKSFTA Tools in: {self.target}")
+        
+        # 1. Symlink tools directory (for local dev updates)
+        tools_dest = self.target / "tools"
+        if tools_dest.exists() or tools_dest.is_symlink():
+            if tools_dest.is_symlink():
+                os.remove(tools_dest)
+            else:
+                shutil.rmtree(tools_dest)
+        
+        # Create relative symlink for better portability
         try:
-            # Silence output to keep the setup log clean
-            subprocess.run("git rm --cached -r *.pbo *.zip .hemttout/ releases/ 2>/dev/null", 
-                           shell=True, cwd=project_root)
-        except: pass
+            os.symlink("../UKSFTA-Tools/tools", tools_dest)
+            print("  ✅ Symlinked: tools/ directory -> ../UKSFTA-Tools/tools")
+        except:
+            # Fallback to copy if symlink fails
+            shutil.copytree(self.tools_src, tools_dest)
+            print("  ℹ️  Copied: tools/ directory (Symlink failed)")
 
-    print("\nSetup complete! Project is now production-ready.")
+        # 2. Physically copy HEMTT hooks and scripts (CI cannot resolve symlinks in submodules)
+        hemtt_dest = self.target / ".hemtt"
+        hemtt_dest.mkdir(exist_ok=True)
+        
+        for folder, src in [("hooks", self.hooks_src), ("scripts", self.scripts_src)]:
+            dest = hemtt_dest / folder
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(src, dest)
+            print(f"  ✅ Copied: .hemtt/{folder} directory")
+
+        # 3. Update lint.toml
+        lint_src = Path(__file__).parent / "hemtt" / "lint.toml"
+        if lint_src.exists():
+            shutil.copy2(lint_src, hemtt_dest / "lint.toml")
+            print("  ✅ Updated: .hemtt/lint.toml")
+
+        # 4. Copy GitHub Workflows
+        workflow_src = Path(__file__).parent / ".github" / "workflows"
+        workflow_dest = self.target / ".github" / "workflows"
+        workflow_dest.mkdir(parents=True, exist_ok=True)
+        if workflow_src.exists():
+            for wf in workflow_src.glob("*.yml"):
+                shutil.copy2(wf, workflow_dest / wf.name)
+                print(f"  ✅ Copied: .github/workflows/{wf.name}")
+
+        # 5. Update core scripts
+        for script in ["build.sh", "release.sh", "bootstrap.sh", "install_mikero.sh"]:
+            src = Path(__file__).parent / script
+            if src.exists():
+                shutil.copy2(src, self.target / script)
+                os.chmod(self.target / script, 0o755)
+                print(f"  ✅ Updated: {script}")
+
+        # 6. Organization Integrity Files
+        for doc in ["CODE_OF_CONDUCT.md", "SECURITY.md", "CONTRIBUTORS"]:
+            src = Path(__file__).parent / doc
+            if src.exists():
+                shutil.copy2(src, self.target / doc)
+                print(f"  ✅ Updated: {doc}")
+
+        # 7. Enforce Diamond Standard .gitignore
+        ignore_src = Path(__file__).parent / ".gitignore_template"
+        if ignore_src.exists():
+            shutil.copy2(ignore_src, self.target / ".gitignore")
+            print("  ✅ Updated: .gitignore (Enforced Diamond Standard)")
+
+        # 8. Sync Unit Keys
+        keys_dir = self.target / "keys"
+        keys_dir.mkdir(exist_ok=True)
+        tools_keys = Path(__file__).parent / "tools" / "keys"
+        if tools_keys.exists():
+            for key in tools_keys.glob("*.bikey"):
+                shutil.copy2(key, keys_dir / key.name)
+                print(f"  ✅ Synced Key: {key.name}")
+
+        print("\nSetup complete! Project is now production-ready.")
 
 if __name__ == "__main__":
-    setup_project()
+    setup = SetupTools(".")
+    setup.setup()

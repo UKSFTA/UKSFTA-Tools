@@ -45,8 +45,12 @@ class TestReleaseTool(unittest.TestCase):
         v_str, _ = release.get_current_version()
         self.assertEqual(v_str, "2.0.0")
 
+    @patch("release.generate_content_list")
     @patch("builtins.open", new_callable=mock_open)
-    def test_create_vdf(self, mock_file):
+    def test_create_vdf(self, mock_file, mock_content_list):
+        # Prevent generate_content_list from reading mods.lock
+        mock_content_list.return_value = "[*] addon1.pbo\n[*] addon2.pbo"
+        
         # Just check if file open is called with correct path and content structure
         release.HEMTT_OUT = "."
         vdf_path = release.create_vdf("123", "456", "/path/to/content", "changelog text")
