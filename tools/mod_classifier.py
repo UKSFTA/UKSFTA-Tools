@@ -15,6 +15,7 @@ try:
     from rich import box
     from rich.panel import Panel
     from rich.text import Text
+    from rich.columns import Columns
     USE_RICH = True
 except ImportError:
     USE_RICH = False
@@ -31,6 +32,8 @@ CLIENT_PATTERNS = [
     (r"local(ly)? only", 40),
     (r"no server[- ]?side (needed|req)", 80),
     (r"work(s)? without the mod on the server", 90),
+    (r"no key(s)? included", 30),
+    (r"not signed", 20),
 ]
 
 BOTH_PATTERNS = [
@@ -44,6 +47,7 @@ BOTH_PATTERNS = [
     (r"signature(s)? (included|required)", 40),
     (r"server (key|bikey)", 40),
     (r"mod (is|must be) signed", 30),
+    (r"v\d+\.\d+\.\d+", 10), # Version strings often imply content
 ]
 
 SERVER_PATTERNS = [
@@ -52,6 +56,7 @@ SERVER_PATTERNS = [
     (r"clients? (do not|don't) need", 80),
     (r"dedicated server only", 90),
     (r"admin tool|logging", 40),
+    (r"server[- ]?side script", 70),
 ]
 
 CONTENT_TAGS = {
@@ -66,7 +71,6 @@ def fetch_workshop_page(published_id):
         with urllib.request.urlopen(req, timeout=10) as response:
             return response.read().decode('utf-8')
     except Exception as e:
-        print(f"Error fetching mod page: {e}")
         return None
 
 def classify_mod(published_id):
@@ -99,18 +103,18 @@ def classify_mod(published_id):
                     if snippet.lower() in sentence.lower():
                         snippet = sentence
                         break
-                evidence.append({"type": label, "text": snippet.strip(), "weight": weight})
+                evidence.append({"type": label, "text": snippet.strip(), "weight": weight, "pattern": pattern})
 
     for tag in tags:
         tag_lower = tag.lower()
         for c_tag, weight in CONTENT_TAGS.items():
             if c_tag in tag_lower:
                 scores["Both"] += weight
-                evidence.append({"type": "Both", "text": f"Mod Tag: '{tag}'", "weight": weight})
+                evidence.append({"type": "Both", "text": f"Mod Tag Match: '{tag}'", "weight": weight})
 
     total = sum(scores.values())
     summary = []
-    for label in ["Client", "Both", "Server"]: # Fixed order
+    for label in ["Client", "Both", "Server"]:
         val = scores[label]
         pct = round((val / total) * 100, 1) if total > 0 else 0.0
         summary.append({"label": label, "score": val, "pct": pct})
@@ -119,6 +123,7 @@ def classify_mod(published_id):
     top = summary_sorted[0] if total > 0 else {"label": "Indecisive", "pct": 0.0}
     
     return {
+        "id": published_id,
         "title": title,
         "result": top['label'],
         "confidence": top['pct'],
@@ -128,7 +133,7 @@ def classify_mod(published_id):
     }
 
 def main():
-    parser = argparse.ArgumentParser(description="UKSFTA Verbose Mod Classifier")
+    parser = argparse.ArgumentParser(description="UKSFTA Advanced Mod Classifier")
     parser.add_argument("url_or_id", help="Steam Workshop URL or ID")
     parser.add_argument("--json", action="store_true", help="Output result as JSON")
     args = parser.parse_args()
@@ -140,7 +145,9 @@ def main():
     
     mid = mid_match.group(1)
     data = classify_mod(mid)
-    if not data: sys.exit(1)
+    if not data:
+        print(f"Failed to fetch mod {mid}")
+        sys.exit(1)
 
     if args.json:
         print(json.dumps(data, indent=2))
@@ -155,11 +162,11 @@ def main():
         header.append(f"{data['title']}\n", style="bold white")
         header.append(f"Verdict: {data['result']} ", style=f"bold {color}")
         header.append(f"({data['confidence']}% Confidence)", style="dim")
-        console.print(Panel(header, border_style=color, title=f"Analysis: {mid}"))
+        console.print(Panel(header, border_style=color, title=f"Mod Audit: {mid}"))
 
-        score_table = Table(box=box.SIMPLE, header_style="bold cyan", title="Probability Scorecard", title_justify="left")
-        score_table.add_column("Type")
-        score_table.add_column("Score", justify="right")
+        score_table = Table(box=box.SIMPLE, header_style="bold cyan", title="Classification Metrics", title_justify="left")
+        score_table.add_column("Requirement Type")
+        score_table.add_column("Evidence Weight", justify="right")
         score_table.add_column("Probability", justify="right")
         for s in data['scores']:
             s_color = "green" if s['label'] == "Client" else ("yellow" if s['label'] == "Both" else "magenta")
@@ -167,19 +174,18 @@ def main():
         console.print(score_table)
 
         if data['tags']:
-            tag_text = Text.assemble(("[bold dim]Workshop Tags:[/] ", "dim"), (", ".join(data['tags']), "italic cyan"))
-            console.print(tag_text)
+            console.print(f"[bold dim]Associated Tags:[/] [italic cyan]{', '.join(data['tags'])}[/italic cyan]")
 
         if data['evidence']:
-            console.print("\n[bold]Found Evidence:[/bold]")
+            console.print("\n[bold]Technical Evidence Found:[/bold]")
             for e in data['evidence']:
                 e_color = "cyan" if e['type'] == "Client" else ("yellow" if e['type'] == "Both" else "magenta")
-                console.print(f" • [[bold {e_color}]{e['type']:<6}[/]] {e['text']} [dim](Weight: {e['weight']})[/]")
+                console.print(f" • [[bold {e_color}]{e['type']:<6}[/]] {e['text']} [dim](Power: {e['weight']})[/]")
         else:
-            console.print("\n[yellow]! No specific phrasing found to classify this mod automatically.[/yellow]")
+            console.print("\n[yellow]! Manual verification required: No definitive requirement markers found in description or tags.[/yellow]")
 
         if data['confidence'] < 50 and data['result'] != "Indecisive":
-            console.print("\n[bold red]⚠ LOW CONFIDENCE ALERT:[/] Ambient logic suggests this verdict, but no direct statement found.")
+            console.print("\n[bold red]⚠ AMBIGUITY DETECTED:[/] Classification is based on ambient metadata. Verify in a local environment.")
     else:
         print(f"Verdict: {data['result']} ({data['confidence']}%)")
         for e in data['evidence']: print(f" - [{e['type']}] {e['text']}")
