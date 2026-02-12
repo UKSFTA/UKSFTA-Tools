@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 import os
 import sys
 import re
 import urllib.request
 import argparse
+import json
 
 # Try to import rich for high-fidelity CLI output
 try:
@@ -16,39 +18,46 @@ try:
 except ImportError:
     USE_RICH = False
 
-# Configuration for detection
-CLIENT_ONLY_KEYWORDS = [
-    r"client[- ]?side only",
-    r"optional for server",
-    r"no server[- ]?side needed",
-    r"visual only",
-    r"sound only",
-    r"interface only",
-    r"hud only",
-    r"local only",
-    r"not required on server"
+# --- CONFIGURATION & WEIGHTING ---
+
+# Keywords suggesting Client-Side Only (Visuals, HUDs, local sounds)
+CLIENT_PATTERNS = [
+    (r"client[- ]?side (only|mod)", 100),
+    (r"not (required|needed) on (the )?server", 80),
+    (r"optional (for|on) (the )?server", 70),
+    (r"visuals? only", 60),
+    (r"sounds? only", 50),
+    (r"interface|hud|ui only", 60),
+    (r"local(ly)? only", 40),
+    (r"no server[- ]?side (needed|req)", 80),
+    (r"work(s)? without the mod on the server", 90),
 ]
 
-SERVER_ONLY_KEYWORDS = [
-    r"server[- ]?side only",
-    r"no client[- ]?side needed",
-    r"not required by clients",
-    r"script only",
-    r"server[- ]?side script"
+# Keywords suggesting Both (Content, Weapons, Vehicles, Synchronized scripts)
+BOTH_PATTERNS = [
+    (r"(required|needed|must be) on (both|all|server and client)", 100),
+    (r"sync(hroniz(e|ation))? (is )?required", 80),
+    (r"place(able)? in (the )?editor", 50),
+    (r"server (needs|requires) (the )?mod", 70),
+    (r"signature(s)? (included|required)", 40),
+    (r"server (key|bikey)", 40),
+    (r"mod (is|must be) signed", 30),
 ]
 
-BOTH_KEYWORDS = [
-    r"required on both",
-    r"must be on server",
-    r"synchronization required",
-    r"signed with key",
-    r"server key included",
-    r"installed on the Server and all Clients",
-    r"needed on server and client",
-    r"required for server and client"
+# Keywords suggesting Server-Side Only (Admin tools, logging, AI behavior)
+SERVER_PATTERNS = [
+    (r"server[- ]?side (only|mod)", 100),
+    (r"not (required|needed) (by|on) clients?", 80),
+    (r"clients? (do not|don't) need", 80),
+    (r"dedicated server only", 90),
+    (r"admin tool|logging", 40),
 ]
 
-CONTENT_TAGS = ["vehicle", "weapon", "terrain", "map", "unit", "uniform", "gear", "equipment"]
+# Content Tags (If these exist, it's almost certainly "Both")
+CONTENT_TAGS = {
+    "weapon": 80, "vehicle": 80, "terrain": 90, "map": 90, "unit": 80,
+    "gear": 70, "uniform": 70, "object": 60, "building": 60
+}
 
 def fetch_workshop_page(published_id):
     url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={published_id}"
@@ -71,68 +80,67 @@ def classify_mod(published_id):
     
     desc_match = re.search(r'<div class="workshopItemDescription" id="highlightContent">(.*?)</div>', html_content, re.DOTALL)
     description = desc_match.group(1).strip() if desc_match else ""
+    # Clean description for regex
     clean_desc = re.sub(r'<.*?>', ' ', description)
+    # Get lines for snippet extraction
+    desc_lines = [l.strip() for l in clean_desc.split('.') if l.strip()]
     
-    tags = re.findall(r'href="https://steamcommunity.com/workshop/browse/\?appid=107410&.*?section=readytouseitems&requiredtags%5B%5D=(.*?)">', html_content)
+    tags = re.findall(r'href="https://steamcommunity.com/workshop/browse/\?appid=107410&.*?requiredtags%5B%5D=(.*?)">', html_content)
     tags = [t.lower() for t in tags]
 
-    # Scoring Logic
-    client_score = 0
-    server_score = 0
-    both_score = 0
-    mentions = []
+    # Analysis Tally
+    scores = {"Client": 0, "Server": 0, "Both": 0}
+    evidence = []
 
-    for kw in CLIENT_ONLY_KEYWORDS:
-        matches = re.findall(f"({kw})", clean_desc, re.IGNORECASE)
-        if matches:
-            client_score += 40 * len(matches)
-            mentions.append(f"[bold cyan]Client-Side Mention:[/bold cyan] '...{matches[0]}...'")
+    # 1. Run Regex Patterns
+    for label, patterns in [("Client", CLIENT_PATTERNS), ("Server", SERVER_PATTERNS), ("Both", BOTH_PATTERNS)]:
+        for pattern, weight in patterns:
+            matches = re.finditer(pattern, clean_desc, re.IGNORECASE)
+            for m in matches:
+                scores[label] += weight
+                # Find the sentence containing the match
+                snippet = m.group(0)
+                for line in desc_lines:
+                    if snippet.lower() in line.lower():
+                        snippet = line
+                        break
+                evidence.append({"type": label, "text": snippet.strip(), "weight": weight})
 
-    for kw in SERVER_ONLY_KEYWORDS:
-        matches = re.findall(f"({kw})", clean_desc, re.IGNORECASE)
-        if matches:
-            server_score += 40 * len(matches)
-            mentions.append(f"[bold magenta]Server-Side Mention:[/bold magenta] '...{matches[0]}...'")
-
-    for kw in BOTH_KEYWORDS:
-        matches = re.findall(f"({kw})", clean_desc, re.IGNORECASE)
-        if matches:
-            both_score += 30 * len(matches)
-            mentions.append(f"[bold yellow]Both-Sides Mention:[/bold yellow] '...{matches[0]}...'")
-
+    # 2. Analyze Tags
     for tag in tags:
-        if any(ct in tag for t in CONTENT_TAGS for ct in [t]):
-            both_score += 50
-            mentions.append(f"[dim]Tag Match:[/dim] '{tag}' (Content suggests Both)")
+        for c_tag, weight in CONTENT_TAGS.items():
+            if c_tag in tag:
+                scores["Both"] += weight
+                evidence.append({"type": "Both", "text": f"Mod Tag: '{tag}' (Implies synchronized content)", "weight": weight})
 
-    total = client_score + server_score + both_score
+    # 3. Calculate Confidence
+    total = sum(scores.values())
     if total == 0:
-        return {"title": title, "result": "Indecisive", "confidence": 0, "mentions": ["No definitive keywords found."]}
+        return {"title": title, "result": "Indecisive", "confidence": 0, "evidence": []}
 
-    client_pct = (client_score / total) * 100
-    server_pct = (server_score / total) * 100
-    both_pct = (both_score / total) * 100
-
-    if both_pct > 60:
-        result = "Required on Both"
-        conf = both_pct
-    elif client_pct > server_pct:
-        result = "Likely Client-Side Only"
-        conf = client_pct
-    else:
-        result = "Likely Server-Side Only"
-        conf = server_pct
-
+    # Normalize
+    results = []
+    for label, val in scores.items():
+        results.append({"label": label, "pct": (val / total) * 100})
+    
+    # Sort by percentage
+    results = sorted(results, key=lambda x: x['pct'], reverse=True)
+    
+    # Winner
+    top = results[0]
+    
     return {
         "title": title,
-        "result": result,
-        "confidence": round(conf, 1),
-        "mentions": mentions[:5]
+        "result": top['label'],
+        "confidence": round(top['pct'], 1),
+        "evidence": sorted(evidence, key=lambda x: x['weight'], reverse=True)[:5],
+        "all_scores": results
     }
 
 def main():
-    parser = argparse.ArgumentParser(description="UKSFTA Mod Side Classifier")
+    parser = argparse.ArgumentParser(description="UKSFTA Fuzzy Mod Classifier")
     parser.add_argument("url_or_id", help="Steam Workshop URL or ID")
+    parser.add_argument("--json", action="store_true", help="Output result as JSON")
     args = parser.parse_args()
 
     mid_match = re.search(r"(?:id=)?(\d{8,})", args.url_or_id)
@@ -141,28 +149,38 @@ def main():
         sys.exit(1)
     
     mid = mid_match.group(1)
-    console = Console() if USE_RICH else None
-    
-    if USE_RICH: console.print(f"\n🔍 [bold blue]Analyzing:[/bold blue] {mid}...")
-    else: print(f"\nAnalyzing Mod: {mid}...")
-
     data = classify_mod(mid)
     if not data: sys.exit(1)
 
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return
+
+    console = Console() if USE_RICH else None
     if USE_RICH:
-        color = "green" if "Client" in data['result'] else ("yellow" if "Both" in data['result'] else "magenta")
+        color = "green" if data['result'] == "Client" else ("yellow" if data['result'] == "Both" else "magenta")
+        if data['result'] == "Indecisive": color = "white"
+        
         content = Text()
         content.append(f"{data['title']}\n", style="bold white")
         content.append(f"{data['result']} ", style=f"bold {color}")
         content.append(f"({data['confidence']}% Confidence)", style="dim")
         
         console.print(Panel(content, border_style=color, title="Classification Result"))
-        if data['mentions']:
-            console.print("\n[bold dim]Key Mentions:[/bold dim]")
-            for m in data['mentions']: console.print(f" • {m}")
+        
+        if data['evidence']:
+            console.print("\n[bold dim]Primary Evidence:[/bold dim]")
+            for e in data['evidence']:
+                e_color = "cyan" if e['type'] == "Client" else ("yellow" if e['type'] == "Both" else "magenta")
+                console.print(f" • [[bold {e_color}]{e['type']}[/]] {e['text']}")
+        
+        if data['confidence'] < 50 and data['result'] != "Indecisive":
+            console.print("\n[bold red]⚠ LOW CONFIDENCE:[/] Manual testing is highly recommended.")
     else:
-        print(f"Result: {data['result']} ({data['confidence']}% Confidence)")
-        for m in data['mentions']: print(f" - {m}")
+        print(f"Mod: {data['title']}")
+        print(f"Result: {data['result']} ({data['confidence']}%)")
+        for e in data['evidence']:
+            print(f" - [{e['type']}] {e['text']}")
 
 if __name__ == "__main__":
     main()
