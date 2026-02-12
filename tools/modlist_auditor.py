@@ -31,27 +31,21 @@ def fetch_workshop_data(published_id):
     }).encode("utf-8")
     
     info = {"name": f"Mod {published_id}", "dependencies": []}
-    
     try:
         req = urllib.request.Request(api_url, data=data, method="POST")
         with urllib.request.urlopen(req, timeout=10) as response:
             res_data = json.load(response)
             if "response" in res_data and "publishedfiledetails" in res_data["response"]:
                 details = res_data["response"]["publishedfiledetails"][0]
-                
-                if details.get("result") == 1: # Success
+                if details.get("result") == 1:
                     info["name"] = details.get("title", f"Mod {published_id}")
-                    # API returns children IDs, we'll need to resolve names later or just use IDs
-                    # For now, let's just mark the IDs as dependencies
                     children = details.get("children", [])
                     for child in children:
                         info["dependencies"].append({
                             "id": child["publishedfileid"],
-                            "name": f"Mod {child['publishedfileid']}" # Name will be resolved in final pass
+                            "name": f"Mod {child['publishedfileid']}"
                         })
-    except Exception as e:
-        # Fallback to scraping if API fails (though API is preferred)
-        pass
+    except: pass
     return info
 
 def extract_mods_with_ignores(file_path):
@@ -59,37 +53,24 @@ def extract_mods_with_ignores(file_path):
     mods = {}
     ignored = set()
     if not os.path.exists(file_path): return mods, ignored
-    
     with open(file_path, 'r', errors='ignore') as f:
         content = f.read()
-        
-    # 1. HTML Format
     html_matches = re.findall(r'<tr data-type="ModContainer">.*?<td name="displayName">(.*?)</td>.*?id=(\d{8,})', content, re.DOTALL)
-    for name, mid in html_matches:
-        mods[mid] = name
-        
-    # 2. TXT Format
-    ignore_block = False
-    lines = content.split('\n')
-    for line in lines:
-        clean_line = line.strip()
-        if not clean_line or clean_line.startswith('//') or clean_line.startswith(';'): continue
-        if "[ignore]" in clean_line.lower() or "[ignored]" in clean_line.lower():
-            ignore_block = True
-            continue
-
-        mid_match = re.search(r'(?:id=)?(\d{8,})', clean_line)
-        if mid_match:
-            mid = mid_match.group(1)
-            name = f"Mod {mid}"
-            if '#' in clean_line:
-                name = clean_line.split('#', 1)[1].split('[')[0].strip()
-            
-            if ignore_block or any(x in clean_line.lower() for x in ["ignore=", "@ignore"]):
-                ignored.add(mid)
-            else:
-                mods[mid] = name
-                    
+    for name, mid in html_matches: mods[mid] = name
+    if not mods:
+        ignore_block = False
+        lines = content.split('\n')
+        for line in lines:
+            clean_line = line.strip()
+            if not clean_line or clean_line.startswith('//') or clean_line.startswith(';'): continue
+            if "[ignore]" in clean_line.lower() or "[ignored]" in clean_line.lower():
+                ignore_block = True; continue
+            mid_match = re.search(r'(?:id=)?(\d{8,})', clean_line)
+            if mid_match:
+                mid = mid_match.group(1); name = f"Mod {mid}"
+                if '#' in clean_line: name = clean_line.split('#', 1)[1].split('[')[0].strip()
+                if ignore_block or any(x in clean_line.lower() for x in ["ignore=", "@ignore"]): ignored.add(mid)
+                else: mods[mid] = name
     return mods, ignored
 
 def main():
@@ -99,78 +80,83 @@ def main():
     parser.add_argument("substitutes", nargs="*", help="Optional unit repositories or sources for fulfillment")
     parser.add_argument("--deep", action="store_true", help="Perform deep dependency scan on target mods")
     args = parser.parse_args()
-
     console = Console() if USE_RICH else None
     
-    # Load All Inputs
+    # Load Inputs
     ref_mods, ref_ignored = extract_mods_with_ignores(args.reference)
     if not ref_mods:
-        print(f"Error: No mods found in reference: {args.reference}")
-        return
-
+        print(f"Error: No mods found in reference: {args.reference}"); return
     src_mods, src_ignored = extract_mods_with_ignores(args.source)
     all_sub_mods = {}; all_sub_ignored = set()
     for s_path in args.substitutes:
         s_mods, s_ignored = extract_mods_with_ignores(s_path)
-        all_sub_mods.update(s_mods)
-        all_sub_ignored.update(s_ignored)
+        all_sub_mods.update(s_mods); all_sub_ignored.update(s_ignored)
 
-    target_ids = set(src_mods.keys()) | set(all_sub_mods.keys())
-    target_ignored = src_ignored | all_sub_ignored
+    explicit_target_ids = set(src_mods.keys()) | set(all_sub_mods.keys())
+    all_target_ignored = src_ignored | all_sub_ignored
     
-    # --- PHASE 1: Find Missing items (Raw) ---
-    missing_from_ref_raw = []
-    for mid, name in ref_mods.items():
-        if mid not in target_ids and mid not in target_ignored:
-            missing_from_ref_raw.append({"id": mid, "name": name})
-
+    # --- PHASE 1: Dependency Resolution ---
+    # We resolve dependencies for ALL target mods to find what is transitively fulfilled
+    resolved_target_ids = set(explicit_target_ids)
     missing_deps_raw = []
+    
     if args.deep:
-        to_scan = list(target_ids)
+        to_scan = list(explicit_target_ids)
+        processed = set()
         if USE_RICH:
             with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
-                task = progress.add_task(f"Scanning deep dependencies for {len(to_scan)} mods...", total=len(to_scan))
-                def audit_dep(mid):
+                task = progress.add_task(f"Resolving transitive dependencies for {len(to_scan)} mods...", total=None)
+                while to_scan:
+                    mid = to_scan.pop(0)
+                    if mid in processed: continue
+                    processed.add(mid)
                     meta = fetch_workshop_data(mid)
-                    found = []
                     for dep in meta['dependencies']:
                         did = dep['id']
-                        if did not in target_ids and did not in target_ignored:
-                            found.append({"id": did, "name": dep['name'], "parent": meta['name'], "parent_id": mid})
+                        resolved_target_ids.add(did)
+                        if did not in explicit_target_ids and did not in all_target_ignored:
+                            # If it's NOT in the reference either, it's a truly missing dependency
+                            if did not in ref_mods:
+                                missing_deps_raw.append({"id": did, "name": dep['name'], "parent": meta['name'], "parent_id": mid})
+                            # If it IS in the reference, it's now 'fulfilled' and won't be flagged in Phase 2
+                        if did not in processed:
+                            to_scan.append(did)
                     progress.advance(task)
-                    return found
-                with ThreadPoolExecutor(max_workers=10) as executor:
-                    for r_list in executor.map(audit_dep, to_scan):
-                        for m in r_list:
-                            if m['id'] not in [x['id'] for x in missing_deps_raw]:
-                                missing_deps_raw.append(m)
         else:
-            for mid in to_scan:
+            print(f"Resolving dependencies for {len(to_scan)} mods...")
+            while to_scan:
+                mid = to_scan.pop(0)
+                if mid in processed: continue
+                processed.add(mid)
                 meta = fetch_workshop_data(mid)
                 for dep in meta['dependencies']:
                     did = dep['id']
-                    if did not in target_ids and did not in target_ignored:
-                        if did not in [x['id'] for x in missing_deps_raw]:
+                    resolved_target_ids.add(did)
+                    if did not in explicit_target_ids and did not in all_target_ignored:
+                        if did not in ref_mods and did not in [x['id'] for x in missing_deps_raw]:
                             missing_deps_raw.append({"id": did, "name": dep['name'], "parent": meta['name'], "parent_id": mid})
+                    if did not in processed: to_scan.append(did)
 
-    # --- PHASE 2: Mandatory Name Resolution Pass ---
+    # --- PHASE 2: Find Missing Reference Mods ---
+    missing_from_ref_raw = []
+    for mid, name in ref_mods.items():
+        # A mod is missing ONLY if it's not explicit, not transitive, and not ignored
+        if mid not in resolved_target_ids and mid not in all_target_ignored:
+            missing_from_ref_raw.append({"id": mid, "name": name})
+
+    # --- PHASE 3: Mandatory Name Resolution ---
     final_missing_ref = []
     final_missing_deps = []
     to_resolve = missing_from_ref_raw + missing_deps_raw
-
     if to_resolve:
         if USE_RICH:
             with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
                 task = progress.add_task(f"Resolving official titles for {len(to_resolve)} flagged mods...", total=len(to_resolve))
                 def resolve(m):
-                    # Always try to fetch official name from API
-                    res = fetch_workshop_data(m['id'])
-                    m['name'] = res['name']
-                    # If this is a dependency, also try to resolve the parent's name if generic
+                    res = fetch_workshop_data(m['id']); m['name'] = res['name']
                     if 'parent' in m and (m['parent'].startswith("Mod ") or m['parent'].isdigit()):
                         m['parent'] = fetch_workshop_data(m['parent_id'])['name']
-                    progress.advance(task)
-                    return m
+                    progress.advance(task); return m
                 with ThreadPoolExecutor(max_workers=15) as executor:
                     resolved_items = list(executor.map(resolve, to_resolve))
                     for m in resolved_items:
@@ -178,8 +164,7 @@ def main():
                         else: final_missing_ref.append(m)
         else:
             for m in to_resolve:
-                res = fetch_workshop_data(m['id'])
-                m['name'] = res['name']
+                res = fetch_workshop_data(m['id']); m['name'] = res['name']
                 if 'parent' in m: final_missing_deps.append(m)
                 else: final_missing_ref.append(m)
 
@@ -193,7 +178,7 @@ def main():
         console.print(Panel(header, border_style="blue", padding=(1, 2)))
         
         if not final_missing_ref and not final_missing_deps:
-            console.print("[bold green]✅ PASS:[/] All reference mods and dependencies are accounted for.")
+            console.print("[bold green]✅ PASS:[/] All reference mods and dependencies are accounted for (explicitly or transitively).")
         else:
             if final_missing_ref:
                 table = Table(title="❌ Missing Reference Mods", box=box.ROUNDED, border_style="red")
@@ -201,7 +186,6 @@ def main():
                 for m in sorted(final_missing_ref, key=lambda x: x['name']):
                     table.add_row(m['name'], f"https://steamcommunity.com/sharedfiles/filedetails/?id={m['id']}")
                 console.print(table)
-
             if final_missing_deps:
                 table = Table(title="⚠️ Missing Workshop Dependencies", box=box.ROUNDED, border_style="yellow")
                 table.add_column("Required Mod (Missing)", style="bold yellow"); table.add_column("Required By", style="dim"); table.add_column("Workshop Link", style="blue underline")
