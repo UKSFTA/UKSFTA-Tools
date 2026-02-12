@@ -42,10 +42,13 @@ BOTH_KEYWORDS = [
     r"must be on server",
     r"synchronization required",
     r"signed with key",
-    r"server key included"
+    r"server key included",
+    r"installed on the Server and all Clients",
+    r"needed on server and client",
+    r"required for server and client"
 ]
 
-CONTENT_TAGS = ["vehicle", "weapon", "terrain", "map", "unit", "uniform", "gear"]
+CONTENT_TAGS = ["vehicle", "weapon", "terrain", "map", "unit", "uniform", "gear", "equipment"]
 
 def fetch_workshop_page(published_id):
     url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={published_id}"
