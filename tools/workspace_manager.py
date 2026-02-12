@@ -387,7 +387,7 @@ def main():
     subparsers = parser.add_subparsers(dest="command")
     
     # Simple commands
-    simple_cmds = ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "generate-manifest", "update", "workshop-tags", "gh-runs", "workshop-info", "modlist-size", "help"]
+    simple_cmds = ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "generate-docs", "generate-manifest", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]
     for cmd in simple_cmds: subparsers.add_parser(cmd)
     
     # Sync commands with offline flag
