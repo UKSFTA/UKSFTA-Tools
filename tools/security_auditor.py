@@ -9,7 +9,7 @@ PATTERNS = {
     "Discord Webhook": r"https://discord\.com/api/webhooks/\d+/[A-Za-z0-9_-]+",
     "GitHub Token": r"gh[p|o|u|s|r]_[A-Za-z0-9_]{36,255}",
     "Private Key": r"-----BEGIN [A-Z ]+ PRIVATE KEY-----",
-    "Generic Token": r"(?i)(api[_-]key|secret|password|token)\s*[:=]\s*['"][A-Za-z0-9_-]{16,}['"]"
+    "Generic Token": r"(?i)(api[_-]key|secret|password|token)\s*[:=]\s*['\"][A-Za-z0-9_-]{16,}['\"]"
 }
 
 def audit_security(project_path):

@@ -46,4 +46,4 @@ if __name__ == "__main__":
         from rich import print
     except ImportError: pass
     
-    audit_keys(sys.argv[1])
+    audit_project_keys(sys.argv[1])
