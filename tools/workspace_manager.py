@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 import argparse
 import os
 import subprocess
@@ -48,7 +49,6 @@ def get_projects():
     return sorted(projects)
 
 def get_live_timestamp(mid):
-    """Fetch live timestamp from Steam Workshop."""
     url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={mid}"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -64,7 +64,7 @@ def print_banner(console):
     if v_path.exists(): version = v_path.read_text().strip()
     
     banner = Text.assemble(
-        ("\n ⚔️  ", "bold blue"),
+        ("\n [!] ", "bold blue"),
         ("UKSF TASKFORCE ALPHA ", "bold white"),
         ("| ", "dim"),
         ("PLATINUM DEVOPS SUITE ", "bold cyan"),
@@ -75,26 +75,20 @@ def print_banner(console):
 
 def cmd_help(console):
     print_banner(console)
-    
-    # 1. Workspace Operations
-    ws_table = Table(title="🌐  Workspace Operations", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold cyan")
+    ws_table = Table(title="[Workspace Operations]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold cyan")
     ws_table.add_row("[bold cyan]status   [/]", "[dim]Show git status summary for every repository[/]")
     ws_table.add_row("[bold cyan]sync     [/]", "[dim]Pull latest Workshop updates and synchronize mods[/]")
     ws_table.add_row("[bold cyan]update   [/]", "[dim]Propagate latest UKSFTA-Tools to all projects[/]")
     ws_table.add_row("[bold cyan]cache    [/]", "[dim]Show disk space usage of build artifacts[/]")
     ws_table.add_row("[bold cyan]clean    [/]", "[dim]Wipe all .hemttout build artifacts[/]")
-    
-    # 2. Intelligence & Oversight
-    intel_table = Table(title="🧠  Unit Intelligence", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold magenta")
+    intel_table = Table(title="[Unit Intelligence]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold magenta")
     intel_table.add_row("[bold cyan]dashboard    [/]", "[dim]Visual overview of all projects, components, and versions[/]")
     intel_table.add_row("[bold cyan]workshop-info[/]", "[dim]Query live versions and timestamps from Steam Workshop[/]")
     intel_table.add_row("[bold cyan]modlist-size [/]", "[dim]Calculate total data size of any Arma 3 modlist[/]")
     intel_table.add_row("[bold cyan]audit-updates[/]", "[dim]Check live Workshop for pending mod updates[/]")
     intel_table.add_row("[bold cyan]apply-updates[/]", "[dim]Automatically update and sync all out-of-date mods[/]")
     intel_table.add_row("[bold cyan]gh-runs      [/]", "[dim]Real-time monitoring of GitHub Actions runners[/]")
-    
-    # 3. Assurance & Quality
-    audit_table = Table(title="🔍  Assurance & Quality", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold yellow")
+    audit_table = Table(title="[Assurance & Quality]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold yellow")
     audit_table.add_row("[bold cyan]audit            [/]", "[dim]Master Audit: Run all health and security checks[/]")
     audit_table.add_row("[bold cyan]test             [/]", "[dim]Run full suite (pytest, hemtt check, sqflint)[/]")
     audit_table.add_row("[bold cyan]audit-signatures [/]", "[dim]Verify PBO signing state and unit key matches[/]")
@@ -103,9 +97,7 @@ def cmd_help(console):
     audit_table.add_row("[bold cyan]audit-strings    [/]", "[dim]Validate stringtable keys vs SQF usage[/]")
     audit_table.add_row("[bold cyan]audit-security   [/]", "[dim]Scan for leaked tokens, webhooks, or private keys[/]")
     audit_table.add_row("[bold cyan]audit-mission    [/]", "[dim]Verify a Mission PBO against workspace and externals[/]")
-    
-    # 4. Production & Utilities
-    prod_table = Table(title="🏗️  Production & Utilities", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold green")
+    prod_table = Table(title="[Production & Utilities]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold green")
     prod_table.add_row("[bold cyan]build            [/]", "[dim]Execute HEMTT build on all projects[/]")
     prod_table.add_row("[bold cyan]release          [/]", "[dim]Generate signed/packaged release ZIPs[/]")
     prod_table.add_row("[bold cyan]publish          [/]", "[dim]Upload projects to Steam Workshop[/]")
@@ -116,13 +108,11 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]generate-docs    [/]", "[dim]Auto-generate API Manual from SQF headers[/]")
     prod_table.add_row("[bold cyan]convert          [/]", "[dim]Optimize media for Arma (WAV/PNG -> OGG/PAA)[/]")
     prod_table.add_row("[bold cyan]workshop-tags    [/]", "[dim]List all valid Arma 3 Steam Workshop tags[/]")
-
     console.print(ws_table); console.print(intel_table); console.print(audit_table); console.print(prod_table)
     console.print("\n[bold]Tip:[/bold] Run [cyan]./tools/workspace_manager.py <command> --help[/cyan] for detailed options and examples.\n")
 
 def cmd_dashboard(args):
-    projects = get_projects()
-    results = []
+    projects = get_projects(); results = []
     for p in projects:
         version = "0.0.0"; pbos = []; ext_count = 0; sync_state = "OK"
         addons_dir = p / "addons"; sources_path = p / "mod_sources.txt"; lock_path = p / "mods.lock"
@@ -141,11 +131,7 @@ def cmd_dashboard(args):
                 vc = f.read(); ma = re.search(r'#define MAJOR (.*)', vc); mi = re.search(r'#define MINOR (.*)', vc); pa = re.search(r'#define PATCHLVL (.*)', vc)
                 if ma and mi and pa: version = f"{ma.group(1).strip()}.{mi.group(1).strip()}.{pa.group(1).strip()}"
         results.append({"project": p.name, "version": version, "pbos": pbos, "external_count": ext_count, "sync_state": sync_state})
-    
-    if args.json:
-        print(json.dumps(results, indent=2))
-        return
-
+    if args.json: print(json.dumps(results, indent=2)); return
     console = Console(force_terminal=True); print_banner(console)
     table = Table(title=f"Unit Workspace Overview ({len(projects)} Projects)", box=box.ROUNDED, header_style="bold magenta", border_style="blue")
     table.add_column("Project", style="cyan", no_wrap=True); table.add_column("Version", style="bold yellow")
@@ -159,14 +145,12 @@ def cmd_dashboard(args):
 
 def cmd_gh_runs(args):
     projects = get_projects(); workflow_names = set(); all_stats = []
-    # Discovery phase
     for p in projects:
         try:
             res = subprocess.run(["gh", "run", "list", "--limit", "15", "--json", "workflowName"], cwd=p, capture_output=True, text=True)
             if res.returncode == 0:
                 for r in json.loads(res.stdout): workflow_names.add(r['workflowName'])
         except: pass
-    
     sorted_workflows = sorted(list(workflow_names))
     for p in projects:
         stats = {"project": p.name, "workflows": {}, "latest_age": "-"}
@@ -183,13 +167,9 @@ def cmd_gh_runs(args):
                             stats["latest_age"] = f"{diff.days}d" if diff.days > 0 else f"{diff.seconds // 3600}h"
         except: pass
         all_stats.append(stats)
-
-    if args.json:
-        print(json.dumps(all_stats, indent=2))
-        return
-
+    if args.json: print(json.dumps(all_stats, indent=2)); return
     console = Console(force_terminal=True); print_banner(console)
-    if not sorted_workflows: console.print("[yellow]⚠️  No runs found.[/yellow]"); return
+    if not sorted_workflows: console.print("[yellow]! No runs found.[/yellow]"); return
     display_names = {wf: os.path.basename(wf).replace(".yml", "").capitalize() for wf in sorted_workflows}
     table = Table(title="Pipeline Matrix", box=box.ROUNDED, border_style="blue")
     table.add_column("Project", style="cyan"); [table.add_column(display_names[wf], justify="center") for wf in sorted_workflows]; table.add_column("Age", justify="right")
@@ -197,42 +177,30 @@ def cmd_gh_runs(args):
         row_icons = []
         for wf in sorted_workflows:
             w_stat = s["workflows"].get(wf, {"status": "none", "conclusion": "none"})
-            if w_stat["status"] == "none": icon = "⚪"
-            elif w_stat["status"] != "completed": icon = "⏳"
-            elif w_stat["conclusion"] == "success": icon = "[bold green]✅[/]"
-            else: icon = "[bold red]❌[/]"
+            if w_stat["status"] == "none": icon = "-"
+            elif w_stat["status"] != "completed": icon = "..."
+            elif w_stat["conclusion"] == "success": icon = "[bold green]PASS[/]"
+            else: icon = "[bold red]FAIL[/]"
             row_icons.append(icon)
         table.add_row(s["project"], *row_icons, s["latest_age"])
-    console.print(table); console.print("[dim]Key: ✅ Success | ❌ Failed | ⏳ Running | ⚪ No Data[/dim]")
+    console.print(table); console.print("[dim]Key: PASS | FAIL | ... Running | - No Data[/dim]")
 
 def cmd_audit_updates(args):
-    projects = get_projects()
-    mod_registry = {}
+    projects = get_projects(); mod_registry = {}
     for p in projects:
         lock_path = p / "mods.lock"
         if lock_path.exists():
             with open(lock_path, 'r') as f:
                 for mid, info in json.load(f).get("mods", {}).items():
                     if mid not in mod_registry: mod_registry[mid] = {"name": info['name'], "locked": info.get('updated', '0'), "project": p.name}
-    
     if not mod_registry: return
-    
     def check_mod(mid): return mid, get_live_timestamp(mid)
     with ThreadPoolExecutor(max_workers=10) as executor: live_results = dict(executor.map(check_mod, mod_registry.keys()))
-    
     results = []
     for mid, data in mod_registry.items():
         live_ts = live_results.get(mid, "0")
-        results.append({
-            "mid": mid, "name": data["name"], "project": data["project"],
-            "locked": data["locked"], "live": live_ts,
-            "up_to_date": data["locked"] == live_ts
-        })
-
-    if args.json:
-        print(json.dumps(results, indent=2))
-        return
-
+        results.append({"mid": mid, "name": data["name"], "project": data["project"], "locked": data["locked"], "live": live_ts, "up_to_date": data["locked"] == live_ts})
+    if args.json: print(json.dumps(results, indent=2)); return
     console = Console(force_terminal=True); print_banner(console)
     table = Table(title="Update Audit", box=box.ROUNDED, border_style="yellow")
     table.add_column("Project", style="cyan"); table.add_column("Mod", style="magenta"); table.add_column("Locked"); table.add_column("Live"); table.add_column("Status")
@@ -242,20 +210,15 @@ def cmd_audit_updates(args):
     console.print(table)
 
 def cmd_status(args):
-    projects = get_projects()
-    all_status = []
+    projects = get_projects(); all_status = []
     for p in projects:
         res = subprocess.run(["git", "status", "-s"], cwd=p, capture_output=True, text=True)
         all_status.append({"project": p.name, "dirty": len(res.stdout.strip()) > 0, "summary": res.stdout.strip()})
-    
-    if args.json:
-        print(json.dumps(all_status, indent=2))
-        return
-
+    if args.json: print(json.dumps(all_status, indent=2)); return
     console = Console(force_terminal=True); print_banner(console)
     for s in all_status:
         p_obj = next(p for p in projects if p.name == s["project"])
-        console.print(Panel(f"[dim]Root: {p_obj}[/dim]\n{s['summary'] if s['dirty'] else '[green]Clean[/]'", title=f"📦 {s['project']}", border_style="cyan"))
+        console.print(Panel(f"[dim]Root: {p_obj}[/dim]\n{s['summary'] if s['dirty'] else '[green]Clean[/]'", title=f"Project: {s['project']}", border_style="cyan"))
 
 def cmd_apply_updates(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects()
@@ -383,12 +346,8 @@ def main():
     parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
     parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
     subparsers = parser.add_subparsers(dest="command")
-    
-    # 1. Simple Commands
     for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "generate-docs", "generate-manifest", "generate-preset", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
         subparsers.add_parser(cmd, help=f"Run {cmd} utility")
-
-    # 2. Advanced Subparsers
     p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path", help="Path to mission folder")
     p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true")
     subparsers.add_parser("pull-mods", help="Alias for sync").add_argument("--offline", action="store_true")
@@ -397,7 +356,6 @@ def main():
     p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO"); p_miss.add_argument("pbo")
     p_size = subparsers.add_parser("modlist-size", help="Calculate size"); p_size.add_argument("file", nargs="?", default="mod_sources.txt")
     p_notify = subparsers.add_parser("notify", help="Discord update"); p_notify.add_argument("message"); p_notify.add_argument("--type", choices=["update", "release", "alert"], default="update"); p_notify.add_argument("--title")
-
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
         "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
