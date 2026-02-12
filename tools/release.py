@@ -302,6 +302,20 @@ def main():
             last_tag = "HEAD"
         
     changelog = generate_changelog(last_tag)
+    
+    # 3. Handle Tool-only projects (Skip Steam Workshop)
+    if not os.path.exists(os.path.join(PROJECT_ROOT, ".hemtt")):
+        print("ℹ️  UKSFTA-Tools: Tool-only project. Skipping Steam Workshop upload.")
+        # Proceed to Git tagging only
+        do_tag = args.tag or args.yes or (input("Tag this release in Git? [y/N]: ").lower() == 'y')
+        if do_tag:
+            print(f"Tagging version {new_version}...")
+            subprocess.run(["git", "tag", "-s", f"v{new_version}", "-m", f"Release v{new_version}\n\n{changelog}"], check=True)
+            subprocess.run(["git", "push", "origin", f"v{new_version}"], check=True)
+            print("SUCCESS: Version tagged and pushed.")
+        return
+
+    # 4. Standard Mod Upload Logic
     # Upload from .hemttout/release which contains the normalized raw files
     vdf_path = create_vdf("107410", workshop_id, STAGING_DIR, changelog)
     
