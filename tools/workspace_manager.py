@@ -486,7 +486,7 @@ def main():
         "audit-performance": cmd_audit_performance, "audit-keys": cmd_audit_keys, "audit-mission": cmd_audit_mission, "mission-setup": cmd_mission_setup, 
         "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest, "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, 
         "generate-vscode": cmd_generate_vscode, "generate-changelog": cmd_generate_changelog, "setup-git-hooks": cmd_setup_git_hooks,
-        "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "clean-strings": clean_strings, "update": cmd_update, "self-update": cmd_self_update,
+        "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
         "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "classify-mod": cmd_classify_mod, "modlist-classify": cmd_modlist_classify, "modlist-audit": cmd_modlist_audit,
         "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console),
         "lint": cmd_lint
