@@ -68,7 +68,6 @@ def classify_mod(published_id):
     
     desc_match = re.search(r'<div class="workshopItemDescription" id="highlightContent">(.*?)</div>', html_content, re.DOTALL)
     description = desc_match.group(1).strip() if desc_match else ""
-    # Strip HTML tags for clean text analysis
     clean_desc = re.sub(r'<.*?>', ' ', description)
     
     tags = re.findall(r'href="https://steamcommunity.com/workshop/browse/\?appid=107410&.*?section=readytouseitems&requiredtags%5B%5D=(.*?)">', html_content)
@@ -80,7 +79,6 @@ def classify_mod(published_id):
     both_score = 0
     mentions = []
 
-    # 1. Analyze Keywords
     for kw in CLIENT_ONLY_KEYWORDS:
         matches = re.findall(f"({kw})", clean_desc, re.IGNORECASE)
         if matches:
@@ -99,18 +97,15 @@ def classify_mod(published_id):
             both_score += 30 * len(matches)
             mentions.append(f"[bold yellow]Both-Sides Mention:[/bold yellow] '...{matches[0]}...'")
 
-    # 2. Analyze Tags
     for tag in tags:
         if any(ct in tag for t in CONTENT_TAGS for ct in [t]):
             both_score += 50
             mentions.append(f"[dim]Tag Match:[/dim] '{tag}' (Content suggests Both)")
 
-    # 3. Final Tally
     total = client_score + server_score + both_score
     if total == 0:
-        return {"title": title, "result": "Indecisive", "confidence": 0, "mentions": ["No definitive keywords found in description."]}
+        return {"title": title, "result": "Indecisive", "confidence": 0, "mentions": ["No definitive keywords found."]}
 
-    # Normalize to percentages
     client_pct = (client_score / total) * 100
     server_pct = (server_score / total) * 100
     both_pct = (both_score / total) * 100
@@ -129,7 +124,7 @@ def classify_mod(published_id):
         "title": title,
         "result": result,
         "confidence": round(conf, 1),
-        "mentions": mentions[:5] # Top 5 mentions
+        "mentions": mentions[:5]
     }
 
 def main():
@@ -137,55 +132,34 @@ def main():
     parser.add_argument("url_or_id", help="Steam Workshop URL or ID")
     args = parser.parse_args()
 
-    # Extract ID from URL or raw ID
     mid_match = re.search(r"(?:id=)?(\d{8,})", args.url_or_id)
     if not mid_match:
-        print("Error: Could not find a valid Workshop ID in the provided link or ID.")
+        print("Error: Invalid Workshop ID/URL.")
         sys.exit(1)
     
     mid = mid_match.group(1)
-    
     console = Console() if USE_RICH else None
-    if USE_RICH:
-        console.print(f"\n🔍 [bold blue]Analyzing Mod Requirements:[/bold blue] {mid}...")
-    else:
-        print(f"\nAnalyzing Mod: {mid}...")
+    
+    if USE_RICH: console.print(f"\n🔍 [bold blue]Analyzing:[/bold blue] {mid}...")
+    else: print(f"\nAnalyzing Mod: {mid}...")
 
     data = classify_mod(mid)
-    if not data:
-        print("Failed to retrieve mod data.")
-        sys.exit(1)
+    if not data: sys.exit(1)
 
     if USE_RICH:
         color = "green" if "Client" in data['result'] else ("yellow" if "Both" in data['result'] else "magenta")
-        title_panel = Panel(
-            Text.assemble(
-                (f"{data['title']}
-", "bold white"),
-                (f"{data['result']} ", f"bold {color}"),
-                (f"({data['confidence']}% Confidence)", "dim")
-            ),
-            border_style=color,
-            title="Classification Result"
-        )
-        console.print(title_panel)
+        content = Text()
+        content.append(f"{data['title']}\n", style="bold white")
+        content.append(f"{data['result']} ", style=f"bold {color}")
+        content.append(f"({data['confidence']}% Confidence)", style="dim")
         
+        console.print(Panel(content, border_style=color, title="Classification Result"))
         if data['mentions']:
-            console.print("
-[bold dim]Key Mentions & Logic:[/bold dim]")
-            for m in data['mentions']:
-                console.print(f" • {m}")
-        
-        if data['confidence'] < 40:
-            console.print("
-[bold yellow]⚠️  Confidence is low. Manual testing in a local server is recommended.[/bold yellow]")
+            console.print("\n[bold dim]Key Mentions:[/bold dim]")
+            for m in data['mentions']: console.print(f" • {m}")
     else:
-        print(f"Mod Title: {data['title']}")
-        print(f"Result:    {data['result']} ({data['confidence']}% Confidence)")
-        print("
-Mentions:")
-        for m in data['mentions']:
-            print(f" - {m}")
+        print(f"Result: {data['result']} ({data['confidence']}% Confidence)")
+        for m in data['mentions']: print(f" - {m}")
 
 if __name__ == "__main__":
     main()
