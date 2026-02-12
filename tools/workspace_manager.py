@@ -21,7 +21,9 @@ try:
     from rich.text import Text
     from rich.progress import Progress, SpinnerColumn, TextColumn
     from rich.columns import Columns
+    USE_RICH = True
 except ImportError:
+    USE_RICH = False
     class Table:
         def __init__(self, **kwargs): self.rows = []
         def add_column(self, *args, **kwargs): pass
@@ -119,13 +121,10 @@ def cmd_help(console):
     console.print("\n[bold]Tip:[/bold] Run [cyan]./tools/workspace_manager.py <command> --help[/cyan] for detailed options and examples.\n")
 
 def cmd_dashboard(args):
-    console = Console(force_terminal=True); print_banner(console); projects = get_projects()
-    table = Table(title=f"Unit Workspace Overview ({len(projects)} Projects)", box=box.ROUNDED, header_style="bold magenta", border_style="blue")
-    table.add_column("Project", style="cyan", no_wrap=True); table.add_column("Version", style="bold yellow")
-    table.add_column("Components (PBOs)", style="dim"); table.add_column("External Mods", justify="center")
-    table.add_column("Sync State", justify="center")
+    projects = get_projects()
+    results = []
     for p in projects:
-        version = "0.0.0"; pbos = []; ext_count = 0; sync_state = "[bold green]OK[/bold green]"
+        version = "0.0.0"; pbos = []; ext_count = 0; sync_state = "OK"
         addons_dir = p / "addons"; sources_path = p / "mod_sources.txt"; lock_path = p / "mods.lock"
         if addons_dir.exists():
             for entry in addons_dir.iterdir():
@@ -135,59 +134,79 @@ def cmd_dashboard(args):
             with open(sources_path, 'r') as f:
                 for line in f:
                     if re.search(r"(\d{8,})", line) and "[ignore]" not in line.lower() and "ignore=" not in line.lower(): ext_count += 1
-        if ext_count > 0 and not lock_path.exists(): sync_state = "[bold red]PENDING[/bold red]"
+        if ext_count > 0 and not lock_path.exists(): sync_state = "PENDING"
         v_path = p / "addons" / "main" / "script_version.hpp"
         if v_path.exists():
             with open(v_path, 'r') as f:
                 vc = f.read(); ma = re.search(r'#define MAJOR (.*)', vc); mi = re.search(r'#define MINOR (.*)', vc); pa = re.search(r'#define PATCHLVL (.*)', vc)
                 if ma and mi and pa: version = f"{ma.group(1).strip()}.{mi.group(1).strip()}.{pa.group(1).strip()}"
-        pbo_str = ", ".join(pbos[:3]) + (f" (+{len(pbos)-3})" if len(pbos)>3 else "")
-        table.add_row(p.name, version, pbo_str if pbos else "-", str(ext_count) if ext_count else "-", sync_state)
+        results.append({"project": p.name, "version": version, "pbos": pbos, "external_count": ext_count, "sync_state": sync_state})
+    
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return
+
+    console = Console(force_terminal=True); print_banner(console)
+    table = Table(title=f"Unit Workspace Overview ({len(projects)} Projects)", box=box.ROUNDED, header_style="bold magenta", border_style="blue")
+    table.add_column("Project", style="cyan", no_wrap=True); table.add_column("Version", style="bold yellow")
+    table.add_column("Components (PBOs)", style="dim"); table.add_column("External Mods", justify="center")
+    table.add_column("Sync State", justify="center")
+    for r in results:
+        pbo_str = ", ".join(r["pbos"][:3]) + (f" (+{len(r['pbos'])-3})" if len(r["pbos"])>3 else "")
+        sync_color = "[bold green]OK[/bold green]" if r["sync_state"] == "OK" else "[bold red]PENDING[/bold red]"
+        table.add_row(r["project"], r["version"], pbo_str if r["pbos"] else "-", str(r["external_count"]) if r["external_count"] else "-", sync_color)
     console.print(table)
 
 def cmd_gh_runs(args):
-    console = Console(force_terminal=True); print_banner(console); projects = get_projects(); workflow_names = set()
-    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
-        task = progress.add_task("[cyan]Scanning workflows...", total=len(projects))
-        for p in projects:
-            try:
-                res = subprocess.run(["gh", "run", "list", "--limit", "15", "--json", "workflowName"], cwd=p, capture_output=True, text=True)
-                if res.returncode == 0:
-                    runs = json.loads(res.stdout)
-                    for r in runs: workflow_names.add(r['workflowName'])
-            except: pass
-            progress.update(task, advance=1)
+    projects = get_projects(); workflow_names = set(); all_stats = []
+    # Discovery phase
+    for p in projects:
+        try:
+            res = subprocess.run(["gh", "run", "list", "--limit", "15", "--json", "workflowName"], cwd=p, capture_output=True, text=True)
+            if res.returncode == 0:
+                for r in json.loads(res.stdout): workflow_names.add(r['workflowName'])
+        except: pass
+    
     sorted_workflows = sorted(list(workflow_names))
+    for p in projects:
+        stats = {"project": p.name, "workflows": {}, "latest_age": "-"}
+        try:
+            res = subprocess.run(["gh", "run", "list", "--limit", "20", "--json", "workflowName,conclusion,status,createdAt"], cwd=p, capture_output=True, text=True)
+            if res.returncode == 0:
+                for run in json.loads(res.stdout):
+                    wf = run['workflowName']
+                    if wf not in stats["workflows"]:
+                        stats["workflows"][wf] = {"status": run['status'], "conclusion": run['conclusion']}
+                        if stats["latest_age"] == "-":
+                            created = datetime.fromisoformat(run['createdAt'].replace('Z', '+00:00'))
+                            diff = datetime.now(created.tzinfo) - created
+                            stats["latest_age"] = f"{diff.days}d" if diff.days > 0 else f"{diff.seconds // 3600}h"
+        except: pass
+        all_stats.append(stats)
+
+    if args.json:
+        print(json.dumps(all_stats, indent=2))
+        return
+
+    console = Console(force_terminal=True); print_banner(console)
     if not sorted_workflows: console.print("[yellow]⚠️  No runs found.[/yellow]"); return
     display_names = {wf: os.path.basename(wf).replace(".yml", "").capitalize() for wf in sorted_workflows}
     table = Table(title="Pipeline Matrix", box=box.ROUNDED, border_style="blue")
     table.add_column("Project", style="cyan"); [table.add_column(display_names[wf], justify="center") for wf in sorted_workflows]; table.add_column("Age", justify="right")
-    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
-        task = progress.add_task("[cyan]Auditing individual runners...", total=len(projects))
-        for p in projects:
-            stats = {wf: "⚪" for wf in sorted_workflows}; latest_age = "-"
-            try:
-                res = subprocess.run(["gh", "run", "list", "--limit", "20", "--json", "workflowName,conclusion,status,createdAt"], cwd=p, capture_output=True, text=True)
-                if res.returncode == 0:
-                    for run in json.loads(res.stdout):
-                        wf = run['workflowName']
-                        if wf in stats and stats[wf] == "⚪":
-                            if run['status'] != "completed": stats[wf] = "⏳"
-                            elif run['conclusion'] == "success": stats[wf] = "[bold green]✅[/]"
-                            else: stats[wf] = "[bold red]❌[/]"
-                            if latest_age == "-":
-                                created = datetime.fromisoformat(run['createdAt'].replace('Z', '+00:00'))
-                                diff = datetime.now(created.tzinfo) - created
-                                latest_age = f"{diff.days}d" if diff.days > 0 else f"{diff.seconds // 3600}h"
-                table.add_row(p.name, *[stats[wf] for wf in sorted_workflows], latest_age)
-            except: table.add_row(p.name, *(["[red]Err[/]"] * len(sorted_workflows)), "-")
-            progress.update(task, advance=1)
-    console.print(table)
+    for s in all_stats:
+        row_icons = []
+        for wf in sorted_workflows:
+            w_stat = s["workflows"].get(wf, {"status": "none", "conclusion": "none"})
+            if w_stat["status"] == "none": icon = "⚪"
+            elif w_stat["status"] != "completed": icon = "⏳"
+            elif w_stat["conclusion"] == "success": icon = "[bold green]✅[/]"
+            else: icon = "[bold red]❌[/]"
+            row_icons.append(icon)
+        table.add_row(s["project"], *row_icons, s["latest_age"])
+    console.print(table); console.print("[dim]Key: ✅ Success | ❌ Failed | ⏳ Running | ⚪ No Data[/dim]")
 
 def cmd_audit_updates(args):
-    console = Console(force_terminal=True); print_banner(console); projects = get_projects()
-    table = Table(title="Update Audit", box=box.ROUNDED, border_style="yellow")
-    table.add_column("Project", style="cyan"); table.add_column("Mod", style="magenta"); table.add_column("Locked"); table.add_column("Live"); table.add_column("Status")
+    projects = get_projects()
     mod_registry = {}
     for p in projects:
         lock_path = p / "mods.lock"
@@ -195,15 +214,48 @@ def cmd_audit_updates(args):
             with open(lock_path, 'r') as f:
                 for mid, info in json.load(f).get("mods", {}).items():
                     if mid not in mod_registry: mod_registry[mid] = {"name": info['name'], "locked": info.get('updated', '0'), "project": p.name}
+    
     if not mod_registry: return
-    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
-        task = progress.add_task(f"Checking Workshop...", total=len(mod_registry))
-        def check_mod(mid): live_ts = get_live_timestamp(mid); progress.advance(task); return mid, live_ts
-        with ThreadPoolExecutor(max_workers=10) as executor: live_results = dict(executor.map(check_mod, mod_registry.keys()))
+    
+    def check_mod(mid): return mid, get_live_timestamp(mid)
+    with ThreadPoolExecutor(max_workers=10) as executor: live_results = dict(executor.map(check_mod, mod_registry.keys()))
+    
+    results = []
     for mid, data in mod_registry.items():
-        live_ts = live_results.get(mid, "0"); status = "[bold green]LATEST[/bold green]" if data['locked'] == live_ts else "[bold red]UPDATE[/bold red]"
-        table.add_row(data['project'], data['name'], data['locked'], live_ts, status)
+        live_ts = live_results.get(mid, "0")
+        results.append({
+            "mid": mid, "name": data["name"], "project": data["project"],
+            "locked": data["locked"], "live": live_ts,
+            "up_to_date": data["locked"] == live_ts
+        })
+
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return
+
+    console = Console(force_terminal=True); print_banner(console)
+    table = Table(title="Update Audit", box=box.ROUNDED, border_style="yellow")
+    table.add_column("Project", style="cyan"); table.add_column("Mod", style="magenta"); table.add_column("Locked"); table.add_column("Live"); table.add_column("Status")
+    for r in results:
+        status = "[bold green]LATEST[/bold green]" if r["up_to_date"] else "[bold red]UPDATE[/bold red]"
+        table.add_row(r["project"], r["name"], r["locked"], r["live"], status)
     console.print(table)
+
+def cmd_status(args):
+    projects = get_projects()
+    all_status = []
+    for p in projects:
+        res = subprocess.run(["git", "status", "-s"], cwd=p, capture_output=True, text=True)
+        all_status.append({"project": p.name, "dirty": len(res.stdout.strip()) > 0, "summary": res.stdout.strip()})
+    
+    if args.json:
+        print(json.dumps(all_status, indent=2))
+        return
+
+    console = Console(force_terminal=True); print_banner(console)
+    for s in all_status:
+        p_obj = next(p for p in projects if p.name == s["project"])
+        console.print(Panel(f"[dim]Root: {p_obj}[/dim]\n{s['summary'] if s['dirty'] else '[green]Clean[/]'", title=f"📦 {s['project']}", border_style="cyan"))
 
 def cmd_apply_updates(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects()
@@ -291,14 +343,10 @@ def cmd_audit_security(args):
     console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "security_auditor.py"
     for p in get_projects(): subprocess.run([sys.executable, str(auditor), str(p)])
 
-def cmd_status(args):
-    console = Console(force_terminal=True); print_banner(console)
-    for p in get_projects(): console.print(Panel(f"[dim]Root: {p}[/dim]", title=f"📦 {p.name}", border_style="cyan")); subprocess.run(["git", "status", "-s"], cwd=p)
-
 def cmd_sync(args):
     console = Console(force_terminal=True); print_banner(console)
     for p in get_projects(): 
-        cmd = [sys.executable, "tools/manage_mods.py", "sync"]; 
+        cmd = [sys.executable, "tools/manage_mods.py", "sync"]
         if args.offline: cmd.append("--offline")
         subprocess.run(cmd, cwd=p)
     from manifest_generator import generate_total_manifest; generate_total_manifest(Path(__file__).parent.parent)
@@ -333,21 +381,22 @@ def cmd_update(args):
 
 def main():
     parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
+    parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
     subparsers = parser.add_subparsers(dest="command")
     
-    # Simple Commands
+    # 1. Simple Commands
     for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "generate-docs", "generate-manifest", "generate-preset", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
         subparsers.add_parser(cmd, help=f"Run {cmd} utility")
 
-    # Advanced Subparsers
-    p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path", help="Path to mission folder"); p_ms.epilog = "Example: ./tools/workspace_manager.py mission-setup my_op.altis"
-    p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true"); p_sync.epilog = "Example: ./tools/workspace_manager.py sync --offline"
+    # 2. Advanced Subparsers
+    p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path", help="Path to mission folder")
+    p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true")
     subparsers.add_parser("pull-mods", help="Alias for sync").add_argument("--offline", action="store_true")
-    p_pub = subparsers.add_parser("publish", help="Upload to Steam"); p_pub.add_argument("--dry-run", action="store_true"); p_pub.epilog = "Example: ./tools/workspace_manager.py publish --dry-run"
-    p_conv = subparsers.add_parser("convert", help="Convert media"); p_conv.add_argument("files", nargs="+"); p_conv.epilog = "Example: ./tools/workspace_manager.py convert sound.wav"
-    p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO"); p_miss.add_argument("pbo"); p_miss.epilog = "Example: ./tools/workspace_manager.py audit-mission my.pbo"
-    p_size = subparsers.add_parser("modlist-size", help="Calculate size"); p_size.add_argument("file", nargs="?", default="mod_sources.txt"); p_size.epilog = "Example: ./tools/workspace_manager.py modlist-size preset.html"
-    p_notify = subparsers.add_parser("notify", help="Discord update"); p_notify.add_argument("message"); p_notify.add_argument("--type", choices=["update", "release", "alert"], default="update"); p_notify.add_argument("--title"); p_notify.epilog = "Example: ./tools/workspace_manager.py notify 'Update soon'"
+    p_pub = subparsers.add_parser("publish", help="Upload to Steam"); p_pub.add_argument("--dry-run", action="store_true")
+    p_conv = subparsers.add_parser("convert", help="Convert media"); p_conv.add_argument("files", nargs="+")
+    p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO"); p_miss.add_argument("pbo")
+    p_size = subparsers.add_parser("modlist-size", help="Calculate size"); p_size.add_argument("file", nargs="?", default="mod_sources.txt")
+    p_notify = subparsers.add_parser("notify", help="Discord update"); p_notify.add_argument("message"); p_notify.add_argument("--type", choices=["update", "release", "alert"], default="update"); p_notify.add_argument("--title")
 
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
