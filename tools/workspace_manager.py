@@ -356,6 +356,10 @@ def cmd_workshop_tags(args):
     console = Console(force_terminal=True); print_banner(console); tags = Path(__file__).parent / "workshop_tags.txt"
     if tags.exists(): console.print(Panel(tags.read_text(), title="Valid Workshop Tags", border_style="blue"))
 
+def cmd_workshop_info(args):
+    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "workshop_inspector.py"
+    subprocess.run([sys.executable, str(auditor)])
+
 def main():
     parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
     parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
