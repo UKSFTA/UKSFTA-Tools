@@ -223,7 +223,7 @@ def cmd_status(args):
 def cmd_apply_updates(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects()
     for p in projects:
-        lock_path = p / "mods.lock"; 
+        lock_path = p / "mods.lock"
         if not lock_path.exists(): continue
         with open(lock_path, 'r') as f: data = json.load(f).get("mods", {})
         updates_found = False
@@ -341,6 +341,16 @@ def cmd_publish(args):
 def cmd_update(args):
     setup = Path(__file__).parent.parent / "setup.py"
     for p in get_projects(): subprocess.run([sys.executable, str(setup.resolve())], cwd=p)
+
+def cmd_generate_docs(args):
+    console = Console(force_terminal=True); print_banner(console); gen = Path(__file__).parent / "doc_generator.py"
+    p = Path(__file__).parent.parent.parent / "UKSFTA-Scripts"
+    if p.exists(): subprocess.run([sys.executable, str(gen), str(p)])
+
+def cmd_generate_manifest(args):
+    console = Console(force_terminal=True); print_banner(console); from manifest_generator import generate_total_manifest
+    output_path = generate_total_manifest(Path(__file__).parent.parent)
+    console.print(f"\n[bold green]Success![/bold green] Total manifest saved to: [cyan]{output_path}[/cyan]")
 
 def main():
     parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
