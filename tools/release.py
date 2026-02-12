@@ -88,14 +88,25 @@ def get_workshop_config():
     return config
 
 def get_external_dependencies():
-    """Identifies all external workshop IDs required by this project."""
-    deps = set()
+    """Identifies all external workshop IDs and resolved names."""
+    deps = {}
+    lock_data = {}
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, "r") as f: lock_data = json.load(f).get("mods", {})
+        except: pass
+
     if not os.path.exists("mod_sources.txt"): return deps
     with open("mod_sources.txt", "r") as f:
         for line in f:
             if any(x in line.lower() for x in ["[ignore]", "ignore=", "@ignore"]): continue
             m = re.search(r"(\d{8,})", line)
-            if m: deps.add(m.group(1))
+            if m:
+                mid = m.group(1)
+                name = f"Mod {mid}"
+                if "#" in line: name = line.split("#", 1)[1].strip()
+                elif mid in lock_data: name = lock_data[mid].get("name", name)
+                deps[mid] = name
     return deps
 
 def create_vdf(app_id, workshop_id, content_path, changelog):
@@ -103,12 +114,15 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     if os.path.exists("workshop_description.txt"):
         with open("workshop_description.txt", "r") as f: desc = f.read()
     
-    # Simple placeholder replacement
     ext_deps = get_external_dependencies()
-    dep_text = "\n[b]Required Mod Dependencies:[/b]\n"
-    for d in ext_deps: dep_text += f" • [url=https://steamcommunity.com/sharedfiles/filedetails/?id={d}]Mod {d}[/url]\n"
+    if ext_deps:
+        dep_text = "\n[b]Required Mod Dependencies:[/b]\n"
+        for mid, name in sorted(ext_deps.items(), key=lambda x: x[1]):
+            dep_text += f" • [url=https://steamcommunity.com/sharedfiles/filedetails/?id={mid}]{name}[/url]\n"
+    else:
+        dep_text = "None."
     
-    desc = desc.replace("{{INCLUDED_CONTENT}}", dep_text if ext_deps else "None.")
+    desc = desc.replace("{{INCLUDED_CONTENT}}", dep_text)
     config = get_workshop_config()
     tags_vdf = "".join([f'        "{i}" "{t}"\n' for i, t in enumerate(config["tags"])])
 
@@ -127,7 +141,12 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
 """
     vdf_path = os.path.join(HEMTT_OUT, "upload.vdf")
     with open(vdf_path, "w") as f: f.write(vdf)
-    return vdf_path
+    
+    # Also save the raw description for manual copying
+    desc_out = os.path.join(PROJECT_ROOT, "workshop_description_final.txt")
+    with open(desc_out, "w") as f: f.write(desc)
+    
+    return vdf_path, desc_out
 
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Release Tool")
@@ -137,6 +156,7 @@ def main():
     parser.add_argument("-n", "--none", action="store_true")
     parser.add_argument("-y", "--yes", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--offline", action="store_true", help="Generate description/VDF but skip Steam upload")
     args = parser.parse_args()
 
     print_steam_info()
@@ -166,11 +186,17 @@ def main():
 
     ws_config = get_workshop_config()
     workshop_id = ws_config["id"]
-    if (not workshop_id or workshop_id == "0") and not args.dry_run:
+    if (not workshop_id or workshop_id == "0") and not args.dry_run and not args.offline:
         workshop_id = input("Enter Workshop ID to update: ").strip()
 
-    vdf_path = create_vdf("107410", workshop_id, STAGING_DIR, "Release v" + new_v)
+    vdf_path, desc_path = create_vdf("107410", workshop_id, STAGING_DIR, "Release v" + new_v)
     
+    if args.offline:
+        print(f"\n[OFFLINE] Final Workshop description generated at: {desc_path}")
+        print("[OFFLINE] VDF generated at: " + vdf_path)
+        print("[OFFLINE] You can now manually update your Workshop page using the generated text file.")
+        return
+
     if args.dry_run:
         print(f"\n[DRY-RUN] VDF generated at: {vdf_path}")
         print("[DRY-RUN] Upload skipped. Integrity scan follows...")
@@ -184,7 +210,6 @@ def main():
     try:
         subprocess.run(cmd, check=True)
         print("\n✅ SUCCESS: Mod updated on Workshop.")
-        # Git Tagging
         tag_name = f"v{new_v}"
         subprocess.run(["git", "tag", "-s", tag_name, "-m", f"Release {new_v}", "-f"], check=True)
         subprocess.run(["git", "push", "origin", "main", "--tags", "-f"], check=False)

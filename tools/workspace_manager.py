@@ -62,6 +62,7 @@ def print_banner(console):
     version = "Unknown"
     v_path = Path(__file__).parent.parent / "VERSION"
     if v_path.exists(): version = v_path.read_text().strip()
+    
     banner = Text.assemble(
         ("\n [!] ", "bold blue"),
         ("UKSF TASKFORCE ALPHA ", "bold white"),
@@ -87,6 +88,7 @@ def cmd_help(console):
     intel_table.add_row("[bold cyan]workshop-info   [/]", "[dim]Query live versions and timestamps from Steam Workshop[/]")
     intel_table.add_row("[bold cyan]modlist-size    [/]", "[dim]Calculate total data size of any Arma 3 modlist[/]")
     intel_table.add_row("[bold cyan]modlist-classify[/]", "[dim]Audit an entire modlist for side requirements[/]")
+    intel_table.add_row("[bold cyan]modlist-audit   [/]", "[dim]Compare a modlist against one or more sources[/]")
     intel_table.add_row("[bold cyan]classify-mod    [/]", "[dim]Deep audit of a single mod's side requirement[/]")
     intel_table.add_row("[bold cyan]audit-updates   [/]", "[dim]Check live Workshop for pending mod updates[/]")
     intel_table.add_row("[bold cyan]apply-updates   [/]", "[dim]Automatically update and sync all out-of-date mods[/]")
@@ -322,6 +324,12 @@ def cmd_classify_mod(args):
 def cmd_modlist_classify(args):
     tool = Path(__file__).parent / "modlist_classifier.py"; subprocess.run([sys.executable, str(tool), args.file])
 
+def cmd_modlist_audit(args):
+    tool = Path(__file__).parent / "modlist_auditor.py"
+    cmd = [sys.executable, str(tool), args.reference] + args.targets
+    if args.deep: cmd.append("--deep")
+    subprocess.run(cmd)
+
 def cmd_audit_deps(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects(); defined_patches = set(); dependencies = {}
     for p in projects:
@@ -395,7 +403,7 @@ def cmd_publish(args):
                 wm = re.search(r'workshop_id = "(.*)"', f.read())
                 if wm and wm.group(1).isdigit(): publishable.append((p, wm.group(1)))
     for p, ws_id in publishable:
-        cmd = [sys.executable, "tools/release.py", "-n", "-y"]; cmd.append("--dry-run") if args.dry_run else None
+        cmd = [sys.executable, "tools/release.py", "-n", "-y"]; if args.offline: cmd.append("--offline"); cmd.append("--dry-run") if args.dry_run else None
         subprocess.run(cmd, cwd=p)
 
 def cmd_update(args):
@@ -426,12 +434,14 @@ def main():
     p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true")
     subparsers.add_parser("pull-mods", help="Alias for sync").add_argument("--offline", action="store_true")
     p_pub = subparsers.add_parser("publish", help="Upload to Steam"); p_pub.add_argument("--dry-run", action="store_true")
+p_pub.add_argument("--offline", action="store_true", help="Generate local metadata only")
     p_conv = subparsers.add_parser("convert", help="Convert media"); p_conv.add_argument("files", nargs="+")
     p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO"); p_miss.add_argument("pbo")
     p_size = subparsers.add_parser("modlist-size", help="Calculate size"); p_size.add_argument("file", nargs="?", default="mod_sources.txt")
     p_notify = subparsers.add_parser("notify", help="Discord update"); p_notify.add_argument("message"); p_notify.add_argument("--type", choices=["update", "release", "alert"], default="update"); p_notify.add_argument("--title")
     p_class = subparsers.add_parser("classify-mod", help="Classify mod side requirement"); p_class.add_argument("id", help="Steam Workshop ID or URL")
     p_list_class = subparsers.add_parser("modlist-classify", help="Classify entire modlist requirements"); p_list_class.add_argument("file", nargs="?", default="mod_sources.txt", help="Path to modlist file")
+    p_list_audit = subparsers.add_parser("modlist-audit", help="Compare modlist against reference sources"); p_list_audit.add_argument("reference", help="Master HTML preset or TXT source"); p_list_audit.add_argument("targets", nargs="+", help="Sources to check against reference"); p_list_audit.add_argument("--deep", action="store_true", help="Scan dependencies of targets")
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
         "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
@@ -443,7 +453,7 @@ def main():
         "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest, "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, 
         "generate-vscode": cmd_generate_vscode, "generate-changelog": cmd_generate_changelog, "setup-git-hooks": cmd_setup_git_hooks,
         "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
-        "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "classify-mod": cmd_classify_mod, "modlist-classify": cmd_modlist_classify,
+        "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "classify-mod": cmd_classify_mod, "modlist-classify": cmd_modlist_classify, "modlist-audit": cmd_modlist_audit,
         "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console)
     }
     if args.command in cmds: cmds[args.command](args)
