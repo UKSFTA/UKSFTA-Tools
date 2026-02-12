@@ -352,6 +352,10 @@ def cmd_generate_manifest(args):
     output_path = generate_total_manifest(Path(__file__).parent.parent)
     console.print(f"\n[bold green]Success![/bold green] Total manifest saved to: [cyan]{output_path}[/cyan]")
 
+def cmd_workshop_tags(args):
+    console = Console(force_terminal=True); print_banner(console); tags = Path(__file__).parent / "workshop_tags.txt"
+    if tags.exists(): console.print(Panel(tags.read_text(), title="Valid Workshop Tags", border_style="blue"))
+
 def main():
     parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
     parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
