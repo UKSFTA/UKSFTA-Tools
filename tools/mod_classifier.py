@@ -4,6 +4,7 @@ import os
 import sys
 import re
 import urllib.request
+import urllib.parse
 import argparse
 import json
 
@@ -20,7 +21,6 @@ except ImportError:
 
 # --- CONFIGURATION & WEIGHTING ---
 
-# Keywords suggesting Client-Side Only (Visuals, HUDs, local sounds)
 CLIENT_PATTERNS = [
     (r"client[- ]?side (only|mod)", 100),
     (r"not (required|needed) on (the )?server", 80),
@@ -33,9 +33,11 @@ CLIENT_PATTERNS = [
     (r"work(s)? without the mod on the server", 90),
 ]
 
-# Keywords suggesting Both (Content, Weapons, Vehicles, Synchronized scripts)
 BOTH_PATTERNS = [
     (r"(required|needed|must be) on (both|all|server and client)", 100),
+    (r"(must|needs to|required to) be installed on (the )?server and (all )?clients?", 150),
+    (r"required on both", 100),
+    (r"both server and client", 100),
     (r"sync(hroniz(e|ation))? (is )?required", 80),
     (r"place(able)? in (the )?editor", 50),
     (r"server (needs|requires) (the )?mod", 70),
@@ -44,7 +46,6 @@ BOTH_PATTERNS = [
     (r"mod (is|must be) signed", 30),
 ]
 
-# Keywords suggesting Server-Side Only (Admin tools, logging, AI behavior)
 SERVER_PATTERNS = [
     (r"server[- ]?side (only|mod)", 100),
     (r"not (required|needed) (by|on) clients?", 80),
@@ -53,7 +54,6 @@ SERVER_PATTERNS = [
     (r"admin tool|logging", 40),
 ]
 
-# Content Tags (If these exist, it's almost certainly "Both")
 CONTENT_TAGS = {
     "weapon": 80, "vehicle": 80, "terrain": 90, "map": 90, "unit": 80,
     "gear": 70, "uniform": 70, "object": 60, "building": 60, "equipment": 80
@@ -74,82 +74,61 @@ def classify_mod(published_id):
     if not html_content:
         return None
 
-    # Extract Metadata
     title_match = re.search(r'<div class="workshopItemTitle">(.*?)</div>', html_content)
     title = title_match.group(1).strip() if title_match else f"Mod {published_id}"
     
     desc_match = re.search(r'<div class="workshopItemDescription" id="highlightContent">(.*?)</div>', html_content, re.DOTALL)
     description = desc_match.group(1).strip() if desc_match else ""
-    # Clean description for regex
     clean_desc = re.sub(r'<.*?>', ' ', description)
-    # Get lines for snippet extraction
-    desc_lines = [l.strip() for l in clean_desc.split('.') if l.strip()]
+    clean_desc = re.sub(r'\s+', ' ', clean_desc)
+    desc_sentences = [s.strip() for s in re.split(r'[.!?]', clean_desc) if len(s.strip()) > 5]
     
-    # Improved Tag Extraction
     tags = re.findall(r'requiredtags%5B%5D=(.*?)["\']', html_content)
-    tags = [urllib.parse.unquote(t).lower() for t in tags]
+    tags = sorted(list(set([urllib.parse.unquote(t) for t in tags])))
 
-    # Analysis Tally
     scores = {"Client": 0, "Server": 0, "Both": 0}
     evidence = []
 
-    # Patterns for "Both" (Priority)
-    BOTH_PHRASES = [
-        (r"(must|needs to|required to) be installed on (the )?server and (all )?clients?", 150),
-        (r"required on both", 100),
-        (r"not a client[- ]?side only mod", 100),
-        (r"both server and client", 100),
-        (r"must be on (the )?server", 80),
-        (r"must be on (the )?client", 80),
-    ]
-
-    # 1. Run Regex Patterns
-    for label, patterns in [("Client", CLIENT_PATTERNS), ("Server", SERVER_PATTERNS), ("Both", BOTH_PHRASES + BOTH_PATTERNS)]:
+    for label, patterns in [("Client", CLIENT_PATTERNS), ("Server", SERVER_PATTERNS), ("Both", BOTH_PATTERNS)]:
         for pattern, weight in patterns:
             matches = re.finditer(pattern, clean_desc, re.IGNORECASE)
             for m in matches:
                 scores[label] += weight
-                # Find the sentence containing the match
                 snippet = m.group(0)
-                for line in desc_lines:
-                    if snippet.lower() in line.lower():
-                        snippet = line
+                for sentence in desc_sentences:
+                    if snippet.lower() in sentence.lower():
+                        snippet = sentence
                         break
                 evidence.append({"type": label, "text": snippet.strip(), "weight": weight})
 
-    # 2. Analyze Tags
     for tag in tags:
+        tag_lower = tag.lower()
         for c_tag, weight in CONTENT_TAGS.items():
-            if c_tag in tag:
+            if c_tag in tag_lower:
                 scores["Both"] += weight
-                evidence.append({"type": "Both", "text": f"Mod Tag: '{tag}' (Implies synchronized content)", "weight": weight})
+                evidence.append({"type": "Both", "text": f"Mod Tag: '{tag}'", "weight": weight})
 
-    # 3. Calculate Confidence
     total = sum(scores.values())
-    if total == 0:
-        return {"title": title, "result": "Indecisive", "confidence": 0, "evidence": []}
-
-    # Normalize
-    results = []
-    for label, val in scores.items():
-        results.append({"label": label, "pct": (val / total) * 100})
+    summary = []
+    for label in ["Client", "Both", "Server"]: # Fixed order
+        val = scores[label]
+        pct = round((val / total) * 100, 1) if total > 0 else 0.0
+        summary.append({"label": label, "score": val, "pct": pct})
     
-    # Sort by percentage
-    results = sorted(results, key=lambda x: x['pct'], reverse=True)
-    
-    # Winner
-    top = results[0]
+    summary_sorted = sorted(summary, key=lambda x: x['pct'], reverse=True)
+    top = summary_sorted[0] if total > 0 else {"label": "Indecisive", "pct": 0.0}
     
     return {
         "title": title,
         "result": top['label'],
-        "confidence": round(top['pct'], 1),
-        "evidence": sorted(evidence, key=lambda x: x['weight'], reverse=True)[:5],
-        "all_scores": results
+        "confidence": top['pct'],
+        "evidence": sorted(evidence, key=lambda x: x['weight'], reverse=True),
+        "tags": tags,
+        "scores": summary
     }
 
 def main():
-    parser = argparse.ArgumentParser(description="UKSFTA Fuzzy Mod Classifier")
+    parser = argparse.ArgumentParser(description="UKSFTA Verbose Mod Classifier")
     parser.add_argument("url_or_id", help="Steam Workshop URL or ID")
     parser.add_argument("--json", action="store_true", help="Output result as JSON")
     args = parser.parse_args()
@@ -172,26 +151,38 @@ def main():
         color = "green" if data['result'] == "Client" else ("yellow" if data['result'] == "Both" else "magenta")
         if data['result'] == "Indecisive": color = "white"
         
-        content = Text()
-        content.append(f"{data['title']}\n", style="bold white")
-        content.append(f"{data['result']} ", style=f"bold {color}")
-        content.append(f"({data['confidence']}% Confidence)", style="dim")
-        
-        console.print(Panel(content, border_style=color, title="Classification Result"))
-        
+        header = Text()
+        header.append(f"{data['title']}\n", style="bold white")
+        header.append(f"Verdict: {data['result']} ", style=f"bold {color}")
+        header.append(f"({data['confidence']}% Confidence)", style="dim")
+        console.print(Panel(header, border_style=color, title=f"Analysis: {mid}"))
+
+        score_table = Table(box=box.SIMPLE, header_style="bold cyan", title="Probability Scorecard", title_justify="left")
+        score_table.add_column("Type")
+        score_table.add_column("Score", justify="right")
+        score_table.add_column("Probability", justify="right")
+        for s in data['scores']:
+            s_color = "green" if s['label'] == "Client" else ("yellow" if s['label'] == "Both" else "magenta")
+            score_table.add_row(f"[{s_color}]{s['label']}[/]", str(s['score']), f"{s['pct']}%")
+        console.print(score_table)
+
+        if data['tags']:
+            tag_text = Text.assemble(("[bold dim]Workshop Tags:[/] ", "dim"), (", ".join(data['tags']), "italic cyan"))
+            console.print(tag_text)
+
         if data['evidence']:
-            console.print("\n[bold dim]Primary Evidence:[/bold dim]")
+            console.print("\n[bold]Found Evidence:[/bold]")
             for e in data['evidence']:
                 e_color = "cyan" if e['type'] == "Client" else ("yellow" if e['type'] == "Both" else "magenta")
-                console.print(f" • [[bold {e_color}]{e['type']}[/]] {e['text']}")
-        
+                console.print(f" • [[bold {e_color}]{e['type']:<6}[/]] {e['text']} [dim](Weight: {e['weight']})[/]")
+        else:
+            console.print("\n[yellow]! No specific phrasing found to classify this mod automatically.[/yellow]")
+
         if data['confidence'] < 50 and data['result'] != "Indecisive":
-            console.print("\n[bold red]⚠ LOW CONFIDENCE:[/] Manual testing is highly recommended.")
+            console.print("\n[bold red]⚠ LOW CONFIDENCE ALERT:[/] Ambient logic suggests this verdict, but no direct statement found.")
     else:
-        print(f"Mod: {data['title']}")
-        print(f"Result: {data['result']} ({data['confidence']}%)")
-        for e in data['evidence']:
-            print(f" - [{e['type']}] {e['text']}")
+        print(f"Verdict: {data['result']} ({data['confidence']}%)")
+        for e in data['evidence']: print(f" - [{e['type']}] {e['text']}")
 
 if __name__ == "__main__":
     main()
