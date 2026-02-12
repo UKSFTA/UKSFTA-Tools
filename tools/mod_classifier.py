@@ -56,7 +56,7 @@ SERVER_PATTERNS = [
 # Content Tags (If these exist, it's almost certainly "Both")
 CONTENT_TAGS = {
     "weapon": 80, "vehicle": 80, "terrain": 90, "map": 90, "unit": 80,
-    "gear": 70, "uniform": 70, "object": 60, "building": 60
+    "gear": 70, "uniform": 70, "object": 60, "building": 60, "equipment": 80
 }
 
 def fetch_workshop_page(published_id):
@@ -85,15 +85,26 @@ def classify_mod(published_id):
     # Get lines for snippet extraction
     desc_lines = [l.strip() for l in clean_desc.split('.') if l.strip()]
     
-    tags = re.findall(r'href="https://steamcommunity.com/workshop/browse/\?appid=107410&.*?requiredtags%5B%5D=(.*?)">', html_content)
-    tags = [t.lower() for t in tags]
+    # Improved Tag Extraction
+    tags = re.findall(r'requiredtags%5B%5D=(.*?)["\']', html_content)
+    tags = [urllib.parse.unquote(t).lower() for t in tags]
 
     # Analysis Tally
     scores = {"Client": 0, "Server": 0, "Both": 0}
     evidence = []
 
+    # Patterns for "Both" (Priority)
+    BOTH_PHRASES = [
+        (r"(must|needs to|required to) be installed on (the )?server and (all )?clients?", 150),
+        (r"required on both", 100),
+        (r"not a client[- ]?side only mod", 100),
+        (r"both server and client", 100),
+        (r"must be on (the )?server", 80),
+        (r"must be on (the )?client", 80),
+    ]
+
     # 1. Run Regex Patterns
-    for label, patterns in [("Client", CLIENT_PATTERNS), ("Server", SERVER_PATTERNS), ("Both", BOTH_PATTERNS)]:
+    for label, patterns in [("Client", CLIENT_PATTERNS), ("Server", SERVER_PATTERNS), ("Both", BOTH_PHRASES + BOTH_PATTERNS)]:
         for pattern, weight in patterns:
             matches = re.finditer(pattern, clean_desc, re.IGNORECASE)
             for m in matches:
