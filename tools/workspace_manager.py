@@ -62,6 +62,7 @@ def print_banner(console):
     version = "Unknown"
     v_path = Path(__file__).parent.parent / "VERSION"
     if v_path.exists(): version = v_path.read_text().strip()
+    
     banner = Text.assemble(
         ("\n [!] ", "bold blue"),
         ("UKSF TASKFORCE ALPHA ", "bold white"),
@@ -228,6 +229,21 @@ def cmd_status(args):
     for s in all_status:
         p_obj = next(p for p in projects if p.name == s["project"])
         console.print(Panel(f"[dim]Root: {p_obj}[/dim]\n{s['summary'] if s['dirty'] else '[green]Clean[/green]'}", title=f"Project: {s['project']}", border_style="cyan"))
+
+def cmd_apply_updates(args):
+    console = Console(force_terminal=True); print_banner(console); projects = get_projects()
+    for p in projects:
+        lock_path = p / "mods.lock"
+        if not lock_path.exists(): continue
+        with open(lock_path, 'r') as f: data = json.load(f).get("mods", {})
+        updates_found = False
+        for mid, info in data.items():
+            live_ts = get_live_timestamp(mid)
+            if live_ts != "0" and info.get("updated") != live_ts:
+                console.print(f"   [bold green]UPDATE[/bold green]: {info['name']} in {p.name}"); info["updated"] = live_ts; updates_found = True
+        if updates_found:
+            with open(lock_path, 'w') as f: json.dump({"mods": data}, f, indent=2)
+            subprocess.run([sys.executable, "tools/manage_mods.py", "sync"], cwd=p); subprocess.run(["git", "add", "mods.lock"], cwd=p); subprocess.run(["git", "commit", "-S", "-m", "chore: automated workshop updates"], cwd=p); subprocess.run(["git", "push", "origin", "main"], cwd=p)
 
 def cmd_self_update(args):
     console = Console(force_terminal=True); print_banner(console)
