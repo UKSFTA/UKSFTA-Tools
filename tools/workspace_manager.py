@@ -218,7 +218,7 @@ def cmd_status(args):
     console = Console(force_terminal=True); print_banner(console)
     for s in all_status:
         p_obj = next(p for p in projects if p.name == s["project"])
-        console.print(Panel(f"[dim]Root: {p_obj}[/dim]\n{s['summary'] if s['dirty'] else '[green]Clean[/]'", title=f"Project: {s['project']}", border_style="cyan"))
+        console.print(Panel(f"[dim]Root: {p_obj}[/dim]\n{s['summary'] if s['dirty'] else '[green]Clean[/green]'}", title=f"Project: {s['project']}", border_style="cyan"))
 
 def cmd_apply_updates(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects()
