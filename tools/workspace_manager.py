@@ -114,7 +114,7 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]workshop-tags    [/]", "[dim]List all valid Arma 3 Steam Workshop tags[/]")
 
     console.print(ws_table); console.print(intel_table); console.print(audit_table); console.print(prod_table)
-    console.print("\n[dim]Usage: ./tools/workspace_manager.py <command> [args][/]\n")
+    console.print("\n[bold]Tip:[/bold] Run [cyan]./tools/workspace_manager.py <command> --help[/cyan] for detailed options and examples.\n")
 
 def cmd_dashboard(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects()
@@ -420,14 +420,45 @@ def cmd_workshop_info(args):
 def main():
     parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
     subparsers = parser.add_subparsers(dest="command")
-    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "generate-docs", "generate-manifest", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]: subparsers.add_parser(cmd)
+    
+    # 1. Simple Commands (No specific arguments)
+    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "generate-docs", "generate-manifest", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
+        subparsers.add_parser(cmd, help=f"Run {cmd} utility")
+
+    # 2. Command-specific Subparsers
+    # SYNC / PULL-MODS
     for cmd in ["sync", "pull-mods"]:
-        p_sync = subparsers.add_parser(cmd); p_sync.add_argument("--offline", action="store_true", help="Skip SteamCMD downloads")
-    p_pub = subparsers.add_parser("publish"); p_pub.add_argument("--dry-run", action="store_true")
-    p_conv = subparsers.add_parser("convert"); p_conv.add_argument("files", nargs="+")
-    p_miss = subparsers.add_parser("audit-mission"); p_miss.add_argument("pbo", help="Path to mission PBO")
-    p_size = subparsers.add_parser("modlist-size"); p_size.add_argument("file", nargs="?", default="mod_sources.txt", help="Path to modlist file")
-    p_notify = subparsers.add_parser("notify"); p_notify.add_argument("message"); p_notify.add_argument("--type", choices=["update", "release", "alert"], default="update"); p_notify.add_argument("--title")
+        p_sync = subparsers.add_parser(cmd, help="Synchronize project dependencies and mods")
+        p_sync.add_argument("--offline", action="store_true", help="Skip SteamCMD downloads and sync from local cache only")
+        p_sync.epilog = "Example: ./tools/workspace_manager.py sync --offline"
+
+    # PUBLISH
+    p_pub = subparsers.add_parser("publish", help="Upload built projects to Steam Workshop")
+    p_pub.add_argument("--dry-run", action="store_true", help="Generate VDF and validate but do not upload")
+    p_pub.epilog = "Example: ./tools/workspace_manager.py publish --dry-run"
+
+    # CONVERT
+    p_conv = subparsers.add_parser("convert", help="Batch convert media files to Arma-optimized formats (OGG/PAA)")
+    p_conv.add_argument("files", nargs="+", help="One or more files to convert (.wav, .png, .jpg)")
+    p_conv.epilog = "Example: ./tools/workspace_manager.py convert sound.wav texture.png"
+
+    # AUDIT-MISSION
+    p_miss = subparsers.add_parser("audit-mission", help="Verify a mission PBO against local workspace and external dependencies")
+    p_miss.add_argument("pbo", help="Path to the mission PBO file")
+    p_miss.epilog = "Example: ./tools/workspace_manager.py audit-mission my_mission.pbo"
+
+    # MODLIST-SIZE
+    p_size = subparsers.add_parser("modlist-size", help="Calculate the total download size of any modlist (HTML or text)")
+    p_size.add_argument("file", nargs="?", default="mod_sources.txt", help="Path to modlist HTML or mod_sources.txt (default: mod_sources.txt)")
+    p_size.epilog = "Example: ./tools/workspace_manager.py modlist-size preset.html"
+
+    # NOTIFY
+    p_notify = subparsers.add_parser("notify", help="Send a manual status update to the unit Discord")
+    p_notify.add_argument("message", help="The message content to display in the notification")
+    p_notify.add_argument("--type", choices=["update", "release", "alert"], default="update", help="The notification card style (default: update)")
+    p_notify.add_argument("--title", help="Optional custom title for the notification card")
+    p_notify.epilog = "Example: ./tools/workspace_manager.py notify 'Server update starting soon' --type alert"
+
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
         "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
