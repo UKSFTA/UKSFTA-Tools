@@ -62,7 +62,6 @@ def print_banner(console):
     version = "Unknown"
     v_path = Path(__file__).parent.parent / "VERSION"
     if v_path.exists(): version = v_path.read_text().strip()
-    
     banner = Text.assemble(
         ("\n [!] ", "bold blue"),
         ("UKSF TASKFORCE ALPHA ", "bold white"),
@@ -79,6 +78,7 @@ def cmd_help(console):
     ws_table.add_row("[bold cyan]status   [/]", "[dim]Show git status summary for every repository[/]")
     ws_table.add_row("[bold cyan]sync     [/]", "[dim]Pull latest Workshop updates and synchronize mods[/]")
     ws_table.add_row("[bold cyan]update   [/]", "[dim]Propagate latest UKSFTA-Tools to all projects[/]")
+    ws_table.add_row("[bold cyan]self-update[/]", "[dim]Pull latest DevOps improvements from Tools repo[/]")
     ws_table.add_row("[bold cyan]cache    [/]", "[dim]Show disk space usage of build artifacts[/]")
     ws_table.add_row("[bold cyan]clean    [/]", "[dim]Wipe all .hemttout build artifacts[/]")
     ws_table.add_row("[bold cyan]check-env[/]", "[dim]Verify local development tools and dependencies[/]")
@@ -94,6 +94,7 @@ def cmd_help(console):
     audit_table.add_row("[bold cyan]test             [/]", "[dim]Run full suite (pytest, hemtt check, sqflint)[/]")
     audit_table.add_row("[bold cyan]audit-performance[/]", "[dim]Scan assets for texture and model optimization issues[/]")
     audit_table.add_row("[bold cyan]audit-signatures [/]", "[dim]Verify PBO signing state and unit key matches[/]")
+    audit_table.add_row("[bold cyan]audit-keys       [/]", "[dim]Verify presence of official unit public keys[/]")
     audit_table.add_row("[bold cyan]audit-deps       [/]", "[dim]Scan requiredAddons for missing dependencies[/]")
     audit_table.add_row("[bold cyan]audit-assets     [/]", "[dim]Detect orphaned/unused binary files (PAA, P3D)[/]")
     audit_table.add_row("[bold cyan]audit-strings    [/]", "[dim]Validate stringtable keys vs SQF usage[/]")
@@ -107,9 +108,11 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]generate-preset  [/]", "[dim]Create master HTML preset of all unit dependencies[/]")
     prod_table.add_row("[bold cyan]generate-report  [/]", "[dim]Create a Markdown health report for the entire unit[/]")
     prod_table.add_row("[bold cyan]generate-manifest[/]", "[dim]Create unit-wide manifest of all mods and PBOs[/]")
+    prod_table.add_row("[bold cyan]generate-changelog[/]", "[dim]Generate CHANGELOG.md from git commit history[/]")
     prod_table.add_row("[bold cyan]generate-vscode  [/]", "[dim]Setup VS Code Tasks for one-click development[/]")
     prod_table.add_row("[bold cyan]setup-git-hooks  [/]", "[dim]Install local pre-commit quality/security guards[/]")
     prod_table.add_row("[bold cyan]fix-syntax       [/]", "[dim]Standardize indentation and formatting in all repos[/]")
+    prod_table.add_row("[bold cyan]clean-strings    [/]", "[dim]Purge unused keys from all stringtable.xml files[/]")
     prod_table.add_row("[bold cyan]notify           [/]", "[dim]Send a manual development update to Discord[/]")
     prod_table.add_row("[bold cyan]generate-docs    [/]", "[dim]Auto-generate API Manual from SQF headers[/]")
     prod_table.add_row("[bold cyan]convert          [/]", "[dim]Optimize media for Arma (WAV/PNG -> OGG/PAA)[/]")
@@ -215,17 +218,6 @@ def cmd_audit_updates(args):
         table.add_row(r["project"], r["name"], r["locked"], r["live"], status)
     console.print(table)
 
-def cmd_status(args):
-    projects = get_projects(); all_status = []
-    for p in projects:
-        res = subprocess.run(["git", "status", "-s"], cwd=p, capture_output=True, text=True)
-        all_status.append({"project": p.name, "dirty": len(res.stdout.strip()) > 0, "summary": res.stdout.strip()})
-    if args.json: print(json.dumps(all_status, indent=2)); return
-    console = Console(force_terminal=True); print_banner(console)
-    for s in all_status:
-        p_obj = next(p for p in projects if p.name == s["project"])
-        console.print(Panel(f"[dim]Root: {p_obj}[/dim]\n{s['summary'] if s['dirty'] else '[green]Clean[/green]'}", title=f"Project: {s['project']}", border_style="cyan"))
-
 def cmd_apply_updates(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects()
     for p in projects:
@@ -241,6 +233,24 @@ def cmd_apply_updates(args):
             with open(lock_path, 'w') as f: json.dump({"mods": data}, f, indent=2)
             subprocess.run([sys.executable, "tools/manage_mods.py", "sync"], cwd=p); subprocess.run(["git", "add", "mods.lock"], cwd=p); subprocess.run(["git", "commit", "-S", "-m", "chore: automated workshop updates"], cwd=p); subprocess.run(["git", "push", "origin", "main"], cwd=p)
 
+def cmd_status(args):
+    projects = get_projects(); all_status = []
+    for p in projects:
+        res = subprocess.run(["git", "status", "-s"], cwd=p, capture_output=True, text=True)
+        all_status.append({"project": p.name, "dirty": len(res.stdout.strip()) > 0, "summary": res.stdout.strip()})
+    if args.json: print(json.dumps(all_status, indent=2)); return
+    console = Console(force_terminal=True); print_banner(console)
+    for s in all_status:
+        p_obj = next(p for p in projects if p.name == s["project"])
+        console.print(Panel(f"[dim]Root: {p_obj}[/dim]\n{s['summary'] if s['dirty'] else '[green]Clean[/green]'}", title=f"Project: {s['project']}", border_style="cyan"))
+
+def cmd_self_update(args):
+    console = Console(force_terminal=True); print_banner(console)
+    console.print("[bold yellow]🚀 UPDATING PLATINUM DEVOPS TOOLS[/bold yellow]")
+    root = Path(__file__).parent.parent
+    subprocess.run(["git", "pull", "origin", "main"], cwd=root)
+    console.print("[bold green]✅ Tools updated to latest version.[/bold green]")
+
 def cmd_audit_signatures(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects()
     table = Table(title="Signature Audit", box=box.ROUNDED, border_style="magenta")
@@ -253,6 +263,10 @@ def cmd_audit_signatures(args):
             table.add_row(p.name, pbo.name, "[bold green]SIGNED[/bold green]" if signed else "[bold red]UNSIGNED[/bold red]")
     console.print(table)
 
+def cmd_audit_keys(args):
+    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "key_auditor.py"
+    for p in get_projects(): subprocess.run([sys.executable, str(auditor), str(p)])
+
 def cmd_notify(args):
     notifier = Path(__file__).parent / "notify_discord.py"; cmd = [sys.executable, str(notifier), "--message", args.message, "--type", args.type]
     if args.title: cmd.extend(["--title", args.title])
@@ -260,7 +274,7 @@ def cmd_notify(args):
 
 def cmd_audit_full(args):
     console = Console(force_terminal=True); print_banner(console); console.print(Panel("[bold yellow]🚀 STARTING GLOBAL UNIT AUDIT[/bold yellow]", border_style="yellow"))
-    cmd_audit_updates(args); cmd_audit_deps(args); cmd_audit_assets(args); cmd_audit_strings(args); cmd_audit_security(args); cmd_audit_signatures(args)
+    cmd_audit_updates(args); cmd_audit_deps(args); cmd_audit_assets(args); cmd_audit_strings(args); cmd_audit_security(args); cmd_audit_signatures(args); cmd_audit_keys(args)
 
 def cmd_mission_setup(args):
     console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "mission_scaffolder.py"
@@ -273,6 +287,10 @@ def cmd_generate_preset(args):
 
 def cmd_generate_report(args):
     auditor = Path(__file__).parent / "report_generator.py"; subprocess.run([sys.executable, str(auditor)])
+
+def cmd_generate_changelog(args):
+    tool = Path(__file__).parent / "changelog_generator.py"
+    for p in get_projects(): subprocess.run([sys.executable, str(tool), str(p)])
 
 def cmd_generate_vscode(args):
     tool = Path(__file__).parent / "vscode_task_generator.py"
@@ -288,6 +306,10 @@ def cmd_check_env(args):
 def cmd_fix_syntax(args):
     fixer = Path(__file__).parent / "syntax_fixer.py"
     for p in get_projects(): subprocess.run([sys.executable, str(fixer), str(p)])
+
+def cmd_clean_strings(args):
+    cleaner = Path(__file__).parent / "string_cleaner.py"
+    for p in get_projects(): subprocess.run([sys.executable, str(cleaner), str(p)])
 
 def cmd_audit_performance(args):
     console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "performance_auditor.py"
@@ -391,7 +413,7 @@ def main():
     parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
     parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
     subparsers = parser.add_subparsers(dest="command")
-    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "setup-git-hooks", "check-env", "fix-syntax", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
+    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "audit-keys", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "setup-git-hooks", "check-env", "fix-syntax", "clean-strings", "update", "self-update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
         subparsers.add_parser(cmd, help=f"Run {cmd} utility")
     p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path", help="Path to mission folder"); p_ms.add_argument("--framework", action="store_true", help="Inject Mission Framework"); p_ms.epilog = "Example: ./tools/workspace_manager.py mission-setup my_op --framework"
     p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true")
@@ -407,10 +429,12 @@ def main():
         "test": lambda a: subprocess.run(["pytest"]), "clean": lambda a: [subprocess.run(["rm", "-rf", ".hemttout"], cwd=p) for p in get_projects()],
         "cache": lambda a: [subprocess.run(["du", "-sh", ".hemttout"], cwd=p) for p in get_projects() if (p/".hemttout").exists()],
         "publish": cmd_publish, "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "apply-updates": cmd_apply_updates, "audit-deps": cmd_audit_deps,
-        "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings, "audit-security": cmd_audit_security, "audit-signatures": cmd_audit_signatures, "audit-performance": cmd_audit_performance,
-        "audit-mission": cmd_audit_mission, "mission-setup": cmd_mission_setup, "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest,
-        "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, "generate-vscode": cmd_generate_vscode, "setup-git-hooks": cmd_setup_git_hooks,
-        "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "update": cmd_update, "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info,
+        "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings, "audit-security": cmd_audit_security, "audit-signatures": cmd_audit_signatures,
+        "audit-performance": cmd_audit_performance, "audit-keys": cmd_audit_keys, "audit-mission": cmd_audit_mission, "mission-setup": cmd_mission_setup, 
+        "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest, "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, 
+        "generate-vscode": cmd_generate_vscode, "generate-changelog": cmd_generate_changelog, "setup-git-hooks": cmd_setup_git_hooks,
+        "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
+        "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info,
         "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console)
     }
     if args.command in cmds: cmds[args.command](args)
