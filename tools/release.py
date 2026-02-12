@@ -1,422 +1,196 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 import os
 import sys
 import re
 import subprocess
 import shutil
-import getpass
 import json
 import glob
 import urllib.request
 import html
 import argparse
 import multiprocessing
+import time
+
 try:
     from rich.console import Console
+    from rich.panel import Panel
     from rich import print as rprint
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
     rprint = print
 
-# Configuration
+# --- CONFIGURATION ---
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-def find_version_file():
-    # Recursively find the first script_version.hpp in addons/
-    addons_dir = os.path.join(PROJECT_ROOT, "addons")
-    for root, _, files in os.walk(addons_dir):
-        if "script_version.hpp" in files:
-            return os.path.join(root, "script_version.hpp")
-    return None
-
-VERSION_FILE = find_version_file()
 HEMTT_OUT = os.path.join(PROJECT_ROOT, ".hemttout")
-# Workshop expects the RAW contents (addons, keys etc) at the root
 STAGING_DIR = os.path.join(HEMTT_OUT, "release")
 PROJECT_TOML = os.path.join(PROJECT_ROOT, ".hemtt", "project.toml")
 LOCK_FILE = "mods.lock"
 
-def load_env():
-    env_path = os.path.join(PROJECT_ROOT, ".env")
-    if os.path.exists(env_path):
-        with open(env_path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    parts = line.split("=", 1)
-                    if len(parts) == 2:
-                        key, value = parts
-                        os.environ[key.strip()] = value.strip()
+def find_version_file():
+    addons_dir = os.path.join(PROJECT_ROOT, "addons")
+    if not os.path.exists(addons_dir): return None
+    for root, _, files in os.walk(addons_dir):
+        if "script_version.hpp" in files: return os.path.join(root, "script_version.hpp")
+    return None
+
+VERSION_FILE = find_version_file()
+
+def print_steam_info():
+    """Explains how Steam Workshop uploads actually work."""
+    info = """
+[bold cyan]How Steam Workshop Uploads Work:[/bold cyan]
+1. [white]Raw Files:[/] SteamCMD does [bold red]NOT[/bold red] upload a ZIP file.
+2. [white]Content Sync:[/] It uploads the [bold green]raw folder structure[/] (addons, keys, etc).
+3. [white]Differential:[/] Steam compares your local files with the server and only uploads the changes.
+4. [white]VDF Config:[/] The [dim]upload.vdf[/] tells Steam which folder to scan and what metadata to set.
+    """
+    if HAS_RICH:
+        rprint(Panel(info, title="SteamCMD Technical Context", border_style="cyan"))
+    else:
+        print("\n--- SteamCMD Technical Context ---")
+        print("Steam uploads raw files/folders, not a ZIP. It performs a differential sync.")
 
 def get_current_version():
-    if not os.path.exists(VERSION_FILE):
-        return "0.0.0", (0, 0, 0)
+    if not VERSION_FILE or not os.path.exists(VERSION_FILE): return "0.0.0", (0, 0, 0)
     with open(VERSION_FILE, "r") as f:
         content = f.read()
-    
-    major = re.search(r"#define\s+MAJOR\s+(\d+)", content).group(1)
-    minor = re.search(r"#define\s+MINOR\s+(\d+)", content).group(1)
-    patch = re.search(r"#define\s+PATCHLVL\s+(\d+)", content).group(1)
-    return f"{major}.{minor}.{patch}", (int(major), int(minor), int(patch))
+    m = re.search(r"#define\s+MAJOR\s+(\d+)", content)
+    mi = re.search(r"#define\s+MINOR\s+(\d+)", content)
+    p = re.search(r"#define\s+PATCHLVL\s+(\d+)", content)
+    if not all([m, mi, p]): return "0.0.0", (0, 0, 0)
+    return f"{m.group(1)}.{mi.group(1)}.{p.group(1)}", (int(m.group(1)), int(mi.group(1)), int(p.group(1)))
 
 def bump_version(part="patch"):
-    version_str, (major, minor, patch) = get_current_version()
-    
-    if part == "major":
-        major += 1
-        minor = 0
-        patch = 0
-    elif part == "minor":
-        minor += 1
-        patch = 0
-    else: # patch
-        patch += 1
-        
-    new_version = f"{major}.{minor}.{patch}"
-    print(f"Bumping version: {version_str} -> {new_version}")
-    
-    with open(VERSION_FILE, "r") as f:
-        content = f.read()
-        
-    content = re.sub(r"#define\s+MAJOR\s+\d+", f"#define MAJOR {major}", content)
-    content = re.sub(r"#define\s+MINOR\s+\d+", f"#define MINOR {minor}", content)
-    content = re.sub(r"#define\s+PATCHLVL\s+\d+", f"#define PATCHLVL {patch}", content)
-    
-    with open(VERSION_FILE, "w") as f:
-        f.write(content)
-        
-    return new_version
+    v_str, (ma, mi, pa) = get_current_version()
+    if part == "major": ma += 1; mi = 0; pa = 0
+    elif part == "minor": mi += 1; pa = 0
+    else: pa += 1
+    new_v = f"{ma}.{mi}.{pa}"
+    with open(VERSION_FILE, "r") as f: content = f.read()
+    content = re.sub(r"#define\s+MAJOR\s+\d+", f"#define MAJOR {ma}", content)
+    content = re.sub(r"#define\s+MINOR\s+\d+", f"#define MINOR {mi}", content)
+    content = re.sub(r"#define\s+PATCHLVL\s+\d+", f"#define PATCHLVL {pa}", content)
+    with open(VERSION_FILE, "w") as f: f.write(content)
+    return new_v
 
 def get_workshop_config():
-    config = {
-        "id": "0",
-        "tags": ["Mod", "Addon"]
-    }
+    config = {"id": "0", "tags": ["Mod", "Addon"]}
     if os.path.exists(PROJECT_TOML):
         with open(PROJECT_TOML, "r") as f:
             for line in f:
-                if "workshop_id" in line:
-                    val = line.split("=")[1].strip().strip('"')
-                    if val: config["id"] = val
-                if "workshop_tags" in line:
-                    tags_match = re.search(r"\[(.*?)\]", line)
-                    if tags_match:
-                        config["tags"] = [t.strip().strip('"').strip("'") for t in tags_match.group(1).split(",")]
+                if "workshop_id =" in line: config["id"] = line.split("=")[1].strip().strip('"')
+                if "workshop_tags =" in line:
+                    m = re.search(r"\[(.*?)\]", line)
+                    if m: config["tags"] = [t.strip().strip('"').strip("'") for t in m.group(1).split(",")]
     return config
 
-def generate_content_list():
-    lock_data = {"mods": {}}
-    if os.path.exists(LOCK_FILE):
-        with open(LOCK_FILE, "r") as f:
-            lock_data = json.load(f)
-            if "mods" not in lock_data:
-                lock_data = {"mods": {}}
-
-    if not os.path.exists("mod_sources.txt"):
-        return "[*] [i]No external content listed.[/i]"
-    
-    content_list = ""
+def get_external_dependencies():
+    """Identifies all external workshop IDs required by this project."""
+    deps = set()
+    if not os.path.exists("mod_sources.txt"): return deps
     with open("mod_sources.txt", "r") as f:
         for line in f:
-            clean_line = line.strip()
-            if not clean_line or clean_line.startswith("#"):
-                continue
-            
-            # Respect [ignore] block
-            if "[ignore]" in clean_line.lower() or "[ignored]" in clean_line.lower():
-                break
+            if any(x in line.lower() for x in ["[ignore]", "ignore=", "@ignore"]): continue
+            m = re.search(r"(\d{8,})", line)
+            if m: deps.add(m.group(1))
+    return deps
 
-            # Respect inline ignore
-            if "ignore=" in clean_line.lower() or "@ignore" in clean_line.lower():
-                continue
-
-            match = re.search(r"(?:id=)?(\d{8,})", clean_line)
-            if not match: continue
-            mid = match.group(1)
-            
-            tag = ""
-            if "#" in clean_line:
-                tag = clean_line.split("#", 1)[1].strip()
-            
-            mod_info = lock_data["mods"].get(mid, {})
-            mod_name = tag if tag else mod_info.get("name", f"Mod {mid}")
-            mod_url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={mid}"
-
-            display_name = mod_name
-            category = ""
-            if "|" in mod_name:
-                parts = mod_name.split("|")
-                category = parts[0].strip()
-                display_name = parts[1].strip()
-
-            content_list += f"[*] [url={mod_url}][b]{display_name}[/b][/url]"
-            if category:
-                content_list += f" ({category})"
-            
-            deps = mod_info.get("dependencies", [])
-            if deps:
-                content_list += "\n[list]\n"
-                for dep in deps:
-                    dep_url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={dep['id']}"
-                    content_list += f"[*] [i]Dependency Included:[/i] [url={dep_url}]{dep['name']}[/url]\n"
-                content_list += "[/list]\n"
-            else:
-                content_list += "\n"
-    
-    return content_list if content_list else "[*] [i]Content list pending update.[/i]"
-
-def generate_changelog(last_tag):
-    try:
-        if last_tag == "HEAD":
-            cmd = ["git", "log", "--oneline", "--no-merges", "-n", "10"]
-        else:
-            cmd = ["git", "log", f"{last_tag}..HEAD", "--oneline", "--no-merges"]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        # Final safety truncation
-        lines = result.stdout.strip().split("\n")
-        if len(lines) > 10:
-            lines = lines[:10]
-            lines.append("... [truncated]")
-        return "\n".join(lines)
-    except:
-        return "Maintenance update."
-
-def create_vdf(app_id, workshop_id, content_path, changelog, preview_image=None):
-    description = ""
+def create_vdf(app_id, workshop_id, content_path, changelog):
+    desc = ""
     if os.path.exists("workshop_description.txt"):
-        with open("workshop_description.txt", "r") as f:
-            description = f.read()
-
-    included_content = generate_content_list()
-    # Fix: generate_content_list already returns a formatted string with [*]
-    description = description.replace("{{INCLUDED_CONTENT}}", included_content)
-
-    config = get_workshop_config()
-    tags_vdf = ""
-    for i, tag in enumerate(config["tags"]):
-        tags_vdf += f'        "{i}" "{tag}"\n'
-
-    preview_line = f'"previewfile" "{preview_image}"' if preview_image else ""
+        with open("workshop_description.txt", "r") as f: desc = f.read()
     
-    vdf_content = f"""
+    # Simple placeholder replacement
+    ext_deps = get_external_dependencies()
+    dep_text = "\n[b]Required Mod Dependencies:[/b]\n"
+    for d in ext_deps: dep_text += f" • [url=https://steamcommunity.com/sharedfiles/filedetails/?id={d}]Mod {d}[/url]\n"
+    
+    desc = desc.replace("{{INCLUDED_CONTENT}}", dep_text if ext_deps else "None.")
+    config = get_workshop_config()
+    tags_vdf = "".join([f'        "{i}" "{t}"\n' for i, t in enumerate(config["tags"])])
+
+    vdf = f"""
 "workshopitem"
 {{
     "appid" "{app_id}"
     "publishedfileid" "{workshop_id}"
     "contentfolder" "{content_path}"
     "changenote" "{changelog}"
-    "description" "{description}"
+    "description" "{desc}"
     "tags"
     {{
 {tags_vdf}    }}
-    {preview_line}
 }}
 """
     vdf_path = os.path.join(HEMTT_OUT, "upload.vdf")
-    with open(vdf_path, "w") as f:
-        f.write(vdf_content)
+    with open(vdf_path, "w") as f: f.write(vdf)
     return vdf_path
 
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Release Tool")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("-p", "--patch", action="store_true", help="Bump patch version")
-    group.add_argument("-m", "--minor", action="store_true", help="Bump minor version")
-    group.add_argument("-M", "--major", action="store_true", help="Bump major version")
-    group.add_argument("-n", "--none", action="store_true", help="Don't bump version")
-    
-    parser.add_argument("-t", "--tag", action="store_true", help="Force git tagging")
-    parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation for tagging (implies --tag)")
-    parser.add_argument("-j", "--threads", type=int, default=multiprocessing.cpu_count(), help="Number of threads for HEMTT (default: all cores)")
-    parser.add_argument("--dry-run", action="store_true", help="Generate VDF and validate but do not upload")
-    
+    parser.add_argument("-p", "--patch", action="store_true")
+    parser.add_argument("-m", "--minor", action="store_true")
+    parser.add_argument("-M", "--major", action="store_true")
+    parser.add_argument("-n", "--none", action="store_true")
+    parser.add_argument("-y", "--yes", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    load_env()
-    if not shutil.which("hemtt"):
-        print("Error: 'hemtt' not found.")
-        sys.exit(1)
-    if not args.dry_run and not shutil.which("steamcmd"):
-        print("Error: 'steamcmd' not found.")
-        sys.exit(1)
+    print_steam_info()
+    
+    cur_v, _ = get_current_version()
+    print(f"Current version: {cur_v}")
+    
+    choice = 'n'
+    if args.patch: choice = 'p'
+    elif args.minor: choice = 'm'
+    elif args.major: choice = 'major'
+    elif args.none: choice = 'n'
+    elif not args.yes: choice = input("Bump version? [p]atch/[m]inor/[M]ajor/[n]one: ").lower()
 
-    current_v_str, _ = get_current_version()
-    print(f"Current version: {current_v_str}")
-    
-    confirm = None
-    if args.patch: confirm = 'p'
-    elif args.minor: confirm = 'm'
-    elif args.major: confirm = 'major'
-    elif args.none: confirm = 'n'
-    
-    if confirm is None:
-        confirm = input("Bump version? [p]atch/[m]inor/[M]ajor/[n]one: ").lower()
-    
-    new_version = current_v_str
-    if confirm in ['p', 'm', 'major']:
+    new_v = cur_v
+    if choice in ['p', 'm', 'major']:
         part = "patch"
-        if confirm == 'm': part = "minor"
-        if confirm == 'major': part = "major"
-        new_version = bump_version(part)
+        if choice == 'm': part = "minor"
+        if choice == 'major': part = "major"
+        new_v = bump_version(part)
         if not args.dry_run:
             subprocess.run(["git", "add", VERSION_FILE], check=True)
-            subprocess.run(["git", "commit", "-S", "-m", f"chore: bump version to {new_version}"], check=True)
-        else:
-            print(f"[DRY-RUN] Would commit version bump to {new_version}")
+            subprocess.run(["git", "commit", "-S", "-m", f"chore: bump version to {new_v}"], check=True)
 
-    # USE THE ROBUST WRAPPER FOR BUILDING
-    print(f"Running Robust Release Build...")
-    subprocess.run(["bash", "build.sh", "release", "-t", str(args.threads)], check=True)
+    print(f"Running Robust Release Build (v{new_v})...")
+    subprocess.run(["bash", "build.sh", "release"], check=True)
 
-    # Locate the newly created ZIP for GitHub
-    possible_zips = glob.glob(os.path.join(PROJECT_ROOT, "releases", "*.zip"))
-    
-    # Also check the central unit hub
-    central_hub = os.path.join(PROJECT_ROOT, "..", "UKSFTA-Tools", "all_releases")
-    if os.path.exists(central_hub):
-        possible_zips += glob.glob(os.path.join(central_hub, "*.zip"))
-
-    if not possible_zips:
-        print("Error: No release zip found in local releases/ or central hub.")
-        sys.exit(1)
-    
-    # Get the absolute newest file by creation time
-    latest_zip = max(possible_zips, key=os.path.getctime)
-    print(f"Using release package: {os.path.basename(latest_zip)}")
-    
     ws_config = get_workshop_config()
     workshop_id = ws_config["id"]
-    if not workshop_id or workshop_id == "0":
-        if not args.dry_run:
-            workshop_id = input("Enter Workshop ID to update: ").strip()
-        else:
-            workshop_id = "123456789 (Simulated)"
-        
-    try:
-        last_tag = subprocess.check_output(["git", "describe", "--tags", "--abbrev=0"]).decode().strip()
-    except:
-        try:
-            last_tag = subprocess.check_output(["git", "rev-list", "--max-parents=0", "HEAD"]).decode().strip()
-        except:
-            last_tag = "HEAD"
-        
-    changelog = generate_changelog(last_tag)
-    
-    # 3. Handle Tool-only projects (Skip Steam Workshop)
-    if not os.path.exists(os.path.join(PROJECT_ROOT, ".hemtt")):
-        print("ℹ️  UKSFTA-Tools: Tool-only project. Skipping Steam Workshop upload.")
-        # Proceed to Git tagging only
-        do_tag = args.tag or args.yes or (input("Tag this release in Git? [y/N]: ").lower() == 'y')
-        if do_tag:
-            print(f"Tagging version {new_version}...")
-            subprocess.run(["git", "tag", "-s", f"v{new_version}", "-m", f"Release v{new_version}\n\n{changelog}"], check=True)
-            subprocess.run(["git", "push", "origin", f"v{new_version}"], check=True)
-            print("SUCCESS: Version tagged and pushed.")
-        return
+    if (not workshop_id or workshop_id == "0") and not args.dry_run:
+        workshop_id = input("Enter Workshop ID to update: ").strip()
 
-    # 4. Standard Mod Upload Logic
-    # Upload from .hemttout/release which contains the normalized raw files
-    vdf_path = create_vdf("107410", workshop_id, STAGING_DIR, changelog)
+    vdf_path = create_vdf("107410", workshop_id, STAGING_DIR, "Release v" + new_v)
     
     if args.dry_run:
-        print("\n" + "="*60)
-        if HAS_RICH:
-            rprint("       [bold cyan]STEAM WORKSHOP MOCK PREVIEW[/bold cyan]")
-        else:
-            print("       STEAM WORKSHOP MOCK PREVIEW")
-        print("="*60)
-        ws_config = get_workshop_config()
-        if HAS_RICH:
-            rprint(f"[bold]Workshop ID:[/bold]  {workshop_id}")
-            rprint(f"[bold]Version:[/bold]      {new_version}")
-            rprint(f"[bold]Tags:[/bold]         {', '.join(ws_config['tags'])}")
-            rprint("\n[bold cyan]--- Description Preview ---[/bold cyan]")
-        else:
-            print(f"Workshop ID:  {workshop_id}")
-            print(f"Version:      {new_version}")
-            print(f"Tags:         {', '.join(ws_config['tags'])}")
-            print("\n--- Description Preview ---")
-            
-        # Mock the description replacement
-        desc = ""
-        if os.path.exists("workshop_description.txt"):
-            with open("workshop_description.txt", "r") as f:
-                desc = f.read()
-        desc = desc.replace("{{INCLUDED_CONTENT}}", generate_content_list())
-        # Strip BBCode for the preview so it's readable in terminal
-        preview_desc = re.sub(r"\[.*?\]", "", desc)
-        print(preview_desc.strip())
-        
-        if HAS_RICH:
-            rprint("\n[bold cyan]--- Changelog ---[/bold cyan]")
-        else:
-            print("\n--- Changelog ---")
-        print(changelog if changelog else "Initial release.")
-        print("="*60)
-
-        print("\n[DRY-RUN] Build complete. Integrity check follows...")
-        # Use our new checker tool
+        print(f"\n[DRY-RUN] VDF generated at: {vdf_path}")
+        print("[DRY-RUN] Upload skipped. Integrity scan follows...")
         subprocess.run([sys.executable, "tools/mod_integrity_checker.py", STAGING_DIR, "--unsigned"])
-        print("\n[DRY-RUN] Upload skipped. Ready for production.")
         return
 
     print("\n--- Steam Workshop Upload ---")
-    username = os.getenv("STEAM_USERNAME")
-    password = os.getenv("STEAM_PASSWORD")
-
-    if not username:
-        username = input("Steam Username: ").strip()
+    username = os.getenv("STEAM_USERNAME") or input("Steam Username: ").strip()
+    cmd = ["steamcmd", "+login", username, "+workshop_build_item", vdf_path, "validate", "+quit"]
     
-    # SteamCMD upload with retries and validation
-    # Use 'validate' to ensure local files are checked before/during upload
-    cmd = ["steamcmd", "+login", username]
-    if password:
-        cmd.append(password)
-    cmd.extend(["+workshop_build_item", vdf_path, "validate", "+quit"])
-    
-    print(f"Launching SteamCMD for user: {username} (with validation)...")
-    
-    max_retries = 3
-    success = False
-    for attempt in range(1, max_retries + 1):
-        try:
-            if attempt > 1:
-                print(f"Retry attempt {attempt}/{max_retries}...")
-            subprocess.run(cmd, check=True)
-            success = True
-            break
-        except subprocess.CalledProcessError as e:
-            print(f"\nAttempt {attempt} failed: {e}")
-            if attempt < max_retries:
-                import time
-                wait_time = attempt * 10
-                print(f"Waiting {wait_time}s before retrying...")
-                time.sleep(wait_time)
-            else:
-                print("All upload attempts failed.")
-                sys.exit(1)
-
-    if success:
-        print("\nSUCCESS: Mod updated on Workshop.")
-        
-        do_tag = args.tag or args.yes
-        if not do_tag:
-            if confirm != 'n':
-                do_tag = True
-            else:
-                do_tag = input("Tag this release in Git? [y/N]: ").lower() == 'y'
-
-        if do_tag:
-            tag_name = f"v{new_version}"
-            branch = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).decode().strip()
-            subprocess.run(["git", "tag", "-a", tag_name, "-m", f"Release {new_version}", "-f"], check=True)
-            subprocess.run(["git", "push", "origin", branch, "--tags", "-f"], check=False)
-
-            if shutil.which("gh"):
-                print(f"Creating GitHub Release for {tag_name}...")
-                gh_cmd = ["gh", "release", "create", tag_name, latest_zip, "--title", f"Release {new_version}", "--notes", changelog, "--latest"]
-                subprocess.run(gh_cmd, check=False)
+    try:
+        subprocess.run(cmd, check=True)
+        print("\n✅ SUCCESS: Mod updated on Workshop.")
+        # Git Tagging
+        tag_name = f"v{new_v}"
+        subprocess.run(["git", "tag", "-s", tag_name, "-m", f"Release {new_v}", "-f"], check=True)
+        subprocess.run(["git", "push", "origin", "main", "--tags", "-f"], check=False)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
