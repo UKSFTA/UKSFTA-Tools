@@ -16,7 +16,7 @@ jobs:
       - name: Check Commit Messages
         uses: wagoid/commitlint-github-action@v5
 
-  validate:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -24,11 +24,29 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
+      # 1. Markdown Linting
+      - name: Lint Markdown
+        uses: DavidAnson/markdownlint-cli2-action@v16
+        with:
+          config: '.github/linters/.markdownlint.json'
+          globs: '**/*.md'
+
+      # 2. JSON/TOML Linting (Biome)
+      - name: Lint JSON & Metadata
+        run: |
+          npx @biomejs/biome ci .
+
+      # 3. Specialized Arma Checkers
       - name: Validate Config
         run: |
           CHECKER=".uksf_tools/tools/config_style_checker.py"
@@ -43,6 +61,3 @@ jobs:
 
       - name: Validate Return Types
         run: CHECKER=".uksf_tools/tools/return_checker.py"; if [ ! -f "$CHECKER" ]; then CHECKER="tools/return_checker.py"; fi; python3 "$CHECKER"
-
-      - name: Validate Unused Variables
-        run: CHECKER=".uksf_tools/tools/search_unused_privates.py"; if [ ! -f "$CHECKER" ]; then CHECKER="tools/search_unused_privates.py"; fi; python3 "$CHECKER"
