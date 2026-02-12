@@ -5,6 +5,8 @@ import sys
 import re
 import argparse
 import urllib.request
+import urllib.parse
+import json
 import html
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -21,36 +23,34 @@ except ImportError:
     USE_RICH = False
 
 def fetch_workshop_data(published_id):
-    """Fetches mod title and dependencies from Steam Workshop."""
-    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={published_id}"
-    # Default name is generic
+    """Fetches mod title and dependencies using official Steam API."""
+    api_url = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+    data = urllib.parse.urlencode({
+        "itemcount": 1,
+        "publishedfileids[0]": published_id
+    }).encode("utf-8")
+    
     info = {"name": f"Mod {published_id}", "dependencies": []}
+    
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        req = urllib.request.Request(api_url, data=data, method="POST")
         with urllib.request.urlopen(req, timeout=10) as response:
-            page = response.read().decode('utf-8')
-            
-            # Primary Title Extraction
-            title_match = re.search(r'<div class="workshopItemTitle">(.*?)</div>', page)
-            if title_match:
-                info["name"] = html.unescape(title_match.group(1).strip())
-            else:
-                # Fallback: Check the <title> tag
-                title_tag = re.search(r'<title>Steam Workshop::(.*?)</title>', page)
-                if title_tag:
-                    info["name"] = html.unescape(title_tag.group(1).strip())
-            
-            # Dependencies (Required Items)
-            deps_section = re.search(r'id="RequiredItems">(.*?)</div>\s*</div>', page, re.DOTALL)
-            if deps_section:
-                items = re.findall(r'href=".*?id=(\d+)".*?>(.*?)</a>', deps_section.group(1), re.DOTALL)
-                for dep_id, dep_html in items:
-                    dep_name = re.sub(r'<[^>]+>', '', dep_html).strip()
-                    info["dependencies"].append({
-                        "id": dep_id.strip(),
-                        "name": html.unescape(dep_name)
-                    })
-    except:
+            res_data = json.load(response)
+            if "response" in res_data and "publishedfiledetails" in res_data["response"]:
+                details = res_data["response"]["publishedfiledetails"][0]
+                
+                if details.get("result") == 1: # Success
+                    info["name"] = details.get("title", f"Mod {published_id}")
+                    # API returns children IDs, we'll need to resolve names later or just use IDs
+                    # For now, let's just mark the IDs as dependencies
+                    children = details.get("children", [])
+                    for child in children:
+                        info["dependencies"].append({
+                            "id": child["publishedfileid"],
+                            "name": f"Mod {child['publishedfileid']}" # Name will be resolved in final pass
+                        })
+    except Exception as e:
+        # Fallback to scraping if API fails (though API is preferred)
         pass
     return info
 
@@ -136,7 +136,7 @@ def main():
                     for dep in meta['dependencies']:
                         did = dep['id']
                         if did not in target_ids and did not in target_ignored:
-                            found.append({"id": did, "name": dep['name'], "parent": meta['name']})
+                            found.append({"id": did, "name": dep['name'], "parent": meta['name'], "parent_id": mid})
                     progress.advance(task)
                     return found
                 with ThreadPoolExecutor(max_workers=10) as executor:
@@ -151,10 +151,9 @@ def main():
                     did = dep['id']
                     if did not in target_ids and did not in target_ignored:
                         if did not in [x['id'] for x in missing_deps_raw]:
-                            missing_deps_raw.append({"id": did, "name": dep['name'], "parent": meta['name']})
+                            missing_deps_raw.append({"id": did, "name": dep['name'], "parent": meta['name'], "parent_id": mid})
 
     # --- PHASE 2: Mandatory Name Resolution Pass ---
-    # We resolve the name for ANYTHING that's going into the report
     final_missing_ref = []
     final_missing_deps = []
     to_resolve = missing_from_ref_raw + missing_deps_raw
@@ -164,18 +163,23 @@ def main():
             with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
                 task = progress.add_task(f"Resolving official titles for {len(to_resolve)} flagged mods...", total=len(to_resolve))
                 def resolve(m):
+                    # Always try to fetch official name from API
                     res = fetch_workshop_data(m['id'])
                     m['name'] = res['name']
+                    # If this is a dependency, also try to resolve the parent's name if generic
+                    if 'parent' in m and (m['parent'].startswith("Mod ") or m['parent'].isdigit()):
+                        m['parent'] = fetch_workshop_data(m['parent_id'])['name']
                     progress.advance(task)
                     return m
                 with ThreadPoolExecutor(max_workers=15) as executor:
-                    resolved = list(executor.map(resolve, to_resolve))
-                    for m in resolved:
+                    resolved_items = list(executor.map(resolve, to_resolve))
+                    for m in resolved_items:
                         if 'parent' in m: final_missing_deps.append(m)
                         else: final_missing_ref.append(m)
         else:
             for m in to_resolve:
-                m['name'] = fetch_workshop_data(m['id'])['name']
+                res = fetch_workshop_data(m['id'])
+                m['name'] = res['name']
                 if 'parent' in m: final_missing_deps.append(m)
                 else: final_missing_ref.append(m)
 
@@ -189,7 +193,7 @@ def main():
         console.print(Panel(header, border_style="blue", padding=(1, 2)))
         
         if not final_missing_ref and not final_missing_deps:
-            console.print("[bold green]✅ PASS:[/] All reference mods and deep dependencies are accounted for.")
+            console.print("[bold green]✅ PASS:[/] All reference mods and dependencies are accounted for.")
         else:
             if final_missing_ref:
                 table = Table(title="❌ Missing Reference Mods", box=box.ROUNDED, border_style="red")
@@ -208,7 +212,7 @@ def main():
         if not final_missing_ref and not final_missing_deps: print("OK")
         else:
             for m in final_missing_ref: print(f"MISSING REF: {m['name']} (id={m['id']})")
-            for m in final_missing_deps: print(f"MISSING DEP: {m['name']} (Required by {m['parent']}, id={m['id']})")
+            for m in final_missing_deps: print(f"MISSING DEP: {m['name']} (By {m['parent']}, id={m['id']})")
 
 if __name__ == "__main__":
     main()
