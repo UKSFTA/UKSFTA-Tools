@@ -103,7 +103,9 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]publish          [/]", "[dim]Upload projects to Steam Workshop[/]")
     prod_table.add_row("[bold cyan]mission-setup    [/]", "[dim]Unit-standardize a mission folder (new or existing)[/]")
     prod_table.add_row("[bold cyan]generate-preset  [/]", "[dim]Create master HTML preset of all unit dependencies[/]")
+    prod_table.add_row("[bold cyan]generate-report  [/]", "[dim]Create a Markdown health report for the entire unit[/]")
     prod_table.add_row("[bold cyan]generate-manifest[/]", "[dim]Create unit-wide manifest of all mods and PBOs[/]")
+    prod_table.add_row("[bold cyan]fix-syntax       [/]", "[dim]Standardize indentation and formatting in all repos[/]")
     prod_table.add_row("[bold cyan]notify           [/]", "[dim]Send a manual development update to Discord[/]")
     prod_table.add_row("[bold cyan]generate-docs    [/]", "[dim]Auto-generate API Manual from SQF headers[/]")
     prod_table.add_row("[bold cyan]convert          [/]", "[dim]Optimize media for Arma (WAV/PNG -> OGG/PAA)[/]")
@@ -262,6 +264,13 @@ def cmd_mission_setup(args):
 def cmd_generate_preset(args):
     auditor = Path(__file__).parent / "preset_generator.py"; subprocess.run([sys.executable, str(auditor)])
 
+def cmd_generate_report(args):
+    auditor = Path(__file__).parent / "report_generator.py"; subprocess.run([sys.executable, str(auditor)])
+
+def cmd_fix_syntax(args):
+    console = Console(force_terminal=True); print_banner(console); fixer = Path(__file__).parent / "syntax_fixer.py"
+    for p in get_projects(): subprocess.run([sys.executable, str(fixer), str(p)])
+
 def cmd_audit_deps(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects(); defined_patches = set(); dependencies = {}
     for p in projects:
@@ -364,7 +373,7 @@ def main():
     parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
     parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
     subparsers = parser.add_subparsers(dest="command")
-    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "generate-docs", "generate-manifest", "generate-preset", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
+    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "fix-syntax", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
         subparsers.add_parser(cmd, help=f"Run {cmd} utility")
     p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path", help="Path to mission folder")
     p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true")
@@ -382,7 +391,7 @@ def main():
         "publish": cmd_publish, "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "apply-updates": cmd_apply_updates, "audit-deps": cmd_audit_deps,
         "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings, "audit-security": cmd_audit_security, "audit-signatures": cmd_audit_signatures,
         "audit-mission": cmd_audit_mission, "mission-setup": cmd_mission_setup, "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest,
-        "generate-preset": cmd_generate_preset, "update": cmd_update, "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info,
+        "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, "fix-syntax": cmd_fix_syntax, "update": cmd_update, "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info,
         "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console)
     }
     if args.command in cmds: cmds[args.command](args)
