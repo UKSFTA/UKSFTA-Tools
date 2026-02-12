@@ -95,6 +95,7 @@ def cmd_help(console):
     intel_table.add_row("[bold cyan]gh-runs         [/]", "[dim]Real-time monitoring of GitHub Actions runners[/]")
     audit_table = Table(title="[Assurance & Quality]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold yellow")
     audit_table.add_row("[bold cyan]audit            [/]", "[dim]Master Audit: Run all health and security checks[/]")
+    audit_table.add_row("[bold cyan]lint             [/]", "[dim]Full Quality Suite (Markdown, JSON, Config, SQF)[/]")
     audit_table.add_row("[bold cyan]test             [/]", "[dim]Run full suite (pytest, hemtt check, sqflint)[/]")
     audit_table.add_row("[bold cyan]audit-performance[/]", "[dim]Scan assets for texture and model optimization issues[/]")
     audit_table.add_row("[bold cyan]audit-signatures [/]", "[dim]Verify PBO signing state and unit key matches[/]")
@@ -159,7 +160,7 @@ def cmd_gh_runs(args):
     projects = get_projects(); workflow_names = set(); all_stats = []
     for p in projects:
         try:
-            res = subprocess.run(["gh", "run", "list", "--limit", "15", "--json", "workflowName"], cwd=p, capture_output=True, text=True)
+            res = subprocess.run(["gh", "run", list, "--limit", "15", "--json", "workflowName"], cwd=p, capture_output=True, text=True)
             if res.returncode == 0:
                 for r in json.loads(res.stdout): workflow_names.add(r['workflowName'])
         except: pass
@@ -278,6 +279,33 @@ def cmd_notify(args):
 def cmd_audit_full(args):
     console = Console(force_terminal=True); print_banner(console); console.print(Panel("[bold yellow]🚀 STARTING GLOBAL UNIT AUDIT[/bold yellow]", border_style="yellow"))
     cmd_audit_updates(args); cmd_audit_deps(args); cmd_audit_assets(args); cmd_audit_strings(args); cmd_audit_security(args); cmd_audit_signatures(args); cmd_audit_keys(args)
+
+def cmd_lint(args):
+    console = Console(force_terminal=True); print_banner(console)
+    console.print(Panel("[bold cyan]🚀 STARTING GLOBAL QUALITY LINT[/bold cyan]", border_style="cyan"))
+    
+    # 1. Markdown Linting
+    console.print("\n[bold]1. Markdown Audit:[/bold]")
+    cmd_md = ["npx", "--yes", "markdownlint-cli2", "**/*.md", "--config", ".github/linters/.markdownlint.json"]
+    if args.fix: cmd_md.append("--fix")
+    subprocess.run(cmd_md)
+
+    # 2. JSON/Metadata (Biome)
+    console.print("\n[bold]2. JSON & Metadata (Biome):[/bold]")
+    cmd_biome = ["npx", "--yes", "@biomejs/biome", "ci", "."]
+    if args.fix: cmd_biome = ["npx", "--yes", "@biomejs/biome", "check", "--write", "."]
+    subprocess.run(cmd_biome)
+
+    # 3. Project Checkers
+    projects = get_projects()
+    for p in projects:
+        console.print(f"\n[bold]3. Project Audit: {p.name}[/bold]")
+        # Config
+        subprocess.run([sys.executable, str(Path(__file__).parent / "config_style_checker.py"), str(p)])
+        # SQF
+        subprocess.run([sys.executable, str(Path(__file__).parent / "sqf_validator.py"), str(p)])
+        # Strings
+        subprocess.run([sys.executable, str(Path(__file__).parent / "stringtable_validator.py"), str(p)])
 
 def cmd_mission_setup(args):
     console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "mission_scaffolder.py"
@@ -432,6 +460,10 @@ def main():
     subparsers = parser.add_subparsers(dest="command")
     for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "audit-keys", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "setup-git-hooks", "check-env", "fix-syntax", "clean-strings", "update", "self-update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
         subparsers.add_parser(cmd, help=f"Run {cmd} utility")
+    
+    p_lint = subparsers.add_parser("lint", help="Full Quality Lint")
+    p_lint.add_argument("--fix", action="store_true", help="Auto-fix formatting errors")
+
     p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path", help="Path to mission folder"); p_ms.add_argument("--framework", action="store_true", help="Inject Mission Framework"); p_ms.epilog = "Example: ./tools/workspace_manager.py mission-setup my_op --framework"
     p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true")
     subparsers.add_parser("pull-mods", help="Alias for sync").add_argument("--offline", action="store_true")
@@ -454,9 +486,10 @@ def main():
         "audit-performance": cmd_audit_performance, "audit-keys": cmd_audit_keys, "audit-mission": cmd_audit_mission, "mission-setup": cmd_mission_setup, 
         "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest, "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, 
         "generate-vscode": cmd_generate_vscode, "generate-changelog": cmd_generate_changelog, "setup-git-hooks": cmd_setup_git_hooks,
-        "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
+        "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "clean-strings": clean_strings, "update": cmd_update, "self-update": cmd_self_update,
         "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "classify-mod": cmd_classify_mod, "modlist-classify": cmd_modlist_classify, "modlist-audit": cmd_modlist_audit,
-        "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console)
+        "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console),
+        "lint": cmd_lint
     }
     if args.command in cmds: cmds[args.command](args)
     else: cmd_help(console)

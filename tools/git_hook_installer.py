@@ -1,57 +1,57 @@
 #!/usr/bin/env python3
 import os
 import sys
+import subprocess
 from pathlib import Path
 
 # UKSFTA Git Hook Installer
-# Installs a pre-commit hook to run syntax fixes and security audits.
+# Installs local guards for quality, security, and standards.
 
-HOOK_CONTENT = """#!/bin/bash
-# UKSFTA Pre-Commit Hook
-echo "🛡️  UKSFTA Quality Guard: Running pre-commit checks..."
+HOOK_CONTENT = """#!/usr/bin/env bash
+# UKSFTA Quality Guard (Pre-Commit)
 
-# 1. Fix Syntax (Automated)
-python3 .uksf_tools/tools/syntax_fixer.py .
+echo "🛡️  UKSFTA Quality Guard: Executing pre-commit audit..."
 
-# 2. Audit Security (Leaks)
-python3 .uksf_tools/tools/security_auditor.py .
-if [ $? -ne 0 ]; then
-    echo "❌ SECURITY LEAK DETECTED. Commit aborted."
+# 1. Run full linting suite
+./tools/workspace_manager.py lint --fix
+LINT_STATUS=$?
+
+if [ $LINT_STATUS -ne 0 ]; then
+    echo "❌ FAIL: Linting errors detected. Please fix the issues above before committing."
     exit 1
 fi
 
-# 3. Audit Strings
-python3 .uksf_tools/tools/string_auditor.py .
-if [ $? -ne 0 ]; then
-    echo "⚠️  Localization errors found. Please review."
+# 2. Run Master Audit (targeted security & health)
+./tools/workspace_manager.py audit-security
+SECURITY_STATUS=$?
+
+if [ $SECURITY_STATUS -ne 0 ]; then
+    echo "❌ FAIL: Security vulnerabilities detected (leaked tokens/keys). Blocking commit."
+    exit 1
 fi
 
-# Re-add fixed files if they were modified by syntax_fixer
-git add .
-
-echo "✅ Quality Guard: All checks passed."
+echo "✅ PASS: Quality Guard approved. Proceeding with commit."
 exit 0
 """
 
-def install_hooks(project_path):
+def install_hook(project_path):
     root = Path(project_path)
-    git_dir = root / ".git"
+    git_hooks_dir = root / ".git" / "hooks"
     
-    if not git_dir.exists():
-        print(f"Error: {project_path} is not a git repository.")
-        return False
+    if not git_hooks_dir.exists():
+        print(f"Skipping {root.name}: Not a git repository.")
+        return
 
-    hooks_dir = git_dir / "hooks"
-    hooks_dir.mkdir(exist_ok=True)
-    
-    pre_commit = hooks_dir / "pre-commit"
-    with open(pre_commit, "w") as f:
+    hook_path = git_hooks_dir / "pre-commit"
+    with open(hook_path, "w") as f:
         f.write(HOOK_CONTENT)
     
-    os.chmod(pre_commit, 0o755)
-    print(f"  ✅ Installed UKSFTA Pre-Commit Hook in: {project_path}")
-    return True
+    os.chmod(hook_path, 0o755)
+    print(f"  ✅ Hook Installed: {root.name}")
+
+def main():
+    target = sys.argv[1] if len(sys.argv) > 1 else "."
+    install_hook(target)
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else "."
-    install_hooks(target)
+    main()
