@@ -147,11 +147,9 @@ def main():
     
     console = Console() if USE_RICH else None
     if USE_RICH:
-        console.print(f"
-🔍 [bold blue]Analyzing Mod Requirements:[/bold blue] {mid}...")
+        console.print(f"\n🔍 [bold blue]Analyzing Mod Requirements:[/bold blue] {mid}...")
     else:
-        print(f"
-Analyzing Mod: {mid}...")
+        print(f"\nAnalyzing Mod: {mid}...")
 
     data = classify_mod(mid)
     if not data:
