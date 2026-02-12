@@ -81,6 +81,7 @@ def cmd_help(console):
     ws_table.add_row("[bold cyan]update   [/]", "[dim]Propagate latest UKSFTA-Tools to all projects[/]")
     ws_table.add_row("[bold cyan]cache    [/]", "[dim]Show disk space usage of build artifacts[/]")
     ws_table.add_row("[bold cyan]clean    [/]", "[dim]Wipe all .hemttout build artifacts[/]")
+    ws_table.add_row("[bold cyan]check-env[/]", "[dim]Verify local development tools and dependencies[/]")
     intel_table = Table(title="[Unit Intelligence]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold magenta")
     intel_table.add_row("[bold cyan]dashboard    [/]", "[dim]Visual overview of all projects, components, and versions[/]")
     intel_table.add_row("[bold cyan]workshop-info[/]", "[dim]Query live versions and timestamps from Steam Workshop[/]")
@@ -105,6 +106,8 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]generate-preset  [/]", "[dim]Create master HTML preset of all unit dependencies[/]")
     prod_table.add_row("[bold cyan]generate-report  [/]", "[dim]Create a Markdown health report for the entire unit[/]")
     prod_table.add_row("[bold cyan]generate-manifest[/]", "[dim]Create unit-wide manifest of all mods and PBOs[/]")
+    prod_table.add_row("[bold cyan]generate-vscode  [/]", "[dim]Setup VS Code Tasks for one-click development[/]")
+    prod_table.add_row("[bold cyan]setup-git-hooks  [/]", "[dim]Install local pre-commit quality/security guards[/]")
     prod_table.add_row("[bold cyan]fix-syntax       [/]", "[dim]Standardize indentation and formatting in all repos[/]")
     prod_table.add_row("[bold cyan]notify           [/]", "[dim]Send a manual development update to Discord[/]")
     prod_table.add_row("[bold cyan]generate-docs    [/]", "[dim]Auto-generate API Manual from SQF headers[/]")
@@ -267,8 +270,19 @@ def cmd_generate_preset(args):
 def cmd_generate_report(args):
     auditor = Path(__file__).parent / "report_generator.py"; subprocess.run([sys.executable, str(auditor)])
 
+def cmd_generate_vscode(args):
+    tool = Path(__file__).parent / "vscode_task_generator.py"
+    for p in get_projects(): subprocess.run([sys.executable, str(tool), str(p)])
+
+def cmd_setup_git_hooks(args):
+    tool = Path(__file__).parent / "git_hook_installer.py"
+    for p in get_projects(): subprocess.run([sys.executable, str(tool), str(p)])
+
+def cmd_check_env(args):
+    tool = Path(__file__).parent / "env_checker.py"; subprocess.run([sys.executable, str(tool)])
+
 def cmd_fix_syntax(args):
-    console = Console(force_terminal=True); print_banner(console); fixer = Path(__file__).parent / "syntax_fixer.py"
+    fixer = Path(__file__).parent / "syntax_fixer.py"
     for p in get_projects(): subprocess.run([sys.executable, str(fixer), str(p)])
 
 def cmd_audit_deps(args):
@@ -304,15 +318,15 @@ def cmd_audit_mission(args):
     console.print(table)
 
 def cmd_audit_assets(args):
-    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "asset_auditor.py"
+    auditor = Path(__file__).parent / "asset_auditor.py"
     for p in get_projects(): subprocess.run([sys.executable, str(auditor), str(p)])
 
 def cmd_audit_strings(args):
-    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "string_auditor.py"
+    auditor = Path(__file__).parent / "string_auditor.py"
     for p in get_projects(): subprocess.run([sys.executable, str(auditor), str(p)])
 
 def cmd_audit_security(args):
-    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "security_auditor.py"
+    auditor = Path(__file__).parent / "security_auditor.py"
     for p in get_projects(): subprocess.run([sys.executable, str(auditor), str(p)])
 
 def cmd_sync(args):
@@ -352,28 +366,25 @@ def cmd_update(args):
     for p in get_projects(): subprocess.run([sys.executable, str(setup.resolve())], cwd=p)
 
 def cmd_generate_docs(args):
-    console = Console(force_terminal=True); print_banner(console); gen = Path(__file__).parent / "doc_generator.py"
+    gen = Path(__file__).parent / "doc_generator.py"
     p = Path(__file__).parent.parent.parent / "UKSFTA-Scripts"
     if p.exists(): subprocess.run([sys.executable, str(gen), str(p)])
 
 def cmd_generate_manifest(args):
-    console = Console(force_terminal=True); print_banner(console); from manifest_generator import generate_total_manifest
-    output_path = generate_total_manifest(Path(__file__).parent.parent)
-    console.print(f"\n[bold green]Success![/bold green] Total manifest saved to: [cyan]{output_path}[/cyan]")
+    from manifest_generator import generate_total_manifest; generate_total_manifest(Path(__file__).parent.parent)
 
 def cmd_workshop_tags(args):
-    console = Console(force_terminal=True); print_banner(console); tags = Path(__file__).parent / "workshop_tags.txt"
-    if tags.exists(): console.print(Panel(tags.read_text(), title="Valid Workshop Tags", border_style="blue"))
+    tags = Path(__file__).parent / "workshop_tags.txt"
+    if tags.exists(): print(tags.read_text())
 
 def cmd_workshop_info(args):
-    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "workshop_inspector.py"
-    subprocess.run([sys.executable, str(auditor)])
+    auditor = Path(__file__).parent / "workshop_inspector.py"; subprocess.run([sys.executable, str(auditor)])
 
 def main():
     parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
     parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
     subparsers = parser.add_subparsers(dest="command")
-    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "fix-syntax", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
+    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "setup-git-hooks", "check-env", "fix-syntax", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
         subparsers.add_parser(cmd, help=f"Run {cmd} utility")
     p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path", help="Path to mission folder")
     p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true")
@@ -391,7 +402,8 @@ def main():
         "publish": cmd_publish, "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "apply-updates": cmd_apply_updates, "audit-deps": cmd_audit_deps,
         "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings, "audit-security": cmd_audit_security, "audit-signatures": cmd_audit_signatures,
         "audit-mission": cmd_audit_mission, "mission-setup": cmd_mission_setup, "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest,
-        "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, "fix-syntax": cmd_fix_syntax, "update": cmd_update, "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info,
+        "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, "generate-vscode": cmd_generate_vscode, "setup-git-hooks": cmd_setup_git_hooks,
+        "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "update": cmd_update, "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info,
         "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console)
     }
     if args.command in cmds: cmds[args.command](args)
