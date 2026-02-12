@@ -436,7 +436,7 @@ def main():
     p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true")
     subparsers.add_parser("pull-mods", help="Alias for sync").add_argument("--offline", action="store_true")
     p_pub = subparsers.add_parser("publish", help="Upload to Steam"); p_pub.add_argument("--dry-run", action="store_true")
-p_pub.add_argument("--offline", action="store_true", help="Generate local metadata only")
+    p_pub.add_argument("--offline", action="store_true", help="Generate local metadata only")
     p_conv = subparsers.add_parser("convert", help="Convert media"); p_conv.add_argument("files", nargs="+")
     p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO"); p_miss.add_argument("pbo")
     p_size = subparsers.add_parser("modlist-size", help="Calculate size"); p_size.add_argument("file", nargs="?", default="mod_sources.txt")
