@@ -92,6 +92,7 @@ def cmd_help(console):
     audit_table = Table(title="[Assurance & Quality]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold yellow")
     audit_table.add_row("[bold cyan]audit            [/]", "[dim]Master Audit: Run all health and security checks[/]")
     audit_table.add_row("[bold cyan]test             [/]", "[dim]Run full suite (pytest, hemtt check, sqflint)[/]")
+    audit_table.add_row("[bold cyan]audit-performance[/]", "[dim]Scan assets for texture and model optimization issues[/]")
     audit_table.add_row("[bold cyan]audit-signatures [/]", "[dim]Verify PBO signing state and unit key matches[/]")
     audit_table.add_row("[bold cyan]audit-deps       [/]", "[dim]Scan requiredAddons for missing dependencies[/]")
     audit_table.add_row("[bold cyan]audit-assets     [/]", "[dim]Detect orphaned/unused binary files (PAA, P3D)[/]")
@@ -262,7 +263,10 @@ def cmd_audit_full(args):
     cmd_audit_updates(args); cmd_audit_deps(args); cmd_audit_assets(args); cmd_audit_strings(args); cmd_audit_security(args); cmd_audit_signatures(args)
 
 def cmd_mission_setup(args):
-    auditor = Path(__file__).parent / "mission_scaffolder.py"; subprocess.run([sys.executable, str(auditor), args.path])
+    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "mission_scaffolder.py"
+    cmd = [sys.executable, str(auditor), args.path]
+    if args.framework: cmd.append("--framework")
+    subprocess.run(cmd)
 
 def cmd_generate_preset(args):
     auditor = Path(__file__).parent / "preset_generator.py"; subprocess.run([sys.executable, str(auditor)])
@@ -284,6 +288,10 @@ def cmd_check_env(args):
 def cmd_fix_syntax(args):
     fixer = Path(__file__).parent / "syntax_fixer.py"
     for p in get_projects(): subprocess.run([sys.executable, str(fixer), str(p)])
+
+def cmd_audit_performance(args):
+    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "performance_auditor.py"
+    for p in get_projects(): subprocess.run([sys.executable, str(auditor), str(p)])
 
 def cmd_audit_deps(args):
     console = Console(force_terminal=True); print_banner(console); projects = get_projects(); defined_patches = set(); dependencies = {}
@@ -367,8 +375,7 @@ def cmd_update(args):
 
 def cmd_generate_docs(args):
     gen = Path(__file__).parent / "doc_generator.py"
-    p = Path(__file__).parent.parent.parent / "UKSFTA-Scripts"
-    if p.exists(): subprocess.run([sys.executable, str(gen), str(p)])
+    for p in get_projects(): subprocess.run([sys.executable, str(gen), str(p)])
 
 def cmd_generate_manifest(args):
     from manifest_generator import generate_total_manifest; generate_total_manifest(Path(__file__).parent.parent)
@@ -384,9 +391,9 @@ def main():
     parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
     parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
     subparsers = parser.add_subparsers(dest="command")
-    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "setup-git-hooks", "check-env", "fix-syntax", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
+    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "setup-git-hooks", "check-env", "fix-syntax", "update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
         subparsers.add_parser(cmd, help=f"Run {cmd} utility")
-    p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path", help="Path to mission folder")
+    p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path", help="Path to mission folder"); p_ms.add_argument("--framework", action="store_true", help="Inject Mission Framework"); p_ms.epilog = "Example: ./tools/workspace_manager.py mission-setup my_op --framework"
     p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true")
     subparsers.add_parser("pull-mods", help="Alias for sync").add_argument("--offline", action="store_true")
     p_pub = subparsers.add_parser("publish", help="Upload to Steam"); p_pub.add_argument("--dry-run", action="store_true")
@@ -400,7 +407,7 @@ def main():
         "test": lambda a: subprocess.run(["pytest"]), "clean": lambda a: [subprocess.run(["rm", "-rf", ".hemttout"], cwd=p) for p in get_projects()],
         "cache": lambda a: [subprocess.run(["du", "-sh", ".hemttout"], cwd=p) for p in get_projects() if (p/".hemttout").exists()],
         "publish": cmd_publish, "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "apply-updates": cmd_apply_updates, "audit-deps": cmd_audit_deps,
-        "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings, "audit-security": cmd_audit_security, "audit-signatures": cmd_audit_signatures,
+        "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings, "audit-security": cmd_audit_security, "audit-signatures": cmd_audit_signatures, "audit-performance": cmd_audit_performance,
         "audit-mission": cmd_audit_mission, "mission-setup": cmd_mission_setup, "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest,
         "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, "generate-vscode": cmd_generate_vscode, "setup-git-hooks": cmd_setup_git_hooks,
         "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "update": cmd_update, "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info,

@@ -5,6 +5,7 @@ on:
     branches: [ main ]
     paths:
       - 'docs/**'
+      - 'addons/**'
       - 'README.md'
 
 jobs:
@@ -13,14 +14,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Generate Living API Manual
+        run: |
+          GEN=".uksf_tools/tools/doc_generator.py"
+          if [ ! -f "$GEN" ]; then GEN="tools/doc_generator.py"; fi
+          python3 "$GEN" .
 
       - name: Sync to Wiki
         run: |
           mkdir -p wiki_sync
           git clone "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki_sync
           cp README.md wiki_sync/Home.md
-          # Copy all docs to the root of the wiki (GitHub Wiki is flat)
+          
+          # Copy all static docs
           find docs/ -name "*.md" -exec cp {} wiki_sync/ \;
+          
           cd wiki_sync
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -28,6 +44,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to sync"
           else
-            git commit -m "docs: sync from main repository [skip ci]"
+            git commit -m "docs: automated living manual sync [skip ci]"
             git push origin master || git push origin main
           fi
