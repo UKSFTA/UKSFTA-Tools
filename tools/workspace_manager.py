@@ -403,7 +403,9 @@ def cmd_publish(args):
                 wm = re.search(r'workshop_id = "(.*)"', f.read())
                 if wm and wm.group(1).isdigit(): publishable.append((p, wm.group(1)))
     for p, ws_id in publishable:
-        cmd = [sys.executable, "tools/release.py", "-n", "-y"]; if args.offline: cmd.append("--offline"); cmd.append("--dry-run") if args.dry_run else None
+        cmd = [sys.executable, "tools/release.py", "-n", "-y"]
+        if args.offline: cmd.append("--offline")
+        if args.dry_run: cmd.append("--dry-run")
         subprocess.run(cmd, cwd=p)
 
 def cmd_update(args):
