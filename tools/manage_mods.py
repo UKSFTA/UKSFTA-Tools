@@ -140,6 +140,13 @@ def resolve_dependencies(initial_mods, ignored_ids=None):
     if ignored_ids:
         print(f"Ignoring: {', '.join(ignored_ids)}")
         
+    # Load existing lock data to preserve information during offline/errors
+    lock_data = {}
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, "r") as f: lock_data = json.load(f).get("mods", {})
+        except: pass
+
     resolved_info = {}
     to_check = list(initial_mods.keys())
     processed = set(ignored_ids)
@@ -154,10 +161,17 @@ def resolve_dependencies(initial_mods, ignored_ids=None):
             continue
 
         meta = get_workshop_metadata(mid)
+        
+        # OFFLINE/ERROR RECOVERY: If meta is default/empty but we have lock data, use it
+        if meta["updated"] == "0" and mid in lock_data:
+            print(f"  ℹ️  Using cached metadata for {lock_data[mid].get('name', mid)}")
+            meta["name"] = lock_data[mid].get("name", meta["name"])
+            meta["updated"] = lock_data[mid].get("updated", "0")
+            meta["dependencies"] = lock_data[mid].get("dependencies", [])
+
         if mid in initial_mods and initial_mods[mid]:
             meta["name"] = initial_mods[mid]
             
-        # Only print Checking if it wasn't already announced as a dependency
         if mid not in found_as_dep:
             print(f"Checking {meta['name']} ({mid})...")
             
