@@ -101,17 +101,19 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     
     included, ignored, all_ack = get_mod_categories()
     
-    # Discovery: Check what else is being bundled
-    print(f"🔍 Analyzing dependencies for {len(included)} direct mods...")
+    # Discovery: Check for transitive dependencies
+    print(f"🔍 Analyzing dependencies for {len(included)} bundled mods...")
     inc_ids = [m['id'] for m in included]
     resolved = resolve_transitive_dependencies(inc_ids, all_ack)
     
-    # Any transitive dependency that is NOT ignored is INCLUDED in the repack
+    # Categorize Transitive Mods: 
+    # They go under 'Requirements' in text, but are HIDDEN from VDF because they are repacked.
+    transitive_requirements = []
     for mid, meta in resolved.items():
         if mid not in inc_ids and mid not in ignored:
-            included.append({"id": mid, "name": f"{meta['name']} (Transitive)"})
+            transitive_requirements.append({"id": mid, "name": f"{meta['name']} (Included)"})
 
-    # 1. Included Content (Repacked mods)
+    # 1. Included Content (Directly listed mods from mod_sources.txt)
     content_list = ""
     if included:
         for mod in included:
@@ -124,14 +126,18 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
             for p in sorted(pbos): content_list += f" • {os.path.basename(p)}\n"
     desc = desc.replace("{{INCLUDED_CONTENT}}", content_list)
     
-    # 2. Required Dependencies
-    # Per instructions: Ignored mods hidden, bundled dependencies hidden from VDF.
-    # We only show a note if there are truly external requirements.
-    # In our repack model, this is usually empty.
-    dep_text = "None. (All core requirements handled by unit launcher)"
+    # 2. Requirements (Transitive dependencies bundled in the repack)
+    if transitive_requirements:
+        dep_text = "[b]Repacked Dependencies:[/b]\n"
+        dep_text += "[i]The following items are already included in this modpack and do not require separate subscription:[/i]\n"
+        for mod in sorted(transitive_requirements, key=lambda x: x['name']):
+            dep_text += f" • {mod['name']} (Workshop ID: {mod['id']})\n"
+    else:
+        dep_text = "None. (All core requirements handled by unit launcher)"
+    
     desc = desc.replace("{{MOD_DEPENDENCIES}}", dep_text)
     
-    # Build VDF
+    # Build VDF (Zero external dependencies to prevent subscription prompts)
     config = {"id": "0", "tags": ["Mod", "Addon"]}
     if os.path.exists(PROJECT_TOML):
         with open(PROJECT_TOML, "r") as f:
