@@ -200,13 +200,13 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
 
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Release Tool")
-    parser.add_argument("-p", "--patch", action="store_true")
-    parser.add_argument("-m", "--minor", action="store_true")
-    parser.add_argument("-M", "--major", action="store_true")
-    parser.add_argument("-n", "--none", action="store_true")
-    parser.add_argument("-y", "--yes", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--offline", action="store_true")
+    parser.add_argument("-p", "--patch", action="store_true", help="Bump patch version (0.0.x)")
+    parser.add_argument("-m", "--minor", action="store_true", help="Bump minor version (0.x.0)")
+    parser.add_argument("-M", "--major", action="store_true", help="Bump major version (x.0.0)")
+    parser.add_argument("-n", "--none", action="store_true", help="Do not bump version")
+    parser.add_argument("-y", "--yes", action="store_true", help="Bypass confirmation prompts (defaults to --none if no bump specified)")
+    parser.add_argument("--dry-run", action="store_true", help="Generate artifacts and run integrity check, but skip Steam upload and Git tagging")
+    parser.add_argument("--offline", action="store_true", help="Generate description and VDF locally but skip all network actions")
     args = parser.parse_args()
 
     v_str, _ = get_current_version()
