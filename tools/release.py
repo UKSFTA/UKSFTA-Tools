@@ -119,7 +119,8 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     # 1. Included Content (PLAIN TEXT to avoid heuristics)
     content_list = ""
     if included:
-        for mod in included: content_list += f" • {mod['name']} (ID: {mod['id']})\n"
+        for mod in included:
+            content_list += f" • {mod['name']} (Workshop ID: {mod['id']})\n"
     else:
         pbos = glob.glob(os.path.join(STAGING_DIR, "addons", "*.pbo"))
         if not pbos: content_list = "No components found."

@@ -30,6 +30,7 @@ def get_bulk_metadata(published_ids):
                             "name": d.get("title", f"Mod {mid}"),
                             "updated": str(d.get("time_updated", "0")),
                             "size": int(d.get("file_size", 0)),
+                            "creator_id": d.get("creator"),
                             "dependencies": []
                         }
         except: pass
