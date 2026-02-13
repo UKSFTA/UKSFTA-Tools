@@ -121,6 +121,7 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]generate-docs    [/]", "[dim]Auto-generate API Manual from SQF headers[/]")
     prod_table.add_row("[bold cyan]convert          [/]", "[dim]Optimize media for Arma (WAV/PNG -> OGG/PAA)[/]")
     prod_table.add_row("[bold cyan]workshop-tags    [/]", "[dim]List all valid Arma 3 Steam Workshop tags[/]")
+    prod_table.add_row("[bold cyan]remote           [/]", "[dim]Manage distributed VPS nodes and remote DevOps[/]")
     console.print(ws_table); console.print(intel_table); console.print(audit_table); console.print(prod_table)
     console.print("\n[bold]Tip:[/bold] Run [cyan]./tools/workspace_manager.py <command> --help[/cyan] for detailed options and examples.\n")
 
@@ -472,6 +473,7 @@ def main():
     p_conv = subparsers.add_parser("convert", help="Convert media"); p_conv.add_argument("files", nargs="+")
     p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO"); p_miss.add_argument("pbo")
     p_size = subparsers.add_parser("modlist-size", help="Calculate size"); p_size.add_argument("file", nargs="?", default="mod_sources.txt")
+    p_remote = subparsers.add_parser("remote", help="Distributed infrastructure management"); p_remote.add_argument("cmd", nargs=argparse.REMAINDER)
     p_notify = subparsers.add_parser("notify", help="Discord update"); p_notify.add_argument("message"); p_notify.add_argument("--type", choices=["update", "release", "alert"], default="update"); p_notify.add_argument("--title")
     p_class = subparsers.add_parser("classify-mod", help="Classify mod side requirement"); p_class.add_argument("id", help="Steam Workshop ID or URL")
     p_list_class = subparsers.add_parser("modlist-classify", help="Classify entire modlist requirements"); p_list_class.add_argument("file", nargs="?", default="mod_sources.txt", help="Path to modlist file")
@@ -489,7 +491,8 @@ def main():
         "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
         "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "classify-mod": cmd_classify_mod, "modlist-classify": cmd_modlist_classify, "modlist-audit": cmd_modlist_audit,
         "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console),
-        "lint": cmd_lint
+        "lint": cmd_lint,
+        "remote": lambda a: subprocess.run([sys.executable, "tools/remote_manager.py"] + a.cmd)
     }
     if args.command in cmds: cmds[args.command](args)
     else: cmd_help(console)

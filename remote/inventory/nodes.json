@@ -1,0 +1,10 @@
+{
+    "production_nodes": {
+        "hosts": {
+            "example_vps": {
+                "ansible_host": "0.0.0.0",
+                "ansible_user": "root"
+            }
+        }
+    }
+}

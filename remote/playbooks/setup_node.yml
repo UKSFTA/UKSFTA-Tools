@@ -1,0 +1,45 @@
+---
+- name: Initialize UKSFTA Remote Node
+  hosts: all
+  become: yes
+  vars:
+    devops_user: "uksfta-admin"
+    pub_key_path: "../keys/uksfta_vps.pub"
+
+  tasks:
+    - name: Create dedicated DevOps user
+      user:
+        name: "{{ devops_user }}"
+        shell: /bin/bash
+        groups: sudo
+        append: yes
+        state: present
+
+    - name: Ensure .ssh directory exists
+      file:
+        path: "/home/{{ devops_user }}/.ssh"
+        state: directory
+        owner: "{{ devops_user }}"
+        group: "{{ devops_user }}"
+        mode: '0700'
+
+    - name: Deploy managed SSH public key
+      copy:
+        src: "{{ pub_key_path }}"
+        dest: "/home/{{ devops_user }}/.ssh/authorized_keys"
+        owner: "{{ devops_user }}"
+        group: "{{ devops_user }}"
+        mode: '0600'
+
+    - name: Allow sudo without password for DevOps user
+      lineinfile:
+        path: /etc/sudoers.d/uksfta-admin
+        line: "{{ devops_user }} ALL=(ALL) NOPASSWD:ALL"
+        create: yes
+        mode: '0440'
+        validate: 'visudo -cf %s'
+
+    - name: Install Production dependencies
+      apt:
+        name: [git, zip, unzip, curl, python3-pip, lib32gcc-s1]
+        update_cache: yes
