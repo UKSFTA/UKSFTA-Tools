@@ -119,7 +119,8 @@ def generate_content_list(included_mods):
         for p in sorted(pbos): list_str += f" • {os.path.basename(p)}\n"
         return list_str
     list_str = ""
-    for mod in included_mods: list_str += f" • {mod['name']}\n"
+    for mod in included_mods:
+        list_str += f" • [url=https://steamcommunity.com/sharedfiles/filedetails/?id={mod['id']}]{mod['name']}[/url]\n"
     return list_str
 
 def get_workshop_config():
