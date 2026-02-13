@@ -5,10 +5,16 @@ This collection provides the essential geographical assets and terrains required
 
 [h2]🗺 Included Content[/h2]
 [list]
-No addons found.
+ • [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3256534418]Trencher[/url]
+
 [/list]
 
 [h2]🛠 Requirements[/h2]
+
+[b]Required Mod Dependencies:[/b]
+ • [url=https://steamcommunity.com/sharedfiles/filedetails/?id=2914901109]Chameleon Trenches (Transitive Dependency)[/url]
+ • [url=https://steamcommunity.com/sharedfiles/filedetails/?id=2966168738]Terrain Lib (Transitive Dependency)[/url]
+
 This pack is intended for use by [b]UKSFTA members[/b] and mission makers. 
 Please ensure all necessary dependencies are loaded.
 
