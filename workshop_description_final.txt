@@ -15,11 +15,11 @@ This collection provides the essential geographical assets and terrains required
  • [url=https://steamcommunity.com/sharedfiles/filedetails/?id=2914901109]Chameleon Trenches (Transitive Dependency)[/url]
  • [url=https://steamcommunity.com/sharedfiles/filedetails/?id=2966168738]Terrain Lib (Transitive Dependency)[/url]
 
-This pack is intended for use by [b]UKSFTA members[/b] and mission makers. 
+This pack is intended for use by [b]UKSFTA members[/b] and mission makers.
 Please ensure all necessary dependencies are loaded.
 
 [h2]📡 About UKSFTA[/h2]
-UKSF Task Force Alpha is a tactical realism unit focused on high-quality Arma 3 simulation. 
+UKSF Task Force Alpha is a tactical realism unit focused on high-quality Arma 3 simulation.
 
 
 [hr]

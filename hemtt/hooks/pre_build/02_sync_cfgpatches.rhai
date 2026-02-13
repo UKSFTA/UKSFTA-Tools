@@ -8,16 +8,16 @@ fn extract_top_level_classes(content, section) {
     let section_key = "class " + section;
     let start_idx = content.index_of(section_key);
     if start_idx < 0 { return classes; }
-    
+
     let next_cfg = content.index_of("class Cfg", start_idx + section_key.len());
     let end_idx = if next_cfg > 0 { next_cfg } else { content.len() };
-    
+
     let block = content.sub_string(start_idx, end_idx - start_idx);
     let lines = block.split("\n");
-    
+
     // Internal Arma classes that should NEVER be synced to units[]
     let internal_classes = [
-        "HitPoints", "HitEngine", "HitFuel", "Turrets", "AnimationSources", 
+        "HitPoints", "HitEngine", "HitFuel", "Turrets", "AnimationSources",
         "UserActions", "EventHandlers", "CargoTurret", "MainTurret", "NewTurret",
         "ViewPilot", "ViewOptics", "Reflectors", "Exhausts", "Damage", "SimpleObject",
         "AcreRacks", "complexGearbox", "Wheels"
@@ -29,28 +29,28 @@ fn extract_top_level_classes(content, section) {
             let c_idx = line.index_of("class");
             let colon_idx = line.index_of(":");
             let open_idx = line.index_of("{");
-            
+
             let name_end = if colon_idx > c_idx && colon_idx < open_idx { colon_idx } else { open_idx };
-            
+
             if name_end > c_idx {
                 let name = line.sub_string(c_idx + 5, name_end - c_idx - 5);
-                
+
                 // Manual trim
                 let clean_name = "";
                 let name_parts = name.split(" ");
                 for p in name_parts { if p.len() > 0 { clean_name = p; } }
-                
+
                 if clean_name.len() > 0 && !clean_name.contains("Cfg") {
                     let is_internal = false;
                     for internal in internal_classes {
                         if clean_name == internal { is_internal = true; }
                     }
-                    
+
                     if !is_internal {
                         // SCOPED CHECK: find the end of THIS class block
                         let has_display_name = false;
                         let look_ahead = 0;
-                        
+
                         // We search for displayName until we hit the class closure };
                         for j in i..lines.len() {
                             let l = lines[j];
@@ -83,17 +83,17 @@ if (addons_dir.exists()) {
         if (item.is_dir()) {
             let name = item.file_name();
             let config_path = HEMTT_RFS.join("addons").join(name).join("config.cpp");
-            
+
             if (config_path.exists()) {
                 let content = config_path.open_file().read();
-                
+
                 if (content.contains("CfgPatches")) {
                     let units = extract_top_level_classes(content, "CfgVehicles");
                     let weapons = extract_top_level_classes(content, "CfgWeapons");
 
                     if (units.len() > 0 || weapons.len() > 0) {
                         print("  - " + name + ": Syncing " + units.len() + " units and " + weapons.len() + " weapons");
-                        
+
                         let units_str = "units[] = {";
                         let first_u = true;
                         for u in units {
@@ -125,7 +125,7 @@ if (addons_dir.exists()) {
                             let old_w = content.sub_string(w_idx, end_w - w_idx + 2);
                             content.replace(old_w, weapons_str);
                         }
-                        
+
                         config_path.create_file().write(content);
                         print("    [!] Metadata synchronized.");
                     }

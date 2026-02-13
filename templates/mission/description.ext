@@ -23,7 +23,7 @@ enableDebugConsole = 1;       // Admin only debug console
 
 // --- COMMUNICATION ---
 // 0: Global, 1: Side, 2: Command, 3: Group, 4: Vehicle, 5: Direct, 6: System
-disableChannels[] = {0, 2, 4, 6}; 
+disableChannels[] = {0, 2, 4, 6};
 
 // --- RESPAWN & MEDICAL ---
 respawn = 3;                  // BASE respawn
