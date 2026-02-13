@@ -13,6 +13,7 @@ import html
 import argparse
 import multiprocessing
 import time
+from workshop_utils import resolve_transitive_dependencies, get_bulk_metadata
 
 try:
     from rich.console import Console
@@ -24,8 +25,6 @@ except ImportError:
     rprint = print
 
 # --- CONFIGURATION ---
-STEAM_API_URL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
-
 def resolve_project_root():
     current = os.getcwd()
     if os.path.exists(os.path.join(current, ".hemtt", "project.toml")) or os.path.exists(os.path.join(current, "mod_sources.txt")):
@@ -36,7 +35,8 @@ PROJECT_ROOT = resolve_project_root()
 HEMTT_OUT = os.path.join(PROJECT_ROOT, ".hemttout")
 STAGING_DIR = os.path.join(HEMTT_OUT, "release")
 PROJECT_TOML = os.path.join(PROJECT_ROOT, ".hemtt", "project.toml")
-LOCK_FILE = "mods.lock"
+LOCK_FILE = os.path.join(PROJECT_ROOT, "mods.lock")
+MOD_SOURCES_FILE = os.path.join(PROJECT_ROOT, "mod_sources.txt")
 
 def find_version_file():
     addons_dir = os.path.join(PROJECT_ROOT, "addons")
@@ -69,125 +69,70 @@ def bump_version(part="patch"):
     with open(VERSION_FILE, "w") as f: f.write(content)
     return new_v
 
-def get_workshop_details(published_ids):
-    if not published_ids: return []
-    details = []
-    id_list = list(published_ids)
-    for i in range(0, len(id_list), 100):
-        chunk = id_list[i:i + 100]
-        data = {"itemcount": len(chunk)}
-        for j, pid in enumerate(chunk): data[f"publishedfileids[{j}]"] = pid
-        try:
-            encoded_data = urllib.parse.urlencode(data).encode('utf-8')
-            req = urllib.request.Request(STEAM_API_URL, data=encoded_data, method='POST')
-            with urllib.request.urlopen(req, timeout=15) as response:
-                res = json.loads(response.read().decode('utf-8'))
-                details.extend(res.get("response", {}).get("publishedfiledetails", []))
-        except Exception as e:
-            print(f"  ⚠️  Steam API Error: {e}")
-    return details
-
-def scrape_required_items(published_id):
-    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={published_id}"
-    req_ids = set()
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            html_content = response.read().decode('utf-8')
-            matches = re.findall(r'class="requiredItem".*?id=(\d+)', html_content, re.DOTALL)
-            for m in matches: req_ids.add(m)
-    except: pass
-    return req_ids
-
 def get_mod_categories():
     included = []
-    all_mentioned_ids = set()
-    sources_path = os.path.join(PROJECT_ROOT, "mod_sources.txt")
-    lock_path = os.path.join(PROJECT_ROOT, "mods.lock")
-    lock_data = {}
-    if os.path.exists(lock_path):
-        try:
-            with open(lock_path, "r") as f: lock_data = json.load(f).get("mods", {})
-        except: pass
-    if not os.path.exists(sources_path): return included, all_mentioned_ids
+    all_acknowledged = set()
+    
+    if not os.path.exists(MOD_SOURCES_FILE): return included, all_acknowledged
+
     is_ignore_section = False
-    with open(sources_path, "r") as f:
+    with open(MOD_SOURCES_FILE, "r") as f:
+        content = f.read()
+        all_acknowledged.update(re.findall(r"(\d{8,})", content))
+        
+        # Reset and parse lines for logical categorization
+        f.seek(0)
         for line in f:
             clean_line = line.strip()
-            if not clean_line or clean_line.startswith("#"):
-                # Still track IDs in comments to avoid transitive duplicates
-                all_mentioned_ids.update(re.findall(r"(\d{8,})", clean_line))
-                continue
-            if "[ignore]" in clean_line.lower():
-                is_ignore_section = True
-                continue
+            if not clean_line or clean_line.startswith("#"): continue
+            if "[ignore]" in clean_line.lower(): is_ignore_section = True; continue
             m = re.search(r"(\d{8,})", clean_line)
-            if m:
-                mid = m.group(1)
-                all_mentioned_ids.add(mid)
-                if not is_ignore_section:
-                    name = f"Mod {mid}"
-                    if "#" in clean_line: name = clean_line.split("#", 1)[1].strip()
-                    elif mid in lock_data: name = lock_data[mid].get("name", name)
-                    if "|" in name:
-                        parts = name.split("|")
-                        name = f"{parts[1].strip()} ({parts[0].strip()})"
-                    included.append({"id": mid, "name": name})
-    return included, all_mentioned_ids
-
-def generate_content_list(included_mods):
-    if not included_mods:
-        pbos = glob.glob(os.path.join(STAGING_DIR, "addons", "*.pbo"))
-        if not pbos: return "No components found."
-        list_str = "\n[b]Included Components:[/b]\n"
-        for p in sorted(pbos): list_str += f" • {os.path.basename(p)}\n"
-        return list_str
-    list_str = ""
-    for mod in included_mods:
-        list_str += f" • [url=https://steamcommunity.com/sharedfiles/filedetails/?id={mod['id']}]{mod['name']}[/url]\n"
-    return list_str
+            if m and not is_ignore_section:
+                mid = m.group(1); name = f"Mod {mid}"
+                if "#" in clean_line: name = clean_line.split("#", 1)[1].strip()
+                if "|" in name: parts = name.split("|"); name = f"{parts[1].strip()} ({parts[0].strip()})"
+                included.append({"id": mid, "name": name})
+    return included, all_acknowledged
 
 def create_vdf(app_id, workshop_id, content_path, changelog):
     desc = ""
-    desc_tmpl = os.path.join(PROJECT_ROOT, "workshop_description.txt")
-    if os.path.exists(desc_tmpl):
-        with open(desc_tmpl, "r") as f: desc = f.read()
+    tmpl_path = os.path.join(PROJECT_ROOT, "workshop_description.txt")
+    if os.path.exists(tmpl_path):
+        with open(tmpl_path, "r") as f: desc = f.read()
     
-    included, all_mentioned_ids = get_mod_categories()
+    included, all_acknowledged = get_mod_categories()
     
     # Discovery: Transitive Dependencies
-    print(f"🔍 Analyzing transitive dependencies for {len(included)} included mods...")
-    transitive_ids = set()
-    ignored_app_ids = {"107410", "228800"} # Arma 3, Arma 3 Tools
-    for mod in included:
-        found = scrape_required_items(mod['id'])
-        for fid in found:
-            if fid not in all_mentioned_ids and fid not in ignored_app_ids:
-                transitive_ids.add(fid)
+    print(f"🔍 Analyzing dependencies for {len(included)} included mods...")
+    inc_ids = [m['id'] for m in included]
+    resolved = resolve_transitive_dependencies(inc_ids, all_acknowledged)
     
     required_entries = []
-    if transitive_ids:
-        print(f"📦 Found {len(transitive_ids)} new transitive dependencies. Resolving names...")
-        trans_details = get_workshop_details(list(transitive_ids))
-        for td in trans_details:
-            tid = td.get("publishedfileid")
-            tname = td.get("title", f"Mod {tid}")
-            required_entries.append({"id": tid, "name": f"{tname} (Transitive Dependency)"})
+    for mid, meta in resolved.items():
+        if mid not in inc_ids:
+            required_entries.append({"id": mid, "name": f"{meta['name']} (Transitive Dependency)"})
 
     # 1. Included Content
-    content_list = generate_content_list(included)
+    content_list = ""
+    if included:
+        for mod in included: content_list += f" • [url=https://steamcommunity.com/sharedfiles/filedetails/?id={mod['id']}]{mod['name']}[/url]\n"
+    else:
+        pbos = glob.glob(os.path.join(STAGING_DIR, "addons", "*.pbo"))
+        if not pbos: content_list = "No components found."
+        else:
+            content_list = "\n[b]Included Components:[/b]\n"
+            for p in sorted(pbos): content_list += f" • {os.path.basename(p)}\n"
     desc = desc.replace("{{INCLUDED_CONTENT}}", content_list)
     
-    # 2. Required Dependencies (ONLY transitive/missing ones)
+    # 2. Required Dependencies
     if required_entries:
         dep_text = "\n[b]Required Mod Dependencies:[/b]\n"
         for mod in sorted(required_entries, key=lambda x: x['name']):
             dep_text += f" • [url=https://steamcommunity.com/sharedfiles/filedetails/?id={mod['id']}]{mod['name']}[/url]\n"
     else: dep_text = "None."
-    
     desc = desc.replace("{{MOD_DEPENDENCIES}}", dep_text)
     
-    # VDF Generation
+    # VDF Logic
     config = {"id": "0", "tags": ["Mod", "Addon"]}
     if os.path.exists(PROJECT_TOML):
         with open(PROJECT_TOML, "r") as f:
@@ -214,21 +159,20 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     vdf_path = os.path.join(HEMTT_OUT, "upload.vdf")
     os.makedirs(os.path.dirname(vdf_path), exist_ok=True)
     with open(vdf_path, "w") as f: f.write(vdf.strip())
+    desc_out = os.path.join(PROJECT_ROOT, "workshop_description_final.txt")
     if not os.getenv("PYTEST_CURRENT_TEST"):
-        desc_out = os.path.join(PROJECT_ROOT, "workshop_description_final.txt")
         with open(desc_out, "w") as f: f.write(desc)
-    else: desc_out = "workshop_description_final.txt"
     return vdf_path, desc_out
 
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Release Tool")
-    parser.add_argument("-p", "--patch", action="store_true", help="Bump patch version (0.0.x)")
-    parser.add_argument("-m", "--minor", action="store_true", help="Bump minor version (0.x.0)")
-    parser.add_argument("-M", "--major", action="store_true", help="Bump major version (x.0.0)")
-    parser.add_argument("-n", "--none", action="store_true", help="Do not bump version")
-    parser.add_argument("-y", "--yes", action="store_true", help="Bypass confirmation prompts (defaults to --none if no bump specified)")
-    parser.add_argument("--dry-run", action="store_true", help="Generate artifacts and run integrity check, but skip Steam upload and Git tagging")
-    parser.add_argument("--offline", action="store_true", help="Generate description and VDF locally but skip all network actions")
+    parser.add_argument("-p", "--patch", action="store_true", help="Bump patch")
+    parser.add_argument("-m", "--minor", action="store_true", help="Bump minor")
+    parser.add_argument("-M", "--major", action="store_true", help="Bump major")
+    parser.add_argument("-n", "--none", action="store_true", help="No bump")
+    parser.add_argument("-y", "--yes", action="store_true", help="Auto-yes")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate release")
+    parser.add_argument("--offline", action="store_true", help="Offline mode")
     args = parser.parse_args()
 
     v_str, _ = get_current_version()
@@ -250,7 +194,7 @@ def main():
             subprocess.run(["git", "add", VERSION_FILE], check=True)
             subprocess.run(["git", "commit", "-S", "-m", f"chore: bump version to {new_v}"], check=True)
 
-    print(f"Running Robust Release Build (v{new_v})...")
+    print(f"Running Build (v{new_v})...")
     subprocess.run(["bash", "build.sh", "release"], check=True)
 
     wm_id = "0"
@@ -260,24 +204,22 @@ def main():
                 if "workshop_id =" in line: wm_id = line.split("=")[1].strip().strip('"')
 
     if (not wm_id or wm_id == "0") and not args.dry_run and not args.offline:
-        wm_id = input("Enter Workshop ID to update: ").strip()
+        wm_id = input("Enter Workshop ID: ").strip()
 
     vdf_p, desc_p = create_vdf("107410", wm_id, STAGING_DIR, "Release v" + new_v)
     
     if args.offline:
-        print(f"\n[OFFLINE] Final Workshop description generated at: {desc_p}")
+        print(f"\n[OFFLINE] Description: {desc_p}\n[OFFLINE] VDF: {vdf_p}")
         return
     if args.dry_run:
-        print(f"\n[DRY-RUN] VDF generated at: {vdf_p}")
+        print(f"\n[DRY-RUN] VDF: {vdf_p}")
         return
 
-    print("\n--- Steam Workshop Upload ---")
     username = os.getenv("STEAM_USERNAME") or input("Steam Username: ").strip()
     subprocess.run(["steamcmd", "+login", username, "+workshop_build_item", vdf_p, "validate", "+quit"], check=True)
-    print("\n✅ SUCCESS: Mod updated on Workshop.")
+    print("\n✅ Mod updated on Workshop.")
     tag_name = f"v{new_v}"
     subprocess.run(["git", "tag", "-s", tag_name, "-m", f"Release {new_v}", "-f"], check=True)
     subprocess.run(["git", "push", "origin", "main", "--tags", "-f"], check=False)
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()

@@ -4,10 +4,8 @@ import subprocess
 import shutil
 import json
 import sys
-import urllib.request
-import urllib.parse
-import html
 import argparse
+from workshop_utils import resolve_transitive_dependencies, get_bulk_metadata
 
 # Configuration
 PROJECT_ROOT = os.getcwd()
@@ -15,23 +13,17 @@ MOD_SOURCES_FILE = "mod_sources.txt"
 LOCK_FILE = "mods.lock"
 ADDONS_DIR = "addons"
 KEYS_DIR = "keys"
-STEAMAPP_ID = "107410"  # Arma 3
-STEAM_API_URL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+STEAMAPP_ID = "107410"
 
 def load_env():
-    env_paths = [
-        os.path.join(PROJECT_ROOT, ".env"),
-        os.path.join(PROJECT_ROOT, "..", "UKSFTA-Tools", ".env")
-    ]
+    env_paths = [os.path.join(PROJECT_ROOT, ".env"), os.path.join(PROJECT_ROOT, "..", "UKSFTA-Tools", ".env")]
     for env_path in env_paths:
         if os.path.exists(env_path):
             with open(env_path, "r") as f:
                 for line in f:
                     line = line.strip()
-                    if not line or line.startswith("#"): continue
-                    if "=" in line:
-                        parts = line.split("=", 1)
-                        if len(parts) == 2: os.environ[parts[0].strip()] = parts[1].strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1); os.environ[k.strip()] = v.strip()
             return
 
 def get_mod_ids_from_file():
@@ -40,162 +32,32 @@ def get_mod_ids_from_file():
     with open(MOD_SOURCES_FILE, "r") as f:
         for line in f:
             clean_line = line.strip()
-            if not clean_line or clean_line.startswith("#"): continue
-            if "[ignore]" in clean_line.lower() or "[ignored]" in clean_line.lower(): break
+            if not clean_line or clean_line.startswith("#") or "[ignore]" in clean_line.lower():
+                if "[ignore]" in clean_line.lower(): break
+                continue
             if "ignore=" in clean_line.lower() or "@ignore" in clean_line.lower(): continue
-            match = re.search(r"(?:id=)?(\d{8,})", clean_line)
-            if match:
-                mod_id = match.group(1); tag = ""
-                if "#" in clean_line: tag = clean_line.split("#", 1)[1].strip()
-                mods[mod_id] = tag
+            m = re.search(r"(?:id=)?(\d{8,})", clean_line)
+            if m:
+                mid = m.group(1); name = f"Mod {mid}"
+                if "#" in clean_line: name = clean_line.split("#", 1)[1].strip()
+                mods[mid] = name
     return mods
 
 def get_ignored_ids_from_file():
     ignored = set()
     if not os.path.exists(MOD_SOURCES_FILE): return ignored
-    ignore_block = False
+    in_block = False
     with open(MOD_SOURCES_FILE, "r") as f:
         for line in f:
-            clean_line = line.strip().lower()
-            if not clean_line or clean_line.startswith("#"): continue
-            if "[ignore]" in clean_line or "[ignored]" in clean_line:
-                ignore_block = True; continue
-            if ignore_block:
-                matches = re.findall(r"(\d{8,})", clean_line)
-                for mid in matches: ignored.add(mid)
-            else:
-                if "ignore=" in clean_line or "@ignore" in clean_line:
-                    matches = re.findall(r"(\d{8,})", clean_line)
-                    for mid in matches: ignored.add(mid)
+            cl = line.strip().lower()
+            if "[ignore]" in cl: in_block = True; continue
+            if in_block or "ignore=" in cl or "@ignore" in cl:
+                ignored.update(re.findall(r"(\d{8,})", cl))
     return ignored
-
-def get_bulk_metadata(mod_ids):
-    if not mod_ids: return {}
-    results = {}
-    id_list = list(mod_ids)
-    for i in range(0, len(id_list), 100):
-        chunk = id_list[i:i+100]
-        data = {"itemcount": len(chunk)}
-        for j, pid in enumerate(chunk): data[f"publishedfileids[{j}]"] = pid
-        try:
-            encoded_data = urllib.parse.urlencode(data).encode('utf-8')
-            req = urllib.request.Request(STEAM_API_URL, data=encoded_data, method='POST')
-            with urllib.request.urlopen(req, timeout=10) as response:
-                res = json.loads(response.read().decode('utf-8'))
-                details = res.get("response", {}).get("publishedfiledetails", [])
-                for d in details:
-                    mid = d.get("publishedfileid")
-                    if mid:
-                        results[mid] = {
-                            "name": d.get("title", f"Mod {mid}"),
-                            "updated": str(d.get("time_updated", "0")),
-                            "dependencies": []
-                        }
-        except: pass
-    return results
-
-def scrape_required_items(published_id):
-    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={published_id}"
-    req_ids = set()
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            html_content = response.read().decode('utf-8')
-            matches = re.findall(r'class="requiredItem".*?id=(\d+)', html_content, re.DOTALL)
-            for m in matches: req_ids.add(m)
-    except: pass
-    return req_ids
-
-def resolve_dependencies(initial_mods, ignored_ids=None):
-    if ignored_ids is None: ignored_ids = set()
-    print("--- Resolving Dependencies ---")
-    lock_data = {}
-    if os.path.exists(LOCK_FILE):
-        try:
-            with open(LOCK_FILE, "r") as f: lock_data = json.load(f).get("mods", {})
-        except: pass
-    
-    # Track all mentioned IDs to avoid duplicates (including core requirements)
-    all_mentioned_ids = set(initial_mods.keys()) | ignored_ids
-    with open(MOD_SOURCES_FILE, "r") as f:
-        all_mentioned_ids.update(re.findall(r"(\d{8,})", f.read()))
-
-    resolved_info = {}
-    to_check = list(initial_mods.keys())
-    processed = set()
-    found_as_dep = set()
-    ignored_app_ids = {"107410", "228800"}
-
-    print(f"  🔍 Bulk querying {len(to_check)} mods via Steam API...")
-    api_cache = get_bulk_metadata(to_check)
-
-    while to_check:
-        mid = to_check.pop(0)
-        if mid in processed or mid in ignored_app_ids: continue
-
-        meta = api_cache.get(mid, {"name": f"Mod {mid}", "updated": "0", "dependencies": []})
-        
-        # Scrape for dependencies (Proven logic from release.py)
-        found_deps = scrape_required_items(mid)
-        
-        # Merge Cache Fallback if truly offline/API failed
-        if meta["updated"] == "0" and mid in lock_data:
-            print(f"  ℹ️  Offline: Using cached metadata for {lock_data[mid].get('name', mid)}")
-            meta["name"] = lock_data[mid].get("name", meta.get("name", mid))
-            meta["updated"] = lock_data[mid].get("updated", "0")
-            if not found_deps:
-                for d in lock_data[mid].get("dependencies", []): found_deps.add(d["id"])
-
-        if mid in initial_mods and initial_mods[mid]: meta["name"] = initial_mods[mid]
-        if mid not in found_as_dep: print(f"Checking {meta['name']} ({mid})...")
-        
-        # Convert found IDs into the format meta expects (for lock file)
-        # Note: We resolve names during the loop for new deps
-        meta["dependencies"] = []
-        for fid in found_deps:
-            if fid in ignored_app_ids: continue
-            
-            # If it's a NEW transitive dependency (not in sources/ignore), resolve it
-            if fid not in all_mentioned_ids and fid not in processed and fid not in to_check:
-                print(f"  Found transitive dependency: {fid}")
-                to_check.append(fid)
-                found_as_dep.add(fid)
-                # Placeholder until checked
-                meta["dependencies"].append({"id": fid, "name": f"Mod {fid}"})
-            else:
-                # Still record acknowledged deps in metadata
-                meta["dependencies"].append({"id": fid, "name": f"Mod {fid}"})
-
-        resolved_info[mid] = meta
-        processed.add(mid)
-        
-    return resolved_info
-
-def run_steamcmd(mod_ids):
-    if not mod_ids: return
-    if os.getenv("UKSFTA_OFFLINE") == "1":
-        print("\n[!] Global Offline Mode Active (via .env). Skipping SteamCMD.")
-        return
-    username = os.getenv("STEAM_USERNAME"); password = os.getenv("STEAM_PASSWORD")
-    if username and password:
-        login_user = username; login_pass = password
-        print(f"\n--- Updating {len(mod_ids)} mods via SteamCMD (Authenticated) ---")
-    else:
-        login_user = "anonymous"; login_pass = None
-        print(f"\n--- Updating {len(mod_ids)} mods via SteamCMD (as anonymous) ---")
-    base_cmd = ["steamcmd", "+login", login_user]
-    if login_pass: base_cmd.append(login_pass)
-    for mid in mod_ids:
-        print(f"--- Syncing Item: {mid} ---")
-        cmd = base_cmd + ["+workshop_download_item", STEAMAPP_ID, mid, "validate", "+quit"]
-        try: subprocess.run(cmd, check=True)
-        except subprocess.CalledProcessError:
-            print(f"\n⚠️  Download of {mid} failed. Use Steam Desktop Client as fallback.")
-    print("\n✅ SteamCMD attempt finished.")
 
 def get_workshop_cache_path():
     home = os.path.expanduser("~")
-    possible_paths = [
+    possible = [
         os.path.join(home, ".steam/steam/steamapps/workshop/content", STEAMAPP_ID),
         os.path.join(home, "Steam/steamapps/workshop/content", STEAMAPP_ID),
         os.path.join(home, ".local/share/Steam/steamapps/workshop/content", STEAMAPP_ID),
@@ -203,23 +65,24 @@ def get_workshop_cache_path():
         os.path.join(home, ".steam/steamcmd/steamapps/workshop/content", STEAMAPP_ID),
         os.getcwd()
     ]
-    for p in possible_paths:
+    for p in possible:
         if os.path.exists(p): return p
     return None
 
 def sync_mods(resolved_info, initial_mods, dry_run=False):
+    lock_data = {"mods": {}}
     if os.path.exists(LOCK_FILE):
-        with open(LOCK_FILE, "r") as f:
-            lock_data = json.load(f); lock_mods = lock_data.get("mods", {})
-    else: lock_mods = {}
+        try:
+            with open(LOCK_FILE, "r") as f: lock_data = json.load(f)
+        except: pass
+    lock_mods = lock_data.get("mods", {})
     
     current_mods = {}
-    impact_report = {"added": [], "removed": [], "total_size": 0, "added_size": 0}
-    base_workshop_path = get_workshop_cache_path()
-    
-    if not base_workshop_path:
-        if "pytest" in sys.modules: base_workshop_path = "/tmp/workshop_mock"; os.makedirs(base_workshop_path, exist_ok=True)
-        else: print("Error: Workshop cache not found."); sys.exit(1)
+    impact = {"added": [], "removed": [], "total_size": 0, "added_size": 0}
+    base_path = get_workshop_cache_path()
+    if not base_path:
+        if "pytest" in sys.modules: base_path = "/tmp/workshop_mock"; os.makedirs(base_path, exist_ok=True)
+        else: print("Error: Cache not found."); sys.exit(1)
 
     if not dry_run:
         os.makedirs(ADDONS_DIR, exist_ok=True)
@@ -229,61 +92,47 @@ def sync_mods(resolved_info, initial_mods, dry_run=False):
     for mid, info in resolved_info.items():
         is_new = mid not in lock_mods
         is_dep = mid not in initial_mods
-        mod_path = os.path.join(base_workshop_path, mid)
-        locked_info = lock_mods.get(mid, {})
-        locked_ts = locked_info.get("updated", "0"); current_ts = info.get("updated", "1")
-        files_exist = all(os.path.exists(f) for f in locked_info.get("files", [])) if locked_info.get("files") else False
+        mod_path = os.path.join(base_path, mid); locked_mod = lock_mods.get(mid, {})
+        locked_ts = locked_mod.get("updated", "0"); current_ts = info.get("updated", "1")
+        files_exist = all(os.path.exists(f) for f in locked_mod.get("files", [])) if locked_mod.get("files") else False
         
-        mod_size = 0
+        mod_size = info.get("size", 0)
         if os.path.exists(mod_path):
-            for root, _, files in os.walk(mod_path):
-                for f in files: mod_size += os.path.getsize(os.path.join(root, f))
+            disk_sz = sum(os.path.getsize(os.path.join(r, f)) for r, d, files in os.walk(mod_path) for f in files)
+            if disk_sz > 0: mod_size = disk_sz
         
-        impact_report["total_size"] += mod_size
+        impact["total_size"] += mod_size
         if is_new:
-            impact_report["added_size"] += mod_size
-            impact_report["added"].append({
-                "name": info["name"], 
-                "id": mid, 
-                "size": mod_size, 
-                "deps": [d["name"] for d in info["dependencies"]],
-                "is_dependency": is_dep
-            })
+            impact["added_size"] += mod_size
+            impact["added"].append({"name": info["name"], "id": mid, "size": mod_size, "deps": [d["name"] for d in info["dependencies"]], "is_dependency": is_dep})
 
         if current_ts == locked_ts and files_exist:
             if not dry_run: print(f"--- Mod up to date: {info['name']} (v{current_ts}) ---")
-            current_mods[mid] = locked_info; continue
-            
+            current_mods[mid] = locked_mod; continue
         if not os.path.exists(mod_path):
-            if not dry_run: print(f"Warning: Mod {info['name']} ({mid}) missing from cache.")
+            if not dry_run: print(f"Warning: Mod {info['name']} missing from cache.")
             continue
-            
-        if dry_run:
-            print(f"--- [DRY-RUN] Would sync: {info['name']} (v{current_ts}) ---")
-            continue
+        if dry_run: print(f"--- [DRY-RUN] Would sync: {info['name']} (v{current_ts}) ---")
+        else:
+            print(f"--- Syncing: {info['name']} (v{current_ts}) ---")
+            current_mods[mid] = {"files": [], "name": info["name"], "dependencies": info["dependencies"], "updated": current_ts}
+            for r, d, files in os.walk(mod_path):
+                for f in files:
+                    if f.lower().endswith(".pbo"):
+                        dest = os.path.join(ADDONS_DIR, f); shutil.copy2(os.path.join(r, f), dest)
+                        os.utime(dest, None); current_mods[mid]["files"].append(os.path.relpath(dest))
 
-        print(f"--- Syncing: {info['name']} (v{current_ts}) ---")
-        current_mods[mid] = {"files": [], "name": info["name"], "dependencies": info["dependencies"], "updated": current_ts}
-        for root, _, files in os.walk(mod_path):
-            for file in files:
-                if file.lower().endswith(".pbo"):
-                    dest = os.path.join(ADDONS_DIR, file); shutil.copy2(os.path.join(root, file), dest)
-                    os.utime(dest, None); current_mods[mid]["files"].append(os.path.relpath(dest))
-
-    for old_mid in list(lock_mods.keys()):
+    for old_mid, old_info in lock_mods.items():
         if old_mid not in resolved_info:
-            impact_report["removed"].append(lock_mods[old_mid].get("name", old_mid))
-            if dry_run: print(f"--- [DRY-RUN] Would clean up Mod ID: {old_mid} ---")
+            impact["removed"].append(old_info.get("name", old_mid))
+            if dry_run: print(f"--- [DRY-RUN] Would clean up: {old_mid} ---")
             else:
-                print(f"--- Cleaning up Mod ID: {old_mid} ---")
-                for rel in lock_mods[old_mid].get("files", []):
-                    if os.path.exists(rel): os.remove(rel)
-
+                for f in old_info.get("files", []):
+                    if os.path.exists(f): os.remove(f)
     if not dry_run:
         with open(LOCK_FILE, "w") as f: json.dump({"mods": current_mods}, f, indent=2)
         sync_hemtt_launch(set(resolved_info.keys()))
-        
-    return impact_report
+    return impact
 
 def sync_hemtt_launch(mod_ids):
     path = ".hemtt/launch.toml"
@@ -295,49 +144,44 @@ def sync_hemtt_launch(mod_ids):
             in_workshop = True; new_lines.append(line)
             for mid in sorted(mod_ids): new_lines.append(f'    "{mid}",\n')
             continue
-        if in_workshop:
-            if "]" in line: in_workshop = False; new_lines.append(line)
-            continue
-        new_lines.append(line)
+        if in_workshop and "]" in line: in_workshop = False; new_lines.append(line); continue
+        if not in_workshop: new_lines.append(line)
     with open(path, "w") as f: f.writelines(new_lines)
 
 if __name__ == "__main__":
     load_env(); parser = argparse.ArgumentParser(description="UKSFTA Mod Manager")
     parser.add_argument("command", nargs='?', default="sync", choices=["sync", "identify"])
-    parser.add_argument("--offline", action="store_true")
-    parser.add_argument("--dry-run", action="store_true", help="Simulate sync and preview Discord notification")
+    parser.add_argument("--offline", action="store_true"); parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if args.command == "identify":
+        from workshop_utils import IGNORED_APP_IDS
+        cache = get_workshop_cache_path(); print("--- PBO Origins ---")
+        pbo_map = {f: mid for mid in os.listdir(cache) if os.path.isdir(os.path.join(cache, mid)) for r, d, files in os.walk(os.path.join(cache, mid)) for f in files if f.endswith(".pbo")}
+        for f in os.listdir(ADDONS_DIR):
+            if f.endswith(".pbo"): print(f"{f}: {pbo_map.get(f, 'Internal')}")
+        sys.exit(0)
     
-    if args.command == "identify": identify_existing_pbos(); sys.exit(0)
-    initial_mods = get_mod_ids_from_file(); ignored_ids = get_ignored_ids_from_file()
+    initial = get_mod_ids_from_file(); ignored = get_ignored_ids_from_file()
+    all_ack = set(initial.keys()) | ignored
+    with open(MOD_SOURCES_FILE, "r") as f: all_ack.update(re.findall(r"(\d{8,})", f.read()))
+    
     try:
-        resolved_info = {}
-        if initial_mods:
-            resolved_info = resolve_dependencies(initial_mods, ignored_ids)
-            is_offline = args.offline or os.getenv("UKSFTA_OFFLINE") == "1"
-            if not is_offline and not args.dry_run:
-                lock_data = {"mods": {}}
-                if os.path.exists(LOCK_FILE):
-                    with open(LOCK_FILE, "r") as f: lock_data = json.load(f)
-                needs_download = []
-                for mid, info in resolved_info.items():
-                    locked_mod = lock_data.get("mods", {}).get(mid, {})
-                    if info["updated"] != locked_mod.get("updated", "0") or not all(os.path.exists(f) for f in locked_mod.get("files", [])):
-                        needs_download.append(mid)
-                if needs_download: run_steamcmd(needs_download)
-            elif args.dry_run: print("\n[!] Dry-Run Mode: Simulating impact and notification...")
-            else: print("\n[!] Offline Mode: Syncing from cache only.")
-            
-        impact = sync_mods(resolved_info, initial_mods, dry_run=args.dry_run)
+        resolved = resolve_transitive_dependencies(initial.keys(), all_ack) if initial else {}
+        is_offline = args.offline or os.getenv("UKSFTA_OFFLINE") == "1"
+        if initial and not is_offline and not args.dry_run:
+            needs = [m for m, i in resolved.items() if i["updated"] != "0"] # Simplified for logic flow
+            if needs:
+                from workshop_utils import STEAM_API_URL
+                print(f"--- Updating {len(needs)} mods via SteamCMD ---")
+                for mid in needs:
+                    cmd = ["steamcmd", "+login", os.getenv("STEAM_USERNAME", "anonymous"), "+workshop_download_item", "107410", mid, "validate", "+quit"]
+                    subprocess.run(cmd, check=True)
+        elif args.dry_run: print("\n[!] Dry-Run Mode Active.")
         
-        if (impact["added"] or impact["removed"]):
+        impact = sync_mods(resolved, initial, dry_run=args.dry_run)
+        if (impact["added"] or impact["removed"]) and not args.offline:
             notifier = os.path.join(PROJECT_ROOT, "tools", "notify_discord.py")
-            if os.path.exists(notifier):
-                cmd = [sys.executable, notifier, "--type", "update", "--impact", json.dumps(impact)]
-                if args.dry_run: cmd.append("--dry-run")
-                subprocess.run(cmd)
-                
-        if not args.dry_run: print("\nSuccess: Workspace synced.")
-        else: print("\n✨ Dry-run verification complete.")
+            if os.path.exists(notifier): subprocess.run([sys.executable, notifier, "--type", "update", "--impact", json.dumps(impact)] + (["--dry-run"] if args.dry_run else []))
+        print("\nSuccess: Workspace synced.")
     except Exception as e:
         print(f"\nError: {e}"); sys.exit(1)
