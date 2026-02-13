@@ -72,15 +72,10 @@ def bump_version(part="patch"):
 def get_mod_categories():
     included = []
     all_acknowledged = set()
-    
     if not os.path.exists(MOD_SOURCES_FILE): return included, all_acknowledged
-
     is_ignore_section = False
     with open(MOD_SOURCES_FILE, "r") as f:
-        content = f.read()
-        all_acknowledged.update(re.findall(r"(\d{8,})", content))
-        
-        # Reset and parse lines for logical categorization
+        content = f.read(); all_acknowledged.update(re.findall(r"(\d{8,})", content))
         f.seek(0)
         for line in f:
             clean_line = line.strip()
@@ -102,20 +97,29 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     
     included, all_acknowledged = get_mod_categories()
     
-    # Discovery: Transitive Dependencies
-    print(f"🔍 Analyzing dependencies for {len(included)} included mods...")
+    # Discovery: Native Workshop Dependencies
+    print(f"🔍 Analyzing dependencies for {len(included)} mods...")
     inc_ids = [m['id'] for m in included]
     resolved = resolve_transitive_dependencies(inc_ids, all_acknowledged)
     
-    required_entries = []
-    for mid, meta in resolved.items():
-        if mid not in inc_ids:
-            required_entries.append({"id": mid, "name": f"{meta['name']} (Transitive Dependency)"})
+    # Required IDs for VDF (Native Steam Feature)
+    # We include EVERYTHING from mod_sources.txt [ignore] + Transitive
+    # This triggers the Steam popup without needing URLs in the description
+    all_required_ids = set()
+    with open(MOD_SOURCES_FILE, "r") as f:
+        content = f.read()
+        ignore_match = re.search(r"\[ignore\](.*)", content, re.DOTALL | re.IGNORECASE)
+        if ignore_match:
+            all_required_ids.update(re.findall(r"(\d{8,})", ignore_match.group(1)))
+    
+    # Add transitive resolved IDs
+    for mid in resolved:
+        if mid not in inc_ids: all_required_ids.add(mid)
 
-    # 1. Included Content
+    # 1. Included Content (PLAIN TEXT to avoid heuristics)
     content_list = ""
     if included:
-        for mod in included: content_list += f" • [url=https://steamcommunity.com/sharedfiles/filedetails/?id={mod['id']}]{mod['name']}[/url]\n"
+        for mod in included: content_list += f" • {mod['name']} (ID: {mod['id']})\n"
     else:
         pbos = glob.glob(os.path.join(STAGING_DIR, "addons", "*.pbo"))
         if not pbos: content_list = "No components found."
@@ -124,15 +128,11 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
             for p in sorted(pbos): content_list += f" • {os.path.basename(p)}\n"
     desc = desc.replace("{{INCLUDED_CONTENT}}", content_list)
     
-    # 2. Required Dependencies
-    if required_entries:
-        dep_text = "\n[b]Required Mod Dependencies:[/b]\n"
-        for mod in sorted(required_entries, key=lambda x: x['name']):
-            dep_text += f" • [url=https://steamcommunity.com/sharedfiles/filedetails/?id={mod['id']}]{mod['name']}[/url]\n"
-    else: dep_text = "None."
+    # 2. Required Dependencies (Instructional text only)
+    dep_text = "This mod utilizes Steam's [b]Required Items[/b] feature. Please see the list on the right or the subscription popup for dependencies."
     desc = desc.replace("{{MOD_DEPENDENCIES}}", dep_text)
     
-    # VDF Logic
+    # Build VDF Tags and Dependencies
     config = {"id": "0", "tags": ["Mod", "Addon"]}
     if os.path.exists(PROJECT_TOML):
         with open(PROJECT_TOML, "r") as f:
@@ -143,6 +143,15 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
                     if m: config["tags"] = [t.strip().strip('"').strip("'") for t in m.group(1).split(",")]
     
     tags_vdf = "".join([f'        "{i}" "{t}"\n' for i, t in enumerate(config["tags"])])
+    
+    # Native Dependencies Block for VDF
+    deps_vdf = ""
+    if all_required_ids:
+        deps_vdf = '    "dependencies"\n    {\n'
+        for i, rid in enumerate(sorted(list(all_required_ids))):
+            deps_vdf += f'        "{i}" "{rid}"\n'
+        deps_vdf += '    }\n'
+
     vdf = f"""
 "workshopitem"
 {{
@@ -154,7 +163,7 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     "tags"
     {{
 {tags_vdf}    }}
-}}
+{deps_vdf}}}
 """
     vdf_path = os.path.join(HEMTT_OUT, "upload.vdf")
     os.makedirs(os.path.dirname(vdf_path), exist_ok=True)
