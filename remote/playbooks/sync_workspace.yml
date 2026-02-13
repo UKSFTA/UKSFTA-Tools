@@ -1,0 +1,23 @@
+---
+- name: Sync Workspace to Remote Node
+  hosts: all
+  tasks:
+    - name: Ensure workspace directory exists
+      file:
+        path: "/opt/uksfta/workspace"
+        state: directory
+        mode: '0755'
+
+    - name: Synchronize project files
+      ansible.posix.synchronize:
+        src: "../../"
+        dest: "/opt/uksfta/workspace"
+        recursive: yes
+        delete: yes
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=.hemttout"
+          - "--exclude=.pytest_cache"
+          - "--exclude=__pycache__"
+          - "--exclude=all_releases"
+          - "--exclude=releases"

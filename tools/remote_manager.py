@@ -22,6 +22,7 @@ INVENTORY_PATH = REMOTE_ROOT / "inventory" / "nodes.json"
 KEYS_DIR = REMOTE_ROOT / "keys"
 SSH_KEY_NAME = "uksfta_vps"
 DEVOPS_USER = "uksfta-admin"
+REMOTE_WORKSPACE = "/opt/uksfta/workspace"
 
 def ensure_dirs():
     KEYS_DIR.mkdir(exist_ok=True, parents=True)
@@ -71,7 +72,7 @@ def cmd_list(args):
         table.add_column("Status", justify="center")
         
         for name, data in hosts.items():
-            if name == "example_vps": continue # Skip placeholder
+            if name == "example_vps": continue
             active = "✅ OK" if is_node_provisioned(data['ansible_host']) else "❌ OFFLINE"
             table.add_row(name, data['ansible_host'], data['ansible_user'], active)
         console.print(table)
@@ -94,102 +95,99 @@ def cmd_test(args):
         status = "✅ CONNECTED" if res else "❌ FAILED"
         print(f" • {name:<15} ({host}): {status}")
 
-def cmd_provision(args):
+def run_ansible(playbook_name, node=None, extra_vars=None):
     hosts = get_inventory()
-    if not hosts:
-        print("❌ Inventory is empty.")
-        return
+    if not hosts: return False
     
-    target = args.node if args.node else "all"
-    if args.node and args.node not in hosts:
-        print(f"❌ Error: Node '{args.node}' not found.")
-        return
-
-    print(f"🚀 Provisioning software stack on: {target}")
-    playbook = REMOTE_ROOT / "playbooks" / "provision.yml"
-    
-    # Generate robust temporary inventory
+    playbook = REMOTE_ROOT / "playbooks" / playbook_name
     ini_path = Path("/tmp/uksfta_temp_inventory.ini")
-    valid_count = 0
+    
     with open(ini_path, "w") as f:
         f.write("[production_nodes]\n")
         for name, data in hosts.items():
-            # Skip placeholder or incomplete entries
-            if name == "example_vps" or "ansible_ssh_private_key_file" not in data:
-                continue
-            
-            line = f"{name} ansible_host={data['ansible_host']} ansible_user={data['ansible_user']} "
-            line += f"ansible_ssh_private_key_file={data['ansible_ssh_private_key_file']}\n"
-            f.write(line)
-            valid_count += 1
+            if name == "example_vps" or "ansible_ssh_private_key_file" not in data: continue
+            f.write(f"{name} ansible_host={data['ansible_host']} ansible_user={data['ansible_user']} ansible_ssh_private_key_file={data['ansible_ssh_private_key_file']}\n")
 
-    if valid_count == 0:
-        print("❌ No valid nodes found for provisioning. Run 'remote setup' first.")
-        if ini_path.exists(): os.remove(ini_path)
-        return
-
-    # Run from PROJECT_ROOT to keep relative key paths valid
     env = os.environ.copy()
     env["ANSIBLE_CONFIG"] = str(REMOTE_ROOT / "ansible.cfg")
     
     ansible_cmd = ["ansible-playbook", "-i", str(ini_path), str(playbook)]
-    if args.node:
-        ansible_cmd.extend(["--limit", args.node])
+    if node: ansible_cmd.extend(["--limit", node])
+    if extra_vars:
+        ev_str = " ".join([f"{k}={v}" for k, v in extra_vars.items()])
+        ansible_cmd.extend(["--extra-vars", ev_str])
     
     try:
-        subprocess.run(ansible_cmd, cwd=str(REMOTE_ROOT.parent), env=env)
+        res = subprocess.run(ansible_cmd, cwd=str(REMOTE_ROOT.parent), env=env)
+        return res.returncode == 0
     finally:
         if ini_path.exists(): os.remove(ini_path)
+
+def cmd_provision(args):
+    print(f"🚀 Provisioning software stack on: {args.node if args.node else 'all'}")
+    run_ansible("provision.yml", node=args.node)
+
+def cmd_run(args):
+    hosts = get_inventory()
+    if not hosts: return
+    
+    target_name = args.node
+    if target_name not in hosts:
+        # If no node specified or wrong, pick first OK node
+        target_name = next((n for n, d in hosts.items() if is_node_provisioned(d['ansible_host'])), None)
+        if not target_name:
+            print("❌ Error: No available production nodes found.")
+            return
+    
+    target_data = hosts[target_name]
+    host = target_data['ansible_host']
+    
+    if not args.no_sync:
+        print(f"🔄 Synchronizing workspace to {target_name}...")
+        if not run_ansible("sync_workspace.yml", node=target_name):
+            print("❌ Synchronization failed. Aborting run.")
+            return
+
+    # Execute remote command
+    toolkit_cmd = " ".join(args.remote_args)
+    print(f"🖥️  Executing on {target_name}: {toolkit_cmd}")
+    
+    ssh_cmd = [
+        "ssh", "-i", str(REMOTE_ROOT.parent / target_data['ansible_ssh_private_key_file']),
+        f"{DEVOPS_USER}@{host}",
+        f"cd {REMOTE_WORKSPACE} && ./tools/workspace_manager.py {toolkit_cmd}"
+    ]
+    
+    subprocess.run(ssh_cmd)
 
 def setup_node(connection_str, name=None, dry_run=False):
     ensure_dirs()
     key_path = generate_managed_key(); pub_key_path = key_path.with_suffix(".pub")
-    
-    if "@" in connection_str:
-        initial_user, host = connection_str.split("@", 1)
-    else:
-        initial_user = "root"; host = connection_str
-    
+    if "@" in connection_str: initial_user, host = connection_str.split("@", 1)
+    else: initial_user = "root"; host = connection_str
     if not name: name = host
 
     print(f"\n🔍 Auditing remote state for {host}...")
     if is_node_provisioned(host):
-        print(f"✨ Node is already provisioned and accessible via managed key.")
-        add_to_inventory(name, host, dry_run=dry_run)
+        print(f"✨ Node is already provisioned and accessible via managed key."); add_to_inventory(name, host, dry_run=dry_run)
         return
 
     print(f"\n--- Phase 1: Establish Initial Access ({host}) ---")
-    if dry_run:
-        print(f"[DRY-RUN] Would run: ssh-copy-id -o ConnectTimeout=10 {initial_user}@{host}")
+    if dry_run: print(f"[DRY-RUN] Would run: ssh-copy-id -o ConnectTimeout=10 {initial_user}@{host}")
     else:
         print(f"Connecting as {initial_user}... You will be prompted for the password.")
-        try:
-            subprocess.run(["ssh-copy-id", "-o", "ConnectTimeout=10", f"{initial_user}@{host}"], check=True)
-        except subprocess.CalledProcessError:
-            print("❌ Failed to copy SSH key.")
-            return
+        try: subprocess.run(["ssh-copy-id", "-o", "ConnectTimeout=10", f"{initial_user}@{host}"], check=True)
+        except subprocess.CalledProcessError: print("❌ Failed to copy SSH key."); return
 
     print("\n--- Phase 2: User Provisioning via Ansible ---")
-    playbook = REMOTE_ROOT / "playbooks" / "setup_node.yml"
-    ansible_cmd = [
-        "ansible-playbook", "-i", f"{host},", "-u", initial_user, str(playbook),
-        "--extra-vars", f"devops_user={DEVOPS_USER} pub_key_path={pub_key_path}"
-    ]
-    
-    if dry_run:
-        print(f"[DRY-RUN] Would execute: {' '.join(ansible_cmd)}")
-        success = True
-    else:
-        res = subprocess.run(ansible_cmd)
-        success = (res.returncode == 0)
+    success = run_ansible("setup_node.yml", node=None, extra_vars={"devops_user": DEVOPS_USER, "pub_key_path": str(pub_key_path)}) if not dry_run else True
     
     if success:
         print("\n--- Phase 3: Finalizing Inventory ---")
         add_to_inventory(name, host, dry_run=dry_run)
         msg = "✨ [DRY-RUN] Verification complete." if dry_run else f"✨ Node {name} is now production-ready!"
         print(f"\n{msg}")
-    else:
-        print("❌ Provisioning failed.")
+    else: print("❌ Provisioning failed.")
 
 def add_to_inventory(name, host, dry_run=False):
     data = {"production_nodes": {"hosts": {}}}
@@ -197,28 +195,15 @@ def add_to_inventory(name, host, dry_run=False):
         try:
             with open(INVENTORY_PATH, "r") as f: data = json.load(f)
         except: pass
-    
     hosts = data.get("production_nodes", {}).get("hosts", {})
     existing_name = next((n for n, d in hosts.items() if d.get("ansible_host") == host), None)
-    
-    node_data = {
-        "ansible_host": host,
-        "ansible_user": DEVOPS_USER,
-        "ansible_ssh_private_key_file": f"remote/keys/{SSH_KEY_NAME}"
-    }
-    
+    node_data = {"ansible_host": host, "ansible_user": DEVOPS_USER, "ansible_ssh_private_key_file": f"remote/keys/{SSH_KEY_NAME}"}
     if dry_run:
         print("\n--- [DRY-RUN] Inventory Update ---")
         if existing_name and existing_name != name: print(f"ℹ️  Renaming existing node '{existing_name}' to '{name}'...")
-        print(f"Node: {name} ({host})\n{json.dumps(node_data, indent=4)}")
-        return
-
-    # Cleanup placeholder if IP is being set up
+        print(f"Node: {name} ({host})\n{json.dumps(node_data, indent=4)}"); return
     if "example_vps" in hosts: del data["production_nodes"]["hosts"]["example_vps"]
-    
-    if existing_name and existing_name != name:
-        del data["production_nodes"]["hosts"][existing_name]
-
+    if existing_name and existing_name != name: del data["production_nodes"]["hosts"][existing_name]
     data["production_nodes"]["hosts"][name] = node_data
     with open(INVENTORY_PATH, "w") as f: json.dump(data, f, indent=4)
     print(f"✅ Added {name} ({host}) to inventory.")
@@ -238,11 +223,17 @@ def main():
     prov_p = subparsers.add_parser("provision", help="Install production stack")
     prov_p.add_argument("--node", help="Target specific node")
 
+    run_p = subparsers.add_parser("run", help="Delegate command to remote node")
+    run_p.add_argument("--node", help="Target node name")
+    run_p.add_argument("--no-sync", action="store_true", help="Skip workspace sync before running")
+    run_p.add_argument("remote_args", nargs=argparse.REMAINDER, help="Arguments for workspace_manager.py on remote")
+
     args = parser.parse_args()
     if args.command == "setup": setup_node(args.host, args.name, dry_run=args.dry_run)
     elif args.command == "list": cmd_list(args)
     elif args.command == "test": cmd_test(args)
     elif args.command == "provision": cmd_provision(args)
+    elif args.command == "run": cmd_run(args)
     else: parser.print_help()
 
 if __name__ == "__main__": main()
