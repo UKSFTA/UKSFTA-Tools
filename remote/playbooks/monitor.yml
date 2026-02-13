@@ -16,5 +16,5 @@
       debug:
         msg: 
           - "--- {{ inventory_hostname }} ---"
-          - "Disk: {{ disk_info.stdout_lines[1] }}"
-          - "Uptime: {{ uptime_info.stdout }}"
+          - "Disk: {{ disk_info.stdout_lines[1] if disk_info.stdout_lines | length > 1 else 'N/A' }}"
+          - "Uptime: {{ uptime_info.stdout if uptime_info.stdout else 'N/A' }}"

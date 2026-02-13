@@ -17,7 +17,8 @@ except ImportError:
     USE_RICH = False
 
 # --- CONFIGURATION ---
-REMOTE_ROOT = Path(__file__).parent.parent / "remote"
+TOOLS_ROOT = Path(__file__).parent.parent.resolve()
+REMOTE_ROOT = TOOLS_ROOT / "remote"
 INVENTORY_PATH = REMOTE_ROOT / "inventory" / "nodes.json"
 KEYS_DIR = REMOTE_ROOT / "keys"
 SSH_KEY_NAME = "uksfta_vps"
@@ -63,18 +64,14 @@ def run_ansible(playbook_name, node=None, extra_vars=None, dry_run=False):
     
     playbook = REMOTE_ROOT / "playbooks" / playbook_name
     ini_path = Path("/tmp/uksfta_temp_inventory.ini")
+    managed_key_path = (KEYS_DIR / SSH_KEY_NAME).resolve()
     
-    valid_count = 0
     with open(ini_path, "w") as f:
         f.write("[production_nodes]\n")
         for name, data in hosts.items():
-            if name == "example_vps" or "ansible_ssh_private_key_file" not in data: continue
-            f.write(f"{name} ansible_host={data['ansible_host']} ansible_user={data['ansible_user']} ansible_ssh_private_key_file={data['ansible_ssh_private_key_file']}\n")
-            valid_count += 1
-
-    if valid_count == 0:
-        print("❌ No valid nodes found in inventory.")
-        return False
+            if name == "example_vps": continue
+            # Use absolute path for identity file to ensure rsync/ansible can always find it
+            f.write(f"{name} ansible_host={data['ansible_host']} ansible_user={data['ansible_user']} ansible_ssh_private_key_file={managed_key_path}\n")
 
     env = os.environ.copy()
     env["ANSIBLE_CONFIG"] = str(REMOTE_ROOT / "ansible.cfg")
@@ -86,11 +83,8 @@ def run_ansible(playbook_name, node=None, extra_vars=None, dry_run=False):
         ev_str = " ".join([f"{k}={v}" for k, v in extra_vars.items()])
         ansible_cmd.extend(["--extra-vars", ev_str])
     
-    if dry_run:
-        print(f"--- [DRY-RUN] Executing: {' '.join(ansible_cmd)} ---")
-    
     try:
-        res = subprocess.run(ansible_cmd, cwd=str(REMOTE_ROOT.parent), env=env)
+        res = subprocess.run(ansible_cmd, cwd=str(TOOLS_ROOT), env=env)
         return res.returncode == 0
     finally:
         if ini_path.exists(): os.remove(ini_path)
@@ -166,10 +160,12 @@ def cmd_run(args):
     
     target_data = hosts[target_name]
     host = target_data['ansible_host']
+    managed_key_path = (KEYS_DIR / SSH_KEY_NAME).resolve()
     
     if not args.no_sync:
         print(f"🔄 Synchronizing workspace to {target_name} {'[DRY-RUN]' if args.dry_run else ''}...")
-        if not run_ansible("sync_workspace.yml", node=target_name, dry_run=args.dry_run):
+        # Pass the absolute TOOLS_ROOT to the playbook to ensure correct rsync source
+        if not run_ansible("sync_workspace.yml", node=target_name, dry_run=args.dry_run, extra_vars={"local_root": str(TOOLS_ROOT) + "/"}):
             if not args.dry_run:
                 print("❌ Synchronization failed. Aborting run.")
                 return
@@ -178,9 +174,9 @@ def cmd_run(args):
     print(f"🖥️  Executing on {target_name}: {toolkit_cmd} {'[DRY-RUN]' if args.dry_run else ''}")
     
     ssh_cmd = [
-        "ssh", "-i", str(REMOTE_ROOT.parent / target_data['ansible_ssh_private_key_file']),
+        "ssh", "-i", str(managed_key_path),
         f"{DEVOPS_USER}@{host}",
-        f"cd {REMOTE_WORKSPACE} && ./tools/workspace_manager.py {toolkit_cmd}"
+        f"cd {REMOTE_WORKSPACE} && python3 ./tools/workspace_manager.py {toolkit_cmd}"
     ]
     
     if args.dry_run:
@@ -190,7 +186,7 @@ def cmd_run(args):
 
 def setup_node(connection_str, name=None, dry_run=False):
     ensure_dirs()
-    key_path = generate_managed_key(); pub_key_path = key_path.with_suffix(".pub")
+    key_path = generate_managed_key(); pub_key_path = key_path.with_suffix(".pub").resolve()
     if "@" in connection_str: initial_user, host = connection_str.split("@", 1)
     else: initial_user = "root"; host = connection_str
     if not name: name = host
@@ -225,14 +221,15 @@ def add_to_inventory(name, host, dry_run=False):
         except: pass
     hosts = data.get("production_nodes", {}).get("hosts", {})
     existing_name = next((n for n, d in hosts.items() if d.get("ansible_host") == host), None)
-    node_data = {"ansible_host": host, "ansible_user": DEVOPS_USER, "ansible_ssh_private_key_file": f"remote/keys/{SSH_KEY_NAME}"}
+    
     if dry_run:
         print("\n--- [DRY-RUN] Inventory Update ---")
         if existing_name and existing_name != name: print(f"ℹ️  Renaming existing node '{existing_name}' to '{name}'...")
-        print(f"Node: {name} ({host})\n{json.dumps(node_data, indent=4)}"); return
+        print(f"Node: {name} ({host})"); return
+
     if "example_vps" in hosts: del data["production_nodes"]["hosts"]["example_vps"]
     if existing_name and existing_name != name: del data["production_nodes"]["hosts"][existing_name]
-    data["production_nodes"]["hosts"][name] = node_data
+    data["production_nodes"]["hosts"][name] = {"ansible_host": host, "ansible_user": DEVOPS_USER}
     with open(INVENTORY_PATH, "w") as f: json.dump(data, f, indent=4)
     print(f"✅ Added {name} ({host}) to inventory.")
 

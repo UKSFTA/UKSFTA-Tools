@@ -10,8 +10,8 @@
 
     - name: Synchronize project files
       ansible.posix.synchronize:
-        src: "../../"
-        dest: "/opt/uksfta/workspace"
+        src: "{{ local_root }}"
+        dest: "/opt/uksfta/workspace/"
         recursive: yes
         delete: yes
         rsync_opts:

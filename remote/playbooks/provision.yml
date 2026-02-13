@@ -5,7 +5,7 @@
   tasks:
     - name: Install baseline dependencies
       apt:
-        name: [git, zip, unzip, curl, python3-pip, lib32gcc-s1, lib32stdc++6, software-properties-common, python3-debian, debconf-utils]
+        name: [git, zip, unzip, curl, rsync, python3-pip, python3-rich, python3-requests, lib32gcc-s1, lib32stdc++6, software-properties-common, python3-debian, debconf-utils]
         update_cache: yes
 
     - name: Setup UKSFTA Directory Structure
@@ -45,11 +45,6 @@
         name: steamcmd
         state: present
       ignore_errors: yes
-
-    - name: Install Python dependencies
-      pip:
-        name: [rich, requests]
-        executable: pip3
 
     - name: Check if HEMTT is installed
       stat:
