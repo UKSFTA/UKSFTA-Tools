@@ -35,7 +35,6 @@ def get_mod_ids_from_file():
             if not clean_line or clean_line.startswith("#") or "[ignore]" in clean_line.lower():
                 if "[ignore]" in clean_line.lower(): break
                 continue
-            if "ignore=" in clean_line.lower() or "@ignore" in clean_line.lower(): continue
             m = re.search(r"(?:id=)?(\d{8,})", clean_line)
             if m:
                 mid = m.group(1); name = f"Mod {mid}"
@@ -68,6 +67,35 @@ def get_workshop_cache_path():
     for p in possible:
         if os.path.exists(p): return p
     return None
+
+def verify_integrity(resolved_info, base_path):
+    """Professionally verifies that EVERY PBO from Workshop content exists in the project."""
+    print("🔍 Auditing repacking integrity...")
+    missing_pbos = []
+    
+    for mid, info in resolved_info.items():
+        mod_path = os.path.join(base_path, mid)
+        if not os.path.exists(mod_path): continue
+        
+        # Find all PBOs in the source (cache)
+        cache_pbos = []
+        for r, d, files in os.walk(mod_path):
+            for f in files:
+                if f.lower().endswith(".pbo"): cache_pbos.append(f)
+        
+        # Check if they exist in project addons/
+        for pbo in cache_pbos:
+            dest = os.path.join(ADDONS_DIR, pbo)
+            if not os.path.exists(dest):
+                missing_pbos.append(f"{info['name']} ({mid}) -> {pbo}")
+    
+    if missing_pbos:
+        print("\n❌ INTEGRITY FAILURE: Missing PBOs detected in workspace!")
+        for miss in missing_pbos: print(f"  [MISSING] {miss}")
+        return False
+    
+    print("  ✅ Integrity Check: All dependency PBOs present.")
+    return True
 
 def sync_mods(resolved_info, initial_mods, dry_run=False):
     lock_data = {"mods": {}}
@@ -112,7 +140,6 @@ def sync_mods(resolved_info, initial_mods, dry_run=False):
             })
 
         if current_ts == locked_ts and files_exist:
-            if not dry_run: print(f"--- Mod up to date: {info['name']} (v{current_ts}) ---")
             current_mods[mid] = locked_mod; continue
         if not os.path.exists(mod_path):
             if not dry_run: print(f"Warning: Mod {info['name']} missing from cache.")
@@ -134,7 +161,12 @@ def sync_mods(resolved_info, initial_mods, dry_run=False):
             else:
                 for f in old_info.get("files", []):
                     if os.path.exists(f): os.remove(f)
+    
     if not dry_run:
+        # Perform Integrity Audit
+        if not verify_integrity(resolved_info, base_path):
+            print("⚠️  Warning: Integrity Audit failed. Some PBOs are missing.")
+        
         with open(LOCK_FILE, "w") as f: json.dump({"mods": current_mods}, f, indent=2)
         sync_hemtt_launch(set(resolved_info.keys()))
     return impact
@@ -155,28 +187,32 @@ def sync_hemtt_launch(mod_ids):
 
 if __name__ == "__main__":
     load_env(); parser = argparse.ArgumentParser(description="UKSFTA Mod Manager")
-    parser.add_argument("command", nargs='?', default="sync", choices=["sync", "identify"])
+    parser.add_argument("command", nargs='?', default="sync", choices=["sync", "identify", "verify"])
     parser.add_argument("--offline", action="store_true"); parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    
+    initial = get_mod_ids_from_file(); ignored = get_ignored_ids_from_file()
+    all_ack = set(initial.keys()) | ignored
+    
     if args.command == "identify":
-        from workshop_utils import IGNORED_APP_IDS
         cache = get_workshop_cache_path(); print("--- PBO Origins ---")
         pbo_map = {f: mid for mid in os.listdir(cache) if os.path.isdir(os.path.join(cache, mid)) for r, d, files in os.walk(os.path.join(cache, mid)) for f in files if f.endswith(".pbo")}
         for f in os.listdir(ADDONS_DIR):
             if f.endswith(".pbo"): print(f"{f}: {pbo_map.get(f, 'Internal')}")
         sys.exit(0)
     
-    initial = get_mod_ids_from_file(); ignored = get_ignored_ids_from_file()
-    all_ack = set(initial.keys()) | ignored
-    with open(MOD_SOURCES_FILE, "r") as f: all_ack.update(re.findall(r"(\d{8,})", f.read()))
-    
     try:
         resolved = resolve_transitive_dependencies(initial.keys(), all_ack) if initial else {}
+        base_path = get_workshop_cache_path()
+        
+        if args.command == "verify":
+            if not verify_integrity(resolved, base_path): sys.exit(1)
+            sys.exit(0)
+
         is_offline = args.offline or os.getenv("UKSFTA_OFFLINE") == "1"
         if initial and not is_offline and not args.dry_run:
-            needs = [m for m, i in resolved.items() if i["updated"] != "0"] # Simplified for logic flow
+            needs = [m for m, i in resolved.items() if i["updated"] != "0"]
             if needs:
-                from workshop_utils import STEAM_API_URL
                 print(f"--- Updating {len(needs)} mods via SteamCMD ---")
                 for mid in needs:
                     cmd = ["steamcmd", "+login", os.getenv("STEAM_USERNAME", "anonymous"), "+workshop_download_item", "107410", mid, "validate", "+quit"]
@@ -185,9 +221,6 @@ if __name__ == "__main__":
         
         impact = sync_mods(resolved, initial, dry_run=args.dry_run)
         if (impact["added"] or impact["removed"]) and not args.offline:
-            if args.dry_run:
-                print(f"  📊 Debug: Impact Report contains {len(impact['added'])} additions and {len(impact['removed'])} removals.")
-                for a in impact["added"]: print(f"    - Add: {a['name']} (Dep: {a['is_dependency']})")
             notifier = os.path.join(PROJECT_ROOT, "tools", "notify_discord.py")
             if os.path.exists(notifier): subprocess.run([sys.executable, notifier, "--type", "update", "--impact", json.dumps(impact)] + (["--dry-run"] if args.dry_run else []))
         print("\nSuccess: Workspace synced.")
