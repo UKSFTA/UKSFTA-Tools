@@ -168,21 +168,26 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     
     # Discovery: Transitive Dependencies
     print(f"🔍 Analyzing transitive dependencies for {len(included)} included mods...")
-    included_ids = {m['id'] for m in included}
-    required_ids = {m['id'] for m in required}
     
-    # Use API first, then Scrape for each included mod
+    # 1. Gather ALL IDs mentioned in mod_sources.txt to avoid duplicates (even commented out)
+    all_mentioned_ids = set()
+    sources_path = os.path.join(PROJECT_ROOT, "mod_sources.txt")
+    if os.path.exists(sources_path):
+        with open(sources_path, "r") as f:
+            all_mentioned_ids.update(re.findall(r"(\d{8,})", f.read()))
+
+    included_ids = {m['id'] for m in included}
+    
+    # 2. Use Scrape for each included mod
     transitive_ids = set()
     for mid in included_ids:
-        # 1. Try Scrape (More reliable for Required Items section)
         found = scrape_required_items(mid)
-        # 2. Add only if not already in our lists
         for fid in found:
-            if fid not in included_ids and fid not in required_ids:
+            if fid not in all_mentioned_ids:
                 transitive_ids.add(fid)
     
     if transitive_ids:
-        print(f"📦 Found {len(transitive_ids)} transitive dependencies. Resolving names...")
+        print(f"📦 Found {len(transitive_ids)} new transitive dependencies. Resolving names...")
         trans_details = get_workshop_details(list(transitive_ids))
         for td in trans_details:
             tid = td.get("publishedfileid")
