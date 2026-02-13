@@ -116,6 +116,12 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     for mid in resolved:
         if mid not in inc_ids: all_required_ids.add(mid)
 
+    # Resolution: Final Name Check for all Required Mods
+    unresolved_reqs = [rid for rid in all_required_ids if rid not in resolved]
+    if unresolved_reqs:
+        print(f"  🔍 Resolving names for {len(unresolved_reqs)} core dependencies...")
+        resolved.update(get_bulk_metadata(unresolved_reqs))
+
     # 1. Included Content (PLAIN TEXT to avoid heuristics)
     content_list = ""
     if included:
@@ -129,8 +135,17 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
             for p in sorted(pbos): content_list += f" • {os.path.basename(p)}\n"
     desc = desc.replace("{{INCLUDED_CONTENT}}", content_list)
     
-    # 2. Required Dependencies (Instructional text only)
-    dep_text = "This mod utilizes Steam's [b]Required Items[/b] feature. Please see the list on the right or the subscription popup for dependencies."
+    # 2. Required Dependencies (Instructional + Plain Text for safety)
+    dep_text = "This mod utilizes Steam's [b]Required Items[/b] feature. Please see the official list on the right.\n\n"
+    if all_required_ids:
+        dep_text += "[b]Dependency Checklist:[/b]\n"
+        # We try to get names from the resolved dict or fallback to ID
+        for rid in sorted(list(all_required_ids)):
+            name = resolved.get(rid, {}).get('name', f"Mod {rid}")
+            dep_text += f" • {name} (Workshop ID: {rid})\n"
+    else:
+        dep_text += "None."
+    
     desc = desc.replace("{{MOD_DEPENDENCIES}}", dep_text)
     
     # Build VDF Tags and Dependencies
