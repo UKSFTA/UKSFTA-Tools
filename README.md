@@ -34,6 +34,14 @@ The **UKSFTA Platinum DevOps Suite** is a high-fidelity unit management and auto
 - **`fix-syntax`**: Automated code formatting and standardization across all repos.
 - **`notify`**: Dispatch professional development update cards to Discord.
 
+### 🛰️ Distributed DevOps (Remote Node Management)
+
+- **`remote setup`**: Automated onboarding of a new VPS node using standard `user@host` syntax.
+- **`remote provision`**: One-click installation of the UKSFTA production stack (SteamCMD, HEMTT, UI) on remote nodes.
+- **`remote run`**: High-speed task delegation. Syncs local state to VPS and executes toolkit commands on the remote gigabit backbone.
+- **`remote monitor`**: High-fidelity resource reporting (disk usage, uptime) for all distributed nodes.
+- **`remote sync-secrets`**: Secure propagation of deployment credentials and signing keys to trusted nodes.
+
 ## 💻 Developer Experience (DX)
 
 - **Git Hooks**: Local pre-commit guards to block security leaks and syntax errors.
@@ -44,7 +52,7 @@ The **UKSFTA Platinum DevOps Suite** is a high-fidelity unit management and auto
 
 ## 🛠 Getting Started
 
-1. **Prerequisites**: Ensure you have `python3`, `git`, `hemtt`, and `steamcmd` installed.
+1. **Prerequisites**: Ensure you have `python3`, `git`, `hemtt`, `steamcmd`, and `ansible` installed.
 2. **Setup**: Run `./tools/workspace_manager.py check-env` to verify your local environment.
 3. **Usage**: Run `./tools/workspace_manager.py help` to see the full command suite.
 
