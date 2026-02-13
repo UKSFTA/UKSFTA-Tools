@@ -5,7 +5,7 @@
   tasks:
     - name: Install baseline dependencies
       apt:
-        name: [git, zip, unzip, curl, rsync, python3-pip, python3-rich, python3-requests, lib32gcc-s1, lib32stdc++6, software-properties-common, python3-debian, debconf-utils]
+        name: [git, zip, unzip, curl, rsync, borgbackup, python3-pip, python3-rich, python3-requests, lib32gcc-s1, lib32stdc++6, software-properties-common, python3-debian, debconf-utils]
         update_cache: yes
 
     - name: Setup UKSFTA Directory Structure
@@ -14,7 +14,7 @@
         state: directory
         owner: "{{ ansible_user }}"
         mode: '0755'
-      loop: [tools, workspace, cache]
+      loop: [tools, workspace, cache, backups]
 
     - name: Enable i386 architecture for SteamCMD
       command: dpkg --add-architecture i386

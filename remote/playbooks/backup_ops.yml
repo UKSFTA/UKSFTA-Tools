@@ -1,0 +1,32 @@
+---
+- name: UKSFTA Borg Backup Operations
+  hosts: all
+  vars:
+    repo_path: "/opt/uksfta/backups/workspace.borg"
+    source_path: "/opt/uksfta/workspace"
+    borg_passphrase: "uksfta-devops-managed" # Should be synced via secrets-sync in production
+
+  tasks:
+    - name: Initialize Borg Repository
+      command: "borg init --encryption=none {{ repo_path }}"
+      args:
+        creates: "{{ repo_path }}/config"
+      when: operation == 'setup'
+
+    - name: Create Deduplicated Archive
+      command: "borg create --stats --compression lz4 {{ repo_path }}::'{{ archive_name }}' {{ source_path }}"
+      environment:
+        BORG_PASSPHRASE: "{{ borg_passphrase }}"
+      when: operation == 'create'
+
+    - name: List Archives
+      command: "borg list {{ repo_path }}"
+      register: borg_list
+      environment:
+        BORG_PASSPHRASE: "{{ borg_passphrase }}"
+      when: operation == 'list'
+
+    - name: Display Archives
+      debug:
+        msg: "{{ borg_list.stdout_lines }}"
+      when: operation == 'list' and borg_list.stdout is defined
