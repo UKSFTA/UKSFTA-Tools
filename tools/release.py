@@ -47,6 +47,28 @@ def find_version_file():
 
 VERSION_FILE = find_version_file()
 
+def get_current_version():
+    if not VERSION_FILE or not os.path.exists(VERSION_FILE): return "0.0.0", (0, 0, 0)
+    with open(VERSION_FILE, "r") as f: content = f.read()
+    m = re.search(r"#define\s+MAJOR\s+(\d+)", content)
+    mi = re.search(r"#define\s+MINOR\s+(\d+)", content)
+    p = re.search(r"#define\s+PATCHLVL\s+(\d+)", content)
+    if not all([m, mi, p]): return "0.0.0", (0, 0, 0)
+    return f"{m.group(1)}.{mi.group(1)}.{p.group(1)}", (int(m.group(1)), int(mi.group(1)), int(p.group(1)))
+
+def bump_version(part="patch"):
+    v_str, (ma, mi, pa) = get_current_version()
+    if part == "major": ma += 1; mi = 0; pa = 0
+    elif part == "minor": mi += 1; pa = 0
+    else: pa += 1
+    new_v = f"{ma}.{mi}.{pa}"
+    with open(VERSION_FILE, "r") as f: content = f.read()
+    content = re.sub(r"#define\s+MAJOR\s+\d+", f"#define MAJOR {ma}", content)
+    content = re.sub(r"#define\s+MINOR\s+\d+", f"#define MINOR {mi}", content)
+    content = re.sub(r"#define\s+PATCHLVL\s+\d+", f"#define PATCHLVL {pa}", content)
+    with open(VERSION_FILE, "w") as f: f.write(content)
+    return new_v
+
 def get_workshop_details(published_ids):
     if not published_ids: return []
     details = []
