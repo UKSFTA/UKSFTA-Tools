@@ -163,6 +163,10 @@ def resolve_dependencies(initial_mods, ignored_ids=None):
         
         for dep in meta["dependencies"]:
             dep_id = dep["id"]
+            # Filter out non-mod Steam IDs (Arma 3 and Arma 3 Tools)
+            if dep_id in ["107410", "228800"]:
+                continue
+                
             if dep_id not in processed and dep_id not in to_check:
                 print(f"  Found dependency: {dep['name']} ({dep_id})")
                 to_check.append(dep_id); found_as_dep.add(dep_id)
