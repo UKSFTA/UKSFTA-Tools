@@ -30,6 +30,22 @@ def generate_managed_key():
         ], check=True)
     return key_path
 
+def is_node_provisioned(host):
+    """Checks if we can already connect to the host using the managed key."""
+    key_path = KEYS_DIR / SSH_KEY_NAME
+    if not key_path.exists(): return False
+    
+    cmd = [
+        "ssh", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes",
+        "-i", str(key_path),
+        f"{DEVOPS_USER}@{host}", "echo 'OK'"
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        return "OK" in res.stdout
+    except:
+        return False
+
 def add_to_inventory(name, host, dry_run=False):
     data = {"production_nodes": {"hosts": {}}}
     if INVENTORY_PATH.exists():
@@ -37,6 +53,14 @@ def add_to_inventory(name, host, dry_run=False):
             with open(INVENTORY_PATH, "r") as f: data = json.load(f)
         except: pass
     
+    # Check for existing host under different name
+    existing_name = None
+    hosts = data.get("production_nodes", {}).get("hosts", {})
+    for n, d in hosts.items():
+        if d.get("ansible_host") == host:
+            existing_name = n
+            break
+
     node_data = {
         "ansible_host": host,
         "ansible_user": DEVOPS_USER,
@@ -45,9 +69,16 @@ def add_to_inventory(name, host, dry_run=False):
     
     if dry_run:
         print("\n--- [DRY-RUN] Inventory Update ---")
+        if existing_name and existing_name != name:
+            print(f"⚠️  Note: Host {host} is already in inventory as '{existing_name}'. It will be renamed to '{name}'.")
         print(f"Node: {name} ({host})")
         print(json.dumps(node_data, indent=4))
         return
+
+    # Remove old entry if IP was duplicated under different name
+    if existing_name and existing_name != name:
+        print(f"ℹ️  Renaming existing node '{existing_name}' to '{name}'...")
+        del data["production_nodes"]["hosts"][existing_name]
 
     data["production_nodes"]["hosts"][name] = node_data
     with open(INVENTORY_PATH, "w") as f: json.dump(data, f, indent=4)
@@ -58,16 +89,21 @@ def setup_node(connection_str, name=None, dry_run=False):
     key_path = generate_managed_key()
     pub_key_path = key_path.with_suffix(".pub")
 
-    # Parse user@host
     if "@" in connection_str:
         initial_user, host = connection_str.split("@", 1)
     else:
         initial_user = "root"
         host = connection_str
     
-    # Auto-generate name if not provided
-    if not name:
-        name = host
+    if not name: name = host
+
+    print(f"\n🔍 Auditing remote state for {host}...")
+    
+    if is_node_provisioned(host):
+        print(f"✨ Node is already provisioned and accessible via managed key.")
+        print("--- Skipping Phase 1 & 2 (Establishing access and user creation) ---")
+        add_to_inventory(name, host, dry_run=dry_run)
+        return
 
     print(f"\n--- Phase 1: Establish Initial Access ({host}) ---")
     if dry_run:
@@ -77,7 +113,7 @@ def setup_node(connection_str, name=None, dry_run=False):
         try:
             subprocess.run(["ssh-copy-id", "-o", "ConnectTimeout=10", f"{initial_user}@{host}"], check=True)
         except subprocess.CalledProcessError:
-            print("❌ Failed to copy SSH key.")
+            print("❌ Failed to copy SSH key. If you already ran this, try connecting once manually.")
             return
 
     print("\n--- Phase 2: User Provisioning via Ansible ---")
@@ -108,7 +144,7 @@ def main():
     
     setup_p = subparsers.add_parser("setup", help="Onboard a new VPS node")
     setup_p.add_argument("host", help="Target host (format: [user@]host)")
-    setup_p.add_argument("name", nargs="?", help="Logical name for server (optional, defaults to host)")
+    setup_p.add_argument("name", nargs="?", help="Logical name for server")
     setup_p.add_argument("--dry-run", action="store_true", help="Simulate setup")
     
     args = parser.parse_args()
