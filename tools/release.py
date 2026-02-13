@@ -38,6 +38,17 @@ PROJECT_TOML = os.path.join(PROJECT_ROOT, ".hemtt", "project.toml")
 LOCK_FILE = os.path.join(PROJECT_ROOT, "mods.lock")
 MOD_SOURCES_FILE = os.path.join(PROJECT_ROOT, "mod_sources.txt")
 
+def load_env():
+    env_paths = [os.path.join(PROJECT_ROOT, ".env"), os.path.join(PROJECT_ROOT, "..", "UKSFTA-Tools", ".env")]
+    for env_path in env_paths:
+        if os.path.exists(env_path):
+            with open(env_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1); os.environ[k.strip()] = v.strip()
+            return
+
 def find_version_file():
     addons_dir = os.path.join(PROJECT_ROOT, "addons")
     if not os.path.exists(addons_dir): return None
@@ -70,22 +81,20 @@ def bump_version(part="patch"):
     return new_v
 
 def get_mod_categories():
-    included = []
-    ignored = set()
-    all_ack = set()
+    included = []; ignored = set(); all_ack = set()
     if not os.path.exists(MOD_SOURCES_FILE): return included, ignored, all_ack
-    is_ignore_section = False
+    is_ignore = False
     with open(MOD_SOURCES_FILE, "r") as f:
         f_content = f.read(); all_ack.update(re.findall(r"(\d{8,})", f_content))
         f.seek(0)
         for line in f:
             cl = line.strip()
             if not cl or cl.startswith("#"): continue
-            if "[ignore]" in cl.lower(): is_ignore_section = True; continue
+            if "[ignore]" in cl.lower(): is_ignore = True; continue
             m = re.search(r"(\d{8,})", cl)
             if m:
                 mid = m.group(1)
-                if is_ignore_section: ignored.add(mid)
+                if is_ignore: ignored.add(mid)
                 else:
                     name = f"Mod {mid}"
                     if "#" in cl: name = cl.split("#", 1)[1].strip()
@@ -94,52 +103,41 @@ def get_mod_categories():
     return included, ignored, all_ack
 
 def get_automatic_tags():
-    """Derives Workshop tags based on project name and metadata."""
     tags = set(["Mod", "Addon", "Multiplayer", "Coop", "Realism", "Modern"])
-    project_name = os.path.basename(PROJECT_ROOT).lower()
-    
-    if "map" in project_name or "terrain" in project_name:
-        tags.add("Map")
-    if "script" in project_name:
-        tags.add("Tools")
-    if "temp" in project_name or "mods" in project_name:
-        tags.add("Other")
-        
+    p_name = os.path.basename(PROJECT_ROOT).lower()
+    if "map" in p_name or "terrain" in p_name: tags.add("Map")
+    if "script" in p_name: tags.add("Tools")
+    if "temp" in p_name or "mods" in p_name: tags.add("Other")
     return list(tags)
 
 def get_workshop_config():
     config = {"id": "0", "tags": get_automatic_tags()}
     if os.path.exists(PROJECT_TOML):
         with open(PROJECT_TOML, "r") as f:
-            for line in f:
-                if "workshop_id =" in line: config["id"] = line.split("=")[1].strip().strip('"')
-                if "workshop_tags =" in line:
-                    m = re.search(r"\[(.*?)\]", line)
-                    if m:
-                        # Combine manual tags with automatic ones
-                        manual = [t.strip().strip('"').strip("'") for t in m.group(1).split(",") if t.strip()]
-                        config["tags"] = list(set(config["tags"] + manual))
+            content = f.read()
+            m_id = re.search(r'workshop_id = "(.*)"', content)
+            if m_id: config["id"] = m_id.group(1)
+            m_tags = re.search(r'workshop_tags = \[(.*?)\]', content)
+            if m_tags:
+                manual = [t.strip().strip('"').strip("'") for t in m_tags.group(1).split(",") if t.strip()]
+                config["tags"] = list(set(config["tags"] + manual))
     return config
 
 def create_vdf(app_id, workshop_id, content_path, changelog):
     desc = ""
-    tmpl_path = os.path.join(PROJECT_ROOT, "workshop_description.txt")
-    if os.path.exists(tmpl_path):
-        with open(tmpl_path, "r") as f: desc = f.read()
+    tmpl = os.path.join(PROJECT_ROOT, "workshop_description.txt")
+    if os.path.exists(tmpl):
+        with open(tmpl, "r") as f: desc = f.read()
     
     included, ignored, all_ack = get_mod_categories()
-    
-    # Discovery: Transitive Repack check
-    print(f"🔍 Analyzing dependencies for {len(included)} bundled mods...")
     inc_ids = [m['id'] for m in included]
     resolved = resolve_transitive_dependencies(inc_ids, all_ack)
     
-    transitive_requirements = []
+    trans_reqs = []
     for mid, meta in resolved.items():
         if mid not in inc_ids and mid not in ignored:
-            transitive_requirements.append({"id": mid, "name": f"{meta['name']} (Included)"})
+            trans_reqs.append({"id": mid, "name": f"{meta['name']} (Included)"})
 
-    # 1. Included Content (Directly listed mods from mod_sources.txt)
     content_list = ""
     if included:
         for mod in included: content_list += f" [*] {mod['name']} (Workshop ID: {mod['id']})\n"
@@ -152,33 +150,19 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
             content_list += "[/list]\n"
     desc = desc.replace("{{INCLUDED_CONTENT}}", content_list)
     
-    # 2. Requirements (Transitive dependencies bundled in the repack)
-    if transitive_requirements:
-        dep_text = "[b]Repacked Dependencies:[/b]\n"
-        dep_text += "[i]The following items are already included in this modpack and do not require separate subscription:[/i]\n[list]\n"
-        for mod in sorted(transitive_requirements, key=lambda x: x['name']):
+    if trans_reqs:
+        dep_text = "[b]Repacked Dependencies:[/b]\n[i]Included in this modpack:[/i]\n[list]\n"
+        for mod in sorted(trans_reqs, key=lambda x: x['name']):
             dep_text += f" [*] {mod['name']} (Workshop ID: {mod['id']})\n"
         dep_text += "[/list]\n"
     else: dep_text = "None. (All core requirements handled by unit launcher)"
     desc = desc.replace("{{MOD_DEPENDENCIES}}", dep_text)
     
-    # Workshop Config (ID & Tags)
     ws_config = get_workshop_config()
     tags_vdf = "".join([f'        "{i}" "{t}"\n' for i, t in enumerate(sorted(ws_config["tags"]))])
     
-    vdf = f"""
-"workshopitem"
-{{
-    "appid" "{app_id}"
-    "publishedfileid" "{workshop_id}"
-    "contentfolder" "{content_path}"
-    "changenote" "{changelog}"
-    "description" "{desc}"
-    "tags"
-    {{
-{tags_vdf}    }}
-}}
-"""
+    vdf = f'\"workshopitem\"\n{{\n    \"appid\" \"{app_id}\"\n    \"publishedfileid\" \"{workshop_id}\"\n    \"contentfolder\" \"{content_path}\"\n    \"changenote\" \"{changelog}\"\n    \"description\" \"{desc}\"\n    \"tags\"\n    {{\n{tags_vdf}    }}\n}}'
+    
     vdf_path = os.path.join(HEMTT_OUT, "upload.vdf")
     os.makedirs(os.path.dirname(vdf_path), exist_ok=True)
     with open(vdf_path, "w") as f: f.write(vdf.strip())
@@ -250,7 +234,7 @@ def main():
         subprocess.run(cmd, check=True)
         print("\n✅ Mod updated on Workshop.")
         tag_name = f"v{new_v}"
-        subprocess.run(["git", tag_name, "-s", "-m", f"Release {new_v}", "-f"], check=True)
+        subprocess.run(["git", "tag", "-s", tag_name, "-m", f"Release {new_v}", "-f"], check=True)
         subprocess.run(["git", "push", "origin", "main", "--tags", "-f"], check=False)
     except Exception as e:
         print(f"Error: {e}"); sys.exit(1)
