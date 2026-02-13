@@ -8,6 +8,12 @@ import urllib.error
 import argparse
 import math
 
+try:
+    from rich.console import Console
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
+
 def format_size(size_bytes):
     if size_bytes == 0: return "0 B"
     size_name = ("B", "KB", "MB", "GB", "TB")
@@ -64,7 +70,7 @@ def main():
             "color": 0x3498db,
             "fields": [],
             "footer": {"text": "UKSFTA DevOps | Modset Intelligence"},
-            "timestamp": datetime.datetime.utcnow().isoformat()
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat()
         }
 
         if impact["added"]:
