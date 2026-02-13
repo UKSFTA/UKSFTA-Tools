@@ -47,23 +47,6 @@ def find_version_file():
 
 VERSION_FILE = find_version_file()
 
-def load_env():
-    # 1. Check local project .env
-    env_paths = [
-        os.path.join(PROJECT_ROOT, ".env"),
-        os.path.join(PROJECT_ROOT, "..", "UKSFTA-Tools", ".env")
-    ]
-    for env_path in env_paths:
-        if os.path.exists(env_path):
-            with open(env_path, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"): continue
-                    if "=" in line:
-                        parts = line.split("=", 1)
-                        if len(parts) == 2: os.environ[parts[0].strip()] = parts[1].strip()
-            return
-
 def get_current_version():
     if not VERSION_FILE or not os.path.exists(VERSION_FILE): return "0.0.0", (0, 0, 0)
     with open(VERSION_FILE, "r") as f: content = f.read()
@@ -110,6 +93,34 @@ def get_mod_categories():
                     included.append({"id": mid, "name": name})
     return included, ignored, all_ack
 
+def get_automatic_tags():
+    """Derives Workshop tags based on project name and metadata."""
+    tags = set(["Mod", "Addon", "Multiplayer", "Coop", "Realism", "Modern"])
+    project_name = os.path.basename(PROJECT_ROOT).lower()
+    
+    if "map" in project_name or "terrain" in project_name:
+        tags.add("Map")
+    if "script" in project_name:
+        tags.add("Tools")
+    if "temp" in project_name or "mods" in project_name:
+        tags.add("Other")
+        
+    return list(tags)
+
+def get_workshop_config():
+    config = {"id": "0", "tags": get_automatic_tags()}
+    if os.path.exists(PROJECT_TOML):
+        with open(PROJECT_TOML, "r") as f:
+            for line in f:
+                if "workshop_id =" in line: config["id"] = line.split("=")[1].strip().strip('"')
+                if "workshop_tags =" in line:
+                    m = re.search(r"\[(.*?)\]", line)
+                    if m:
+                        # Combine manual tags with automatic ones
+                        manual = [t.strip().strip('"').strip("'") for t in m.group(1).split(",") if t.strip()]
+                        config["tags"] = list(set(config["tags"] + manual))
+    return config
+
 def create_vdf(app_id, workshop_id, content_path, changelog):
     desc = ""
     tmpl_path = os.path.join(PROJECT_ROOT, "workshop_description.txt")
@@ -118,13 +129,11 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     
     included, ignored, all_ack = get_mod_categories()
     
-    # Discovery: Check for transitive dependencies
+    # Discovery: Transitive Repack check
     print(f"🔍 Analyzing dependencies for {len(included)} bundled mods...")
     inc_ids = [m['id'] for m in included]
     resolved = resolve_transitive_dependencies(inc_ids, all_ack)
     
-    # Categorize Transitive Mods: 
-    # They go under 'Requirements' in text, but are HIDDEN from VDF because they are repacked.
     transitive_requirements = []
     for mid, meta in resolved.items():
         if mid not in inc_ids and mid not in ignored:
@@ -133,8 +142,7 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     # 1. Included Content (Directly listed mods from mod_sources.txt)
     content_list = ""
     if included:
-        for mod in included:
-            content_list += f" [*] {mod['name']} (Workshop ID: {mod['id']})\n"
+        for mod in included: content_list += f" [*] {mod['name']} (Workshop ID: {mod['id']})\n"
     else:
         pbos = glob.glob(os.path.join(STAGING_DIR, "addons", "*.pbo"))
         if not pbos: content_list = " [*] No components found."
@@ -147,27 +155,16 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     # 2. Requirements (Transitive dependencies bundled in the repack)
     if transitive_requirements:
         dep_text = "[b]Repacked Dependencies:[/b]\n"
-        dep_text += "[i]The following items are already included in this modpack and do not require separate subscription:[/i]\n"
-        dep_text += "[list]\n"
+        dep_text += "[i]The following items are already included in this modpack and do not require separate subscription:[/i]\n[list]\n"
         for mod in sorted(transitive_requirements, key=lambda x: x['name']):
             dep_text += f" [*] {mod['name']} (Workshop ID: {mod['id']})\n"
         dep_text += "[/list]\n"
-    else:
-        dep_text = "None. (All core requirements handled by unit launcher)"
-    
+    else: dep_text = "None. (All core requirements handled by unit launcher)"
     desc = desc.replace("{{MOD_DEPENDENCIES}}", dep_text)
     
-    # Build VDF (Zero external dependencies to prevent subscription prompts)
-    config = {"id": "0", "tags": ["Mod", "Addon"]}
-    if os.path.exists(PROJECT_TOML):
-        with open(PROJECT_TOML, "r") as f:
-            for line in f:
-                if "workshop_id =" in line: config["id"] = line.split("=")[1].strip().strip('"')
-                if "workshop_tags =" in line:
-                    m = re.search(r"\[(.*?)\]", line)
-                    if m: config["tags"] = [t.strip().strip('"').strip("'") for t in m.group(1).split(",")]
-    
-    tags_vdf = "".join([f'        "{i}" "{t}"\n' for i, t in enumerate(config["tags"])])
+    # Workshop Config (ID & Tags)
+    ws_config = get_workshop_config()
+    tags_vdf = "".join([f'        "{i}" "{t}"\n' for i, t in enumerate(sorted(ws_config["tags"]))])
     
     vdf = f"""
 "workshopitem"
@@ -224,16 +221,12 @@ def main():
     print(f"Running Build (v{new_v})...")
     subprocess.run(["bash", "build.sh", "release"], check=True)
 
-    wm_id = "0"
-    if os.path.exists(PROJECT_TOML):
-        with open(PROJECT_TOML, "r") as f:
-            for line in f:
-                if "workshop_id =" in line: wm_id = line.split("=")[1].strip().strip('"')
+    ws_config = get_workshop_config()
+    workshop_id = ws_config["id"]
+    if (not workshop_id or workshop_id == "0") and not args.dry_run and not args.offline:
+        workshop_id = input("Enter Workshop ID: ").strip()
 
-    if (not wm_id or wm_id == "0") and not args.dry_run and not args.offline:
-        wm_id = input("Enter Workshop ID: ").strip()
-
-    vdf_p, desc_p = create_vdf("107410", wm_id, STAGING_DIR, "Release v" + new_v)
+    vdf_p, desc_p = create_vdf("107410", workshop_id, STAGING_DIR, "Release v" + new_v)
     
     if args.offline:
         print(f"\n[OFFLINE] Description: {desc_p}\n[OFFLINE] VDF: {vdf_p}")
@@ -244,14 +237,12 @@ def main():
 
     username = os.getenv("STEAM_USERNAME")
     password = os.getenv("STEAM_PASSWORD")
-    
     if not username and not args.dry_run and not args.offline:
         username = input("Steam Username: ").strip()
 
     print("\n--- Steam Workshop Upload ---")
     login_args = [username]
-    if password:
-        login_args.append(password)
+    if password: login_args.append(password)
     
     cmd = ["steamcmd", "+login"] + login_args + ["+workshop_build_item", vdf_p, "validate", "+quit"]
     
@@ -259,7 +250,7 @@ def main():
         subprocess.run(cmd, check=True)
         print("\n✅ Mod updated on Workshop.")
         tag_name = f"v{new_v}"
-        subprocess.run(["git", "tag", "-s", tag_name, "-m", f"Release {new_v}", "-f"], check=True)
+        subprocess.run(["git", tag_name, "-s", "-m", f"Release {new_v}", "-f"], check=True)
         subprocess.run(["git", "push", "origin", "main", "--tags", "-f"], check=False)
     except Exception as e:
         print(f"Error: {e}"); sys.exit(1)
