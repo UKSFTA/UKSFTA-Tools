@@ -94,23 +94,17 @@ def get_bulk_metadata(mod_ids):
         except: pass
     return results
 
-def scrape_mod_metadata(mod_id):
-    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={mod_id}"
-    info = {"name": None, "dependencies": [], "updated": None}
+def scrape_required_items(published_id):
+    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={published_id}"
+    req_ids = set()
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=10) as response:
-            page = response.read().decode('utf-8')
-            match = re.search(r'<div class="workshopItemTitle">(.*?)</div>', page)
-            if match: info["name"] = html.unescape(match.group(1).strip())
-            ts_match = re.search(r'data-timestamp="(\d+)"', page)
-            if ts_match: info["updated"] = ts_match.group(1)
-            matches = re.findall(r'class="requiredItem".*?id=(\d+).*?>(.*?)</a>', page, re.DOTALL)
-            for dep_id, dep_html in matches:
-                dep_name = re.sub(r'<[^>]+>', '', dep_html).strip()
-                info["dependencies"].append({"id": dep_id.strip(), "name": html.unescape(dep_name)})
+            html_content = response.read().decode('utf-8')
+            matches = re.findall(r'class="requiredItem".*?id=(\d+)', html_content, re.DOTALL)
+            for m in matches: req_ids.add(m)
     except: pass
-    return info
+    return req_ids
 
 def resolve_dependencies(initial_mods, ignored_ids=None):
     if ignored_ids is None: ignored_ids = set()
@@ -120,35 +114,61 @@ def resolve_dependencies(initial_mods, ignored_ids=None):
         try:
             with open(LOCK_FILE, "r") as f: lock_data = json.load(f).get("mods", {})
         except: pass
+    
+    # Track all mentioned IDs to avoid duplicates (including core requirements)
+    all_mentioned_ids = set(initial_mods.keys()) | ignored_ids
+    with open(MOD_SOURCES_FILE, "r") as f:
+        all_mentioned_ids.update(re.findall(r"(\d{8,})", f.read()))
+
     resolved_info = {}
     to_check = list(initial_mods.keys())
-    processed = set(ignored_ids)
+    processed = set()
     found_as_dep = set()
+    ignored_app_ids = {"107410", "228800"}
+
     print(f"  🔍 Bulk querying {len(to_check)} mods via Steam API...")
     api_cache = get_bulk_metadata(to_check)
+
     while to_check:
         mid = to_check.pop(0)
-        if mid in processed and mid not in initial_mods: continue
-        if mid in processed and mid in resolved_info: continue
+        if mid in processed or mid in ignored_app_ids: continue
+
         meta = api_cache.get(mid, {"name": f"Mod {mid}", "updated": "0", "dependencies": []})
-        scrape = scrape_mod_metadata(mid)
-        if scrape["name"]: meta["name"] = scrape["name"]
-        if scrape["updated"]: meta["updated"] = scrape["updated"]
-        meta["dependencies"] = scrape["dependencies"]
+        
+        # Scrape for dependencies (Proven logic from release.py)
+        found_deps = scrape_required_items(mid)
+        
+        # Merge Cache Fallback if truly offline/API failed
         if meta["updated"] == "0" and mid in lock_data:
             print(f"  ℹ️  Offline: Using cached metadata for {lock_data[mid].get('name', mid)}")
             meta["name"] = lock_data[mid].get("name", meta.get("name", mid))
             meta["updated"] = lock_data[mid].get("updated", "0")
-            meta["dependencies"] = lock_data[mid].get("dependencies", [])
+            if not found_deps:
+                for d in lock_data[mid].get("dependencies", []): found_deps.add(d["id"])
+
         if mid in initial_mods and initial_mods[mid]: meta["name"] = initial_mods[mid]
         if mid not in found_as_dep: print(f"Checking {meta['name']} ({mid})...")
-        resolved_info[mid] = meta; processed.add(mid)
-        for dep in meta["dependencies"]:
-            dep_id = dep["id"]
-            if dep_id in ["107410", "228800"]: continue
-            if dep_id not in processed and dep_id not in to_check:
-                print(f"  Found dependency: {dep['name']} ({dep_id})")
-                to_check.append(dep_id); found_as_dep.add(dep_id)
+        
+        # Convert found IDs into the format meta expects (for lock file)
+        # Note: We resolve names during the loop for new deps
+        meta["dependencies"] = []
+        for fid in found_deps:
+            if fid in ignored_app_ids: continue
+            
+            # If it's a NEW transitive dependency (not in sources/ignore), resolve it
+            if fid not in all_mentioned_ids and fid not in processed and fid not in to_check:
+                print(f"  Found transitive dependency: {fid}")
+                to_check.append(fid)
+                found_as_dep.add(fid)
+                # Placeholder until checked
+                meta["dependencies"].append({"id": fid, "name": f"Mod {fid}"})
+            else:
+                # Still record acknowledged deps in metadata
+                meta["dependencies"].append({"id": fid, "name": f"Mod {fid}"})
+
+        resolved_info[mid] = meta
+        processed.add(mid)
+        
     return resolved_info
 
 def run_steamcmd(mod_ids):
@@ -187,7 +207,7 @@ def get_workshop_cache_path():
         if os.path.exists(p): return p
     return None
 
-def sync_mods(resolved_info, dry_run=False):
+def sync_mods(resolved_info, initial_mods, dry_run=False):
     if os.path.exists(LOCK_FILE):
         with open(LOCK_FILE, "r") as f:
             lock_data = json.load(f); lock_mods = lock_data.get("mods", {})
@@ -235,7 +255,8 @@ def sync_mods(resolved_info, dry_run=False):
             current_mods[mid] = locked_info; continue
             
         if not os.path.exists(mod_path):
-            print(f"Warning: Mod {info['name']} ({mid}) missing from cache."); continue
+            if not dry_run: print(f"Warning: Mod {info['name']} ({mid}) missing from cache.")
+            continue
             
         if dry_run:
             print(f"--- [DRY-RUN] Would sync: {info['name']} (v{current_ts}) ---")
@@ -307,7 +328,7 @@ if __name__ == "__main__":
             elif args.dry_run: print("\n[!] Dry-Run Mode: Simulating impact and notification...")
             else: print("\n[!] Offline Mode: Syncing from cache only.")
             
-        impact = sync_mods(resolved_info, dry_run=args.dry_run)
+        impact = sync_mods(resolved_info, initial_mods, dry_run=args.dry_run)
         
         if (impact["added"] or impact["removed"]):
             notifier = os.path.join(PROJECT_ROOT, "tools", "notify_discord.py")
