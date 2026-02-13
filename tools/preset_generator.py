@@ -2,32 +2,28 @@
 import os
 import sys
 import re
-import json
+import argparse
 from pathlib import Path
 
-# UKSFTA Global Preset Generator
-# Aggregates all mod dependencies from all projects into a single HTML preset.
+# UKSFTA Global HTML Preset Generator
+# Consumes all project dependencies to create a master Arma 3 Launcher preset.
 
 HTML_HEADER = """<?xml version="1.0" encoding="utf-8"?>
 <html>
   <head>
-    <meta name="arma:preset-name" content="UKSF Taskforce Alpha - Global Preset" />
-    <meta name="arma:last-updated" content="{{DATE}}" />
-    <title>Arma 3 Preset</title>
+    <meta name="arma:Type" content="preset" />
+    <meta name="arma:PresetName" content="UKSFTA Global Master" />
+    <title>Arma 3</title>
     <style>
-      body { background: #1a1a1a; color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-      .container { padding: 20px; }
-      h1 { border-bottom: 2px solid #3498db; padding-bottom: 10px; }
-      table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-      td { padding: 10px; border-bottom: 1px solid #333; }
-      .mod-name { font-weight: bold; color: #3498db; }
-      .mod-id { color: #888; font-size: 0.8em; }
+      body { background: #000; color: #fff; font-family: Segoe UI, Tahoma, Arial; }
+      .mod-list { background: #222; padding: 20px; }
+      .mod-name { color: #D18F21; font-weight: bold; }
+      .mod-id { color: #449EBD; font-size: 0.8em; }
     </style>
   </head>
   <body>
-    <div class="container">
-      <h1>UKSF Taskforce Alpha | Global Mod Preset</h1>
-      <p>Import this file into your Arma 3 Launcher to synchronize all unit dependencies.</p>
+    <h1>UKSFTA Master Preset</h1>
+    <div class="mod-list">
       <table>
 """
 
@@ -37,45 +33,58 @@ HTML_FOOTER = """      </table>
 </html>
 """
 
-def generate_preset(root_dir):
+def generate_preset(root_dir, dry_run=False):
     root = Path(root_dir)
+    output_path = root / "uksfta_master_preset.html"
     mod_ids = set()
-    mod_info = {}
+    mod_info = {} # ID -> Name
 
-    print("🔍 Scanning workspace for mod dependencies...")
+    # 1. Scan projects for mod_sources.txt
+    for p in root.iterdir():
+        if p.is_dir() and p.name.startswith("UKSFTA-"):
+            src = p / "mod_sources.txt"
+            if src.exists():
+                with open(src, 'r') as f:
+                    for line in f:
+                        if "[ignore]" in line.lower(): break
+                        m = re.search(r"(\d{8,})", line)
+                        if m:
+                            mid = m.group(1)
+                            mod_ids.add(mid)
+                            if "#" in line:
+                                mod_info[mid] = line.split("#", 1)[1].strip()
+
+    # 2. Build HTML
+    md_lines = [HTML_HEADER]
+    for mid in sorted(mod_ids):
+        name = mod_info.get(mid, f"Mod {mid}")
+        url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={mid}"
+        md_lines.append(f'        <tr data-type="ModContainer">\n')
+        md_lines.append(f'          <td class="mod-name">{name}</td>\n')
+        md_lines.append(f'          <td><a href="{url}" class="mod-id">Workshop ID: {mid}</a></td>\n')
+        md_lines.append(f'        </tr>\n')
+    md_lines.append(HTML_FOOTER)
     
-    # Scan all project dirs for mods.lock
-    for lock_file in root.parent.glob("UKSFTA-*/mods.lock"):
-        try:
-            with open(lock_file, 'r') as f:
-                data = json.load(f).get("mods", {})
-                for mid, info in data.items():
-                    mod_ids.add(mid)
-                    mod_info[mid] = info.get("name", f"Mod {mid}")
-        except: pass
+    full_html = "".join(md_lines)
 
-    if not mod_ids:
-        print("No mod dependencies found in workspace.")
-        return
+    if dry_run:
+        print("\n--- [DRY-RUN] Global Preset Preview ---")
+        print(f"Found {len(mod_ids)} unique mods.")
+        # Print a small sample
+        for mid in list(mod_ids)[:5]:
+            print(f" • {mod_info.get(mid, mid)}")
+        if len(mod_ids) > 5: print(f" ... and {len(mod_ids)-5} more.")
+        print("---------------------------------------\n")
+    else:
+        output_path.write_text(full_html)
+        print(f"✅ Global Preset generated at: {output_path}")
 
-    output_path = root / "all_releases" / "UKSFTA_Global_Preset.html"
-    output_path.parent.mkdir(exist_ok=True)
-
-    date_str = datetime.now().strftime("%d %b %Y") if 'datetime' in sys.modules else "2026"
+def main():
+    parser = argparse.ArgumentParser(description="UKSFTA Preset Generator")
+    parser.add_argument("--dry-run", action="store_true", help="Preview preset content in console")
+    args = parser.parse_args()
     
-    with open(output_path, 'w') as f:
-        f.write(HTML_HEADER.replace("{{DATE}}", date_str))
-        for mid in sorted(mod_ids):
-            name = mod_info.get(mid, f"Mod {mid}")
-            url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={mid}"
-            f.write(f'        <tr data-type="ModContainer">\n')
-            f.write(f'          <td class="mod-name">{name}</td>\n')
-            f.write(f'          <td><a href="{url}" class="mod-id">Workshop ID: {mid}</a></td>\n')
-            f.write(f'        </tr>\n')
-        f.write(HTML_FOOTER)
-
-    print(f"✅ Global Preset generated at: {output_path}")
+    generate_preset(Path(__file__).parent.parent, args.dry_run)
 
 if __name__ == "__main__":
-    from datetime import datetime
-    generate_preset(Path(__file__).parent.parent)
+    main()

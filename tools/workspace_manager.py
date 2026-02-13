@@ -466,6 +466,7 @@ def cmd_workshop_info(args):
 def main():
     parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
     parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate actions without making permanent changes")
     subparsers = parser.add_subparsers(dest="command")
     for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "audit-keys", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "setup-git-hooks", "check-env", "fix-syntax", "clean-strings", "update", "self-update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
         subparsers.add_parser(cmd, help=f"Run {cmd} utility")
@@ -488,19 +489,31 @@ def main():
     p_list_audit = subparsers.add_parser("modlist-audit", help="Compare modlist against reference sources"); p_list_audit.add_argument("reference", help="Master HTML preset or TXT source"); p_list_audit.add_argument("targets", nargs="+", help="Sources to check against reference"); p_list_audit.add_argument("--deep", action="store_true", help="Scan dependencies of targets")
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
-        "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
+        "dashboard": cmd_dashboard, "status": cmd_status, "sync": lambda a: subprocess.run([sys.executable, "tools/manage_mods.py", "sync"] + (["--dry-run"] if a.dry_run else [])), 
+        "pull-mods": lambda a: subprocess.run([sys.executable, "tools/manage_mods.py", "sync"] + (["--dry-run"] if a.dry_run else [])), 
+        "build": cmd_build, "release": lambda a: subprocess.run([sys.executable, "tools/release.py"] + (["--dry-run"] if a.dry_run else [])), 
         "test": lambda a: subprocess.run(["pytest"]), "clean": lambda a: [subprocess.run(["rm", "-rf", ".hemttout"], cwd=p) for p in get_projects()],
         "cache": lambda a: [subprocess.run(["du", "-sh", ".hemttout"], cwd=p) for p in get_projects() if (p/".hemttout").exists()],
-        "publish": cmd_publish, "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "apply-updates": cmd_apply_updates, "audit-deps": cmd_audit_deps,
+        "publish": lambda a: subprocess.run([sys.executable, "tools/release.py", "-n", "-y"] + (["--dry-run"] if a.dry_run else [])), 
+        "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "apply-updates": cmd_apply_updates, "audit-deps": cmd_audit_deps,
         "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings, "audit-security": cmd_audit_security, "audit-signatures": cmd_audit_signatures,
         "audit-performance": cmd_audit_performance, "audit-keys": cmd_audit_keys, "audit-mission": cmd_audit_mission, "mission-setup": cmd_mission_setup, 
-        "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest, "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, 
-        "generate-vscode": cmd_generate_vscode, "generate-changelog": cmd_generate_changelog, "setup-git-hooks": cmd_setup_git_hooks,
-        "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
+        "generate-docs": cmd_generate_docs, 
+        "generate-manifest": lambda a: subprocess.run([sys.executable, "tools/manifest_generator.py"] + (["--dry-run"] if a.dry_run else [])), 
+        "generate-preset": lambda a: subprocess.run([sys.executable, "tools/preset_generator.py"] + (["--dry-run"] if a.dry_run else [])), 
+        "generate-report": lambda a: subprocess.run([sys.executable, "tools/report_generator.py"] + (["--dry-run"] if a.dry_run else [])), 
+        "generate-vscode": cmd_generate_vscode, 
+        "generate-changelog": lambda a: subprocess.run([sys.executable, "tools/changelog_generator.py"] + (["--dry-run"] if a.dry_run else [])), 
+        "setup-git-hooks": cmd_setup_git_hooks,
+        "check-env": cmd_check_env, 
+        "fix-syntax": lambda a: subprocess.run([sys.executable, "tools/syntax_fixer.py", ".", "--dry-run"] if a.dry_run else [sys.executable, "tools/syntax_fixer.py", "."]), 
+        "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
         "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "classify-mod": cmd_classify_mod, "modlist-classify": cmd_modlist_classify, "modlist-audit": cmd_modlist_audit,
-        "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console),
+        "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), 
+        "notify": lambda a: subprocess.run([sys.executable, "tools/notify_discord.py", "--dry-run"] if a.dry_run else [sys.executable, "tools/notify_discord.py"]), 
+        "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console),
         "lint": cmd_lint,
-        "remote": lambda a: subprocess.run([sys.executable, "tools/remote_manager.py"] + a.cmd)
+        "remote": lambda a: subprocess.run([sys.executable, "tools/remote_manager.py"] + (["--dry-run"] if a.dry_run else []) + a.cmd)
     }
     if args.command in cmds: cmds[args.command](args)
     else: cmd_help(console)
