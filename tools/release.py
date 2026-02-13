@@ -102,13 +102,18 @@ def get_external_dependencies():
     """Identifies all external workshop IDs and resolved names."""
     deps = {}
     lock_data = {}
-    if os.path.exists(LOCK_FILE):
+    
+    # Correctly locate files in PROJECT_ROOT
+    lock_path = os.path.join(PROJECT_ROOT, "mods.lock")
+    sources_path = os.path.join(PROJECT_ROOT, "mod_sources.txt")
+
+    if os.path.exists(lock_path):
         try:
-            with open(LOCK_FILE, "r") as f: lock_data = json.load(f).get("mods", {})
+            with open(lock_path, "r") as f: lock_data = json.load(f).get("mods", {})
         except: pass
 
-    if not os.path.exists("mod_sources.txt"): return deps
-    with open("mod_sources.txt", "r") as f:
+    if not os.path.exists(sources_path): return deps
+    with open(sources_path, "r") as f:
         for line in f:
             if any(x in line.lower() for x in ["[ignore]", "ignore=", "@ignore"]): continue
             m = re.search(r"(\d{8,})", line)
@@ -126,12 +131,11 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
         with open("workshop_description.txt", "r") as f: desc = f.read()
     
     ext_deps = get_external_dependencies()
+    dep_text = "None."
     if ext_deps:
         dep_text = "\n[b]Required Mod Dependencies:[/b]\n"
         for mid, name in sorted(ext_deps.items(), key=lambda x: x[1]):
-            dep_text += f" • [url=https://steamcommunity.com/sharedfiles/filedetails/?id={mid}]{name}[/url]\n"
-    else:
-        dep_text = "None."
+            dep_text += f" • [url=https://steamcommunity.com/sharedfiles/image/v1/filedetails/?id={mid}]{name}[/url]\n"
     
     desc = desc.replace("{{MOD_DEPENDENCIES}}", dep_text)
     

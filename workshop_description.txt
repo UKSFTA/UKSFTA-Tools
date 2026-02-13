@@ -9,6 +9,7 @@ This collection provides the essential geographical assets and terrains required
 [/list]
 
 [h2]🛠 Requirements[/h2]
+{{MOD_DEPENDENCIES}}
 This pack is intended for use by [b]UKSFTA members[/b] and mission makers. 
 Please ensure all necessary dependencies are loaded.
 
