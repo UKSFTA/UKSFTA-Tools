@@ -97,32 +97,25 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     
     included, all_acknowledged = get_mod_categories()
     
-    # Discovery: Native Workshop Dependencies
-    print(f"🔍 Analyzing dependencies for {len(included)} mods...")
+    # Discovery: Truly New Dependencies Only
+    print(f"🔍 Analyzing dependencies for {len(included)} bundled mods...")
     inc_ids = [m['id'] for m in included]
     resolved = resolve_transitive_dependencies(inc_ids, all_acknowledged)
     
-    # Required IDs for VDF (Native Steam Feature)
-    # We include EVERYTHING from mod_sources.txt [ignore] + Transitive
-    # This triggers the Steam popup without needing URLs in the description
+    # We ONLY include IDs that are NOT in mod_sources.txt (bundled or ignored)
     all_required_ids = set()
-    with open(MOD_SOURCES_FILE, "r") as f:
-        content = f.read()
-        ignore_match = re.search(r"\[ignore\](.*)", content, re.DOTALL | re.IGNORECASE)
-        if ignore_match:
-            all_required_ids.update(re.findall(r"(\d{8,})", ignore_match.group(1)))
-    
-    # Add transitive resolved IDs
     for mid in resolved:
-        if mid not in inc_ids: all_required_ids.add(mid)
+        if mid not in all_acknowledged:
+            all_required_ids.add(mid)
 
-    # Resolution: Final Name Check for all Required Mods
-    unresolved_reqs = [rid for rid in all_required_ids if rid not in resolved]
-    if unresolved_reqs:
-        print(f"  🔍 Resolving names for {len(unresolved_reqs)} core dependencies...")
-        resolved.update(get_bulk_metadata(unresolved_reqs))
+    # Resolution: Final Name Check for Truly New Dependencies
+    if all_required_ids:
+        unresolved_reqs = [rid for rid in all_required_ids if rid not in resolved]
+        if unresolved_reqs:
+            print(f"  🔍 Resolving names for {len(unresolved_reqs)} new transitive dependencies...")
+            resolved.update(get_bulk_metadata(unresolved_reqs))
 
-    # 1. Included Content (PLAIN TEXT to avoid heuristics)
+    # 1. Included Content (PLAIN TEXT)
     content_list = ""
     if included:
         for mod in included:
@@ -135,20 +128,19 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
             for p in sorted(pbos): content_list += f" • {os.path.basename(p)}\n"
     desc = desc.replace("{{INCLUDED_CONTENT}}", content_list)
     
-    # 2. Required Dependencies (Instructional + Plain Text for safety)
-    dep_text = "This mod utilizes Steam's [b]Required Items[/b] feature. Please see the official list on the right.\n\n"
+    # 2. Required Dependencies (ONLY if truly new transitive deps found)
     if all_required_ids:
-        dep_text += "[b]Dependency Checklist:[/b]\n"
-        # We try to get names from the resolved dict or fallback to ID
+        dep_text = "This mod utilizes Steam's [b]Required Items[/b] feature. Please see the official list on the right.\n\n"
+        dep_text += "[b]Missing Dependency Checklist:[/b]\n"
         for rid in sorted(list(all_required_ids)):
             name = resolved.get(rid, {}).get('name', f"Mod {rid}")
             dep_text += f" • {name} (Workshop ID: {rid})\n"
     else:
-        dep_text += "None."
+        dep_text = "None. (All core requirements handled by unit launcher)"
     
     desc = desc.replace("{{MOD_DEPENDENCIES}}", dep_text)
     
-    # Build VDF Tags and Dependencies
+    # VDF Config
     config = {"id": "0", "tags": ["Mod", "Addon"]}
     if os.path.exists(PROJECT_TOML):
         with open(PROJECT_TOML, "r") as f:
@@ -160,7 +152,7 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     
     tags_vdf = "".join([f'        "{i}" "{t}"\n' for i, t in enumerate(config["tags"])])
     
-    # Native Dependencies Block for VDF
+    # Native Dependencies Block (ONLY for non-bundled, non-ignored mods)
     deps_vdf = ""
     if all_required_ids:
         deps_vdf = '    "dependencies"\n    {\n'
