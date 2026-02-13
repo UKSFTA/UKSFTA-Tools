@@ -32,7 +32,8 @@ def send_discord_notification(webhook_url, content=None, embed=None, dry_run=Fal
         if HAS_RICH:
             from rich.syntax import Syntax
             json_str = json.dumps(payload, indent=2)
-            syntax = Syntax(json_str, "json", theme="monokai", line_numbers=True)
+            # Use Syntax without line numbers for a cleaner unit-standard preview
+            syntax = Syntax(json_str, "json", theme="monokai", word_wrap=True)
             Console().print(syntax)
         else:
             print(json.dumps(payload, indent=2))

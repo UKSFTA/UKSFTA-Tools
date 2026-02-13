@@ -96,6 +96,7 @@ def sync_mods(resolved_info, initial_mods, dry_run=False):
         locked_ts = locked_mod.get("updated", "0"); current_ts = info.get("updated", "1")
         files_exist = all(os.path.exists(f) for f in locked_mod.get("files", [])) if locked_mod.get("files") else False
         
+        # Determine Size
         mod_size = info.get("size", 0)
         if os.path.exists(mod_path):
             disk_sz = sum(os.path.getsize(os.path.join(r, f)) for r, d, files in os.walk(mod_path) for f in files)
@@ -104,7 +105,11 @@ def sync_mods(resolved_info, initial_mods, dry_run=False):
         impact["total_size"] += mod_size
         if is_new:
             impact["added_size"] += mod_size
-            impact["added"].append({"name": info["name"], "id": mid, "size": mod_size, "deps": [d["name"] for d in info["dependencies"]], "is_dependency": is_dep})
+            impact["added"].append({
+                "name": info["name"], "id": mid, "size": mod_size, 
+                "deps": [d["name"] for d in info["dependencies"]], 
+                "is_dependency": is_dep
+            })
 
         if current_ts == locked_ts and files_exist:
             if not dry_run: print(f"--- Mod up to date: {info['name']} (v{current_ts}) ---")
@@ -180,6 +185,9 @@ if __name__ == "__main__":
         
         impact = sync_mods(resolved, initial, dry_run=args.dry_run)
         if (impact["added"] or impact["removed"]) and not args.offline:
+            if args.dry_run:
+                print(f"  📊 Debug: Impact Report contains {len(impact['added'])} additions and {len(impact['removed'])} removals.")
+                for a in impact["added"]: print(f"    - Add: {a['name']} (Dep: {a['is_dependency']})")
             notifier = os.path.join(PROJECT_ROOT, "tools", "notify_discord.py")
             if os.path.exists(notifier): subprocess.run([sys.executable, notifier, "--type", "update", "--impact", json.dumps(impact)] + (["--dry-run"] if args.dry_run else []))
         print("\nSuccess: Workspace synced.")
