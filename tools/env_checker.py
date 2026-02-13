@@ -29,8 +29,7 @@ def check_command(cmd, name):
         return False
 
 def main():
-    print("
-🔍 [bold blue]UKSFTA Development Environment Audit[/bold blue]")
+    print("\n🔍 [bold blue]UKSFTA Development Environment Audit[/bold blue]")
     print(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     
     critical = []
@@ -40,8 +39,7 @@ def main():
     critical.append(check_command("steamcmd", "SteamCMD"))
     critical.append(check_command("zip", "Zip"))
     
-    print("
-[Assurance & Security]")
+    print("\n[Assurance & Security]")
     check_command("gh", "GitHub CLI")
     check_command("gpg", "GPG (Signing)")
     
@@ -53,13 +51,9 @@ def main():
         print(f"  [bold yellow]⚠️  {'Rich (UI)':<15}[/] : Not found (install via pip)")
 
     if all(critical):
-        print("
-[bold green]✨ Environment is production-ready![/bold green]
-")
+        print("\n[bold green]✨ Environment is production-ready![/bold green]\n")
     else:
-        print("
-[bold red]⚠️  Critical dependencies are missing. Please check docs/SETUP.md[/bold red]
-")
+        print("\n[bold red]⚠️  Critical dependencies are missing. Please check docs/SETUP.md[/bold red]\n")
 
 if __name__ == "__main__":
     try:

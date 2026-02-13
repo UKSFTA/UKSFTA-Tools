@@ -68,14 +68,10 @@ def generate_preset(root_dir):
         for mid in sorted(mod_ids):
             name = mod_info.get(mid, f"Mod {mid}")
             url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={mid}"
-            f.write(f'        <tr data-type="ModContainer">
-')
-            f.write(f'          <td class="mod-name">{name}</td>
-')
-            f.write(f'          <td><a href="{url}" class="mod-id">Workshop ID: {mid}</a></td>
-')
-            f.write(f'        </tr>
-')
+            f.write(f'        <tr data-type="ModContainer">\n')
+            f.write(f'          <td class="mod-name">{name}</td>\n')
+            f.write(f'          <td><a href="{url}" class="mod-id">Workshop ID: {mid}</a></td>\n')
+            f.write(f'        </tr>\n')
         f.write(HTML_FOOTER)
 
     print(f"✅ Global Preset generated at: {output_path}")

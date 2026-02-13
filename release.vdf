@@ -1,0 +1,7 @@
+"workshopitem"
+{
+  "appid" "123"
+  "publishedfileid" "456"
+  "contentfolder" "/path/to/content"
+  "changenote" "changelog text"
+}

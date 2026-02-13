@@ -1,0 +1,20 @@
+[h1]UKSF Task Force Alpha - Map Modpack[/h1]
+
+[b]Production-grade terrains for UKSFTA operations.[/b]
+This collection provides the essential geographical assets and terrains required for UKSFTA missions. Optimized for performance and organized for seamless integration with our internal frameworks.
+
+[h2]🗺 Included Content[/h2]
+[list]
+No addons found.
+[/list]
+
+[h2]🛠 Requirements[/h2]
+This pack is intended for use by [b]UKSFTA members[/b] and mission makers. 
+Please ensure all necessary dependencies are loaded.
+
+[h2]📡 About UKSFTA[/h2]
+UKSF Task Force Alpha is a tactical realism unit focused on high-quality Arma 3 simulation. 
+
+
+[hr]
+[i]Automated deployment via UKSFTA DevOps Pipeline[/i]

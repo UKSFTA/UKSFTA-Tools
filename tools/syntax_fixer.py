@@ -20,9 +20,7 @@ def fix_file(file_path):
             fixed_lines.append(line)
         
         # 3. Ensure EOF Newline
-        content = "
-".join(fixed_lines).strip() + "
-"
+        content = "\n".join(fixed_lines).strip() + "\n"
         
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(content)

@@ -76,6 +76,17 @@ def bump_version(part="patch"):
     with open(VERSION_FILE, "w") as f: f.write(content)
     return new_v
 
+def generate_content_list():
+    """Generates a Markdown list of all components found in the staging directory."""
+    if not os.path.exists(STAGING_DIR): return "No addons found."
+    pbos = glob.glob(os.path.join(STAGING_DIR, "addons", "*.pbo"))
+    if not pbos: return "No PBO components found."
+    
+    list_str = "\n[b]Included Components:[/b]\n"
+    for p in sorted(pbos):
+        list_str += f" • {os.path.basename(p)}\n"
+    return list_str
+
 def get_workshop_config():
     config = {"id": "0", "tags": ["Mod", "Addon"]}
     if os.path.exists(PROJECT_TOML):
@@ -122,7 +133,12 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     else:
         dep_text = "None."
     
-    desc = desc.replace("{{INCLUDED_CONTENT}}", dep_text)
+    desc = desc.replace("{{MOD_DEPENDENCIES}}", dep_text)
+    
+    # Add list of included PBOs
+    content_list = generate_content_list()
+    desc = desc.replace("{{INCLUDED_CONTENT}}", content_list)
+    
     config = get_workshop_config()
     tags_vdf = "".join([f'        "{i}" "{t}"\n' for i, t in enumerate(config["tags"])])
 
@@ -140,11 +156,16 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
 }}
 """
     vdf_path = os.path.join(HEMTT_OUT, "upload.vdf")
-    with open(vdf_path, "w") as f: f.write(vdf)
+    with open(vdf_path, "w") as f:
+        f.write(vdf.strip())
     
     # Also save the raw description for manual copying
-    desc_out = os.path.join(PROJECT_ROOT, "workshop_description_final.txt")
-    with open(desc_out, "w") as f: f.write(desc)
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        desc_out = os.path.join(PROJECT_ROOT, "workshop_description_final.txt")
+        with open(desc_out, "w") as f:
+            f.write(desc)
+    else:
+        desc_out = "workshop_description_final.txt"
     
     return vdf_path, desc_out
 

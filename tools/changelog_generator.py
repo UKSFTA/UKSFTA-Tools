@@ -22,8 +22,7 @@ def generate_project_changelog(project_path):
             last_tag = "Initial"
 
         res = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
-        lines = res.stdout.strip().split("
-")
+        lines = res.stdout.strip().split("\n")
         
         categories = {
             "feat": "🚀 Features",
@@ -58,31 +57,21 @@ def generate_project_changelog(project_path):
         v_file = root / "VERSION"
         if v_file.exists(): version = v_file.read_text().strip()
         
-        md = f"# Changelog: {root.name}
-
-"
-        md += f"## [{version}] - {datetime.now().strftime('%Y-%m-%d')}
-
-"
+        md = f"# Changelog: {root.name}\n\n"
+        md += f"## [{version}] - {datetime.now().strftime('%Y-%m-%d')}\n\n"
         
         for prefix, label in categories.items():
             if output[prefix]:
-                md += f"### {label}
-"
+                md += f"### {label}\n"
                 for item in sorted(output[prefix]):
-                    md += f"- {item}
-"
-                md += "
-"
+                    md += f"- {item}\n"
+                md += "\n"
         
         if other:
-            md += "### 📦 Other Changes
-"
+            md += "### 📦 Other Changes\n"
             for item in sorted(other):
-                md += f"- {item}
-"
-            md += "
-"
+                md += f"- {item}\n"
+            md += "\n"
 
         log_path = root / "CHANGELOG.md"
         log_path.write_text(md)
