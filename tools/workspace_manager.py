@@ -276,6 +276,7 @@ def cmd_audit_keys(args):
 def cmd_notify(args):
     notifier = Path(__file__).parent / "notify_discord.py"; cmd = [sys.executable, str(notifier), "--message", args.message, "--type", args.type]
     if args.title: cmd.extend(["--title", args.title])
+    if args.dry_run: cmd.append("--dry-run")
     subprocess.run(cmd)
 
 def cmd_audit_full(args):
@@ -345,7 +346,9 @@ def cmd_check_env(args):
 
 def cmd_fix_syntax(args):
     fixer = Path(__file__).parent / "syntax_fixer.py"
-    for p in get_projects(): subprocess.run([sys.executable, str(fixer), str(p)])
+    cmd = [sys.executable, str(fixer), args.target]
+    if args.dry_run: cmd.append("--dry-run")
+    subprocess.run(cmd)
 
 def cmd_clean_strings(args):
     cleaner = Path(__file__).parent / "string_cleaner.py"
@@ -416,6 +419,7 @@ def cmd_sync(args):
     for p in get_projects(): 
         cmd = [sys.executable, "tools/manage_mods.py", "sync"]
         if args.offline: cmd.append("--offline")
+        if args.dry_run: cmd.append("--dry-run")
         subprocess.run(cmd, cwd=p)
     from manifest_generator import generate_total_manifest; generate_total_manifest(Path(__file__).parent.parent)
 
@@ -464,38 +468,47 @@ def cmd_workshop_info(args):
     auditor = Path(__file__).parent / "workshop_inspector.py"; subprocess.run([sys.executable, str(auditor)])
 
 def main():
-    parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
-    parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
-    parser.add_argument("--dry-run", action="store_true", help="Simulate actions without making permanent changes")
+    # 1. Base Parser for Shared Flags
+    base_parser = argparse.ArgumentParser(add_help=False)
+    base_parser.add_argument("--json", action="store_true", help="Output results in JSON")
+    base_parser.add_argument("--dry-run", action="store_true", help="Simulate actions")
+
+    # 2. Main Parser
+    parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", parents=[base_parser])
     subparsers = parser.add_subparsers(dest="command")
-    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "audit-keys", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "setup-git-hooks", "check-env", "fix-syntax", "clean-strings", "update", "self-update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
-        subparsers.add_parser(cmd, help=f"Run {cmd} utility")
     
-    p_lint = subparsers.add_parser("lint", help="Full Quality Lint")
+    # Register common utilities
+    simple_cmds = ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "audit-keys", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "setup-git-hooks", "check-env", "clean-strings", "update", "self-update", "workshop-tags", "gh-runs", "workshop-info", "help"]
+    for cmd in simple_cmds:
+        subparsers.add_parser(cmd, help=f"Run {cmd} utility", parents=[base_parser])
+    
+    p_lint = subparsers.add_parser("lint", help="Full Quality Lint", parents=[base_parser])
     p_lint.add_argument("--fix", action="store_true", help="Auto-fix formatting errors")
 
-    p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path", help="Path to mission folder"); p_ms.add_argument("--framework", action="store_true", help="Inject Mission Framework"); p_ms.epilog = "Example: ./tools/workspace_manager.py mission-setup my_op --framework"
-    p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true")
-    subparsers.add_parser("pull-mods", help="Alias for sync").add_argument("--offline", action="store_true")
-    p_pub = subparsers.add_parser("publish", help="Upload to Steam"); p_pub.add_argument("--dry-run", action="store_true")
+    p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder", parents=[base_parser]); p_ms.add_argument("path", help="Path to mission folder"); p_ms.add_argument("--framework", action="store_true", help="Inject Mission Framework"); p_ms.epilog = "Example: ./tools/workspace_manager.py mission-setup my_op --framework"
+    p_sync = subparsers.add_parser("sync", help="Synchronize mods", parents=[base_parser]); p_sync.add_argument("--offline", action="store_true")
+    subparsers.add_parser("pull-mods", help="Alias for sync", parents=[base_parser]).add_argument("--offline", action="store_true")
+    p_pub = subparsers.add_parser("publish", help="Upload to Steam", parents=[base_parser]); p_pub.add_argument("--dry-run-legacy", action="store_true")
     p_pub.add_argument("--offline", action="store_true", help="Generate local metadata only")
-    p_conv = subparsers.add_parser("convert", help="Convert media"); p_conv.add_argument("files", nargs="+")
-    p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO"); p_miss.add_argument("pbo")
-    p_size = subparsers.add_parser("modlist-size", help="Calculate size"); p_size.add_argument("file", nargs="?", default="mod_sources.txt")
-    p_remote = subparsers.add_parser("remote", help="Distributed infrastructure management"); p_remote.add_argument("cmd", nargs=argparse.REMAINDER)
-    p_notify = subparsers.add_parser("notify", help="Discord update"); p_notify.add_argument("message"); p_notify.add_argument("--type", choices=["update", "release", "alert"], default="update"); p_notify.add_argument("--title")
-    p_class = subparsers.add_parser("classify-mod", help="Classify mod side requirement"); p_class.add_argument("id", help="Steam Workshop ID or URL")
-    p_list_class = subparsers.add_parser("modlist-classify", help="Classify entire modlist requirements"); p_list_class.add_argument("file", nargs="?", default="mod_sources.txt", help="Path to modlist file")
-    p_list_audit = subparsers.add_parser("modlist-audit", help="Compare modlist against reference sources"); p_list_audit.add_argument("reference", help="Master HTML preset or TXT source"); p_list_audit.add_argument("targets", nargs="+", help="Sources to check against reference"); p_list_audit.add_argument("--deep", action="store_true", help="Scan dependencies of targets")
+    p_conv = subparsers.add_parser("convert", help="Convert media", parents=[base_parser]); p_conv.add_argument("files", nargs="+")
+    p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO", parents=[base_parser]); p_miss.add_argument("pbo")
+    p_size = subparsers.add_parser("modlist-size", help="Calculate size", parents=[base_parser]); p_size.add_argument("file", nargs="?", default="mod_sources.txt")
+    p_remote = subparsers.add_parser("remote", help="Distributed infrastructure management", parents=[base_parser]); p_remote.add_argument("cmd", nargs=argparse.REMAINDER)
+    p_notify = subparsers.add_parser("notify", help="Discord update", parents=[base_parser]); p_notify.add_argument("message", nargs="?"); p_notify.add_argument("--type", choices=["update", "release", "alert"], default="update"); p_notify.add_argument("--title")
+    p_class = subparsers.add_parser("classify-mod", help="Classify mod side requirement", parents=[base_parser]); p_class.add_argument("id", help="Steam Workshop ID or URL")
+    p_list_class = subparsers.add_parser("modlist-classify", help="Classify entire modlist requirements", parents=[base_parser]); p_list_class.add_argument("file", nargs="?", default="mod_sources.txt", help="Path to modlist file")
+    p_list_audit = subparsers.add_parser("modlist-audit", help="Compare modlist against reference sources", parents=[base_parser]); p_list_audit.add_argument("reference", help="Master HTML preset or TXT source"); p_list_audit.add_argument("targets", nargs="+", help="Sources to check against reference"); p_list_audit.add_argument("--deep", action="store_true", help="Scan dependencies of targets")
+    
+    p_fix = subparsers.add_parser("fix-syntax", help="Standardize indentation", parents=[base_parser])
+    p_fix.add_argument("target", nargs="?", default=".", help="Target directory")
+
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
-        "dashboard": cmd_dashboard, "status": cmd_status, "sync": lambda a: subprocess.run([sys.executable, "tools/manage_mods.py", "sync"] + (["--dry-run"] if a.dry_run else [])), 
-        "pull-mods": lambda a: subprocess.run([sys.executable, "tools/manage_mods.py", "sync"] + (["--dry-run"] if a.dry_run else [])), 
-        "build": cmd_build, "release": lambda a: subprocess.run([sys.executable, "tools/release.py"] + (["--dry-run"] if a.dry_run else [])), 
+        "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, 
+        "release": lambda a: subprocess.run([sys.executable, "tools/release.py"] + (["--dry-run"] if a.dry_run else [])), 
         "test": lambda a: subprocess.run(["pytest"]), "clean": lambda a: [subprocess.run(["rm", "-rf", ".hemttout"], cwd=p) for p in get_projects()],
         "cache": lambda a: [subprocess.run(["du", "-sh", ".hemttout"], cwd=p) for p in get_projects() if (p/".hemttout").exists()],
-        "publish": lambda a: subprocess.run([sys.executable, "tools/release.py", "-n", "-y"] + (["--dry-run"] if a.dry_run else [])), 
-        "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "apply-updates": cmd_apply_updates, "audit-deps": cmd_audit_deps,
+        "publish": cmd_publish, "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "apply-updates": cmd_apply_updates, "audit-deps": cmd_audit_deps,
         "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings, "audit-security": cmd_audit_security, "audit-signatures": cmd_audit_signatures,
         "audit-performance": cmd_audit_performance, "audit-keys": cmd_audit_keys, "audit-mission": cmd_audit_mission, "mission-setup": cmd_mission_setup, 
         "generate-docs": cmd_generate_docs, 
@@ -506,11 +519,11 @@ def main():
         "generate-changelog": lambda a: subprocess.run([sys.executable, "tools/changelog_generator.py"] + (["--dry-run"] if a.dry_run else [])), 
         "setup-git-hooks": cmd_setup_git_hooks,
         "check-env": cmd_check_env, 
-        "fix-syntax": lambda a: subprocess.run([sys.executable, "tools/syntax_fixer.py", ".", "--dry-run"] if a.dry_run else [sys.executable, "tools/syntax_fixer.py", "."]), 
+        "fix-syntax": cmd_fix_syntax, 
         "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
         "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "classify-mod": cmd_classify_mod, "modlist-classify": cmd_modlist_classify, "modlist-audit": cmd_modlist_audit,
         "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), 
-        "notify": lambda a: subprocess.run([sys.executable, "tools/notify_discord.py", "--dry-run"] if a.dry_run else [sys.executable, "tools/notify_discord.py"]), 
+        "notify": cmd_notify, 
         "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console),
         "lint": cmd_lint,
         "remote": lambda a: subprocess.run([sys.executable, "tools/remote_manager.py"] + (["--dry-run"] if a.dry_run else []) + a.cmd)
