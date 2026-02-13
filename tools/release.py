@@ -8,6 +8,7 @@ import shutil
 import json
 import glob
 import urllib.request
+import urllib.parse
 import html
 import argparse
 import multiprocessing
@@ -23,6 +24,8 @@ except ImportError:
     rprint = print
 
 # --- CONFIGURATION ---
+STEAM_API_URL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+
 def resolve_project_root():
     current = os.getcwd()
     if os.path.exists(os.path.join(current, ".hemtt", "project.toml")) or os.path.exists(os.path.join(current, "mod_sources.txt")):
@@ -43,19 +46,6 @@ def find_version_file():
     return None
 
 VERSION_FILE = find_version_file()
-
-def print_steam_info():
-    info = """
-[bold cyan]How Steam Workshop Uploads Work:[/bold cyan]
-1. [white]Raw Files:[/] SteamCMD does [bold red]NOT[/bold red] upload a ZIP file.
-2. [white]Content Sync:[/] It uploads the [bold green]raw folder structure[/] (addons, keys, etc).
-3. [white]Differential:[/] Steam compares your local files with the server and only uploads the changes.
-4. [white]VDF Config:[/] The [dim]upload.vdf[/] tells Steam which folder to scan and what metadata to set.
-    """
-    if HAS_RICH:
-        rprint(Panel(info, title="SteamCMD Technical Context", border_style="cyan"))
-    else:
-        print("\n--- SteamCMD Technical Context ---")
 
 def get_current_version():
     if not VERSION_FILE or not os.path.exists(VERSION_FILE): return "0.0.0", (0, 0, 0)
@@ -78,6 +68,24 @@ def bump_version(part="patch"):
     content = re.sub(r"#define\s+PATCHLVL\s+\d+", f"#define PATCHLVL {pa}", content)
     with open(VERSION_FILE, "w") as f: f.write(content)
     return new_v
+
+def get_workshop_details(published_ids):
+    if not published_ids: return []
+    details = []
+    id_list = list(published_ids)
+    for i in range(0, len(id_list), 100):
+        chunk = id_list[i:i + 100]
+        data = {"itemcount": len(chunk)}
+        for j, pid in enumerate(chunk): data[f"publishedfileids[{j}]"] = pid
+        try:
+            encoded_data = urllib.parse.urlencode(data).encode('utf-8')
+            req = urllib.request.Request(STEAM_API_URL, data=encoded_data, method='POST')
+            with urllib.request.urlopen(req, timeout=15) as response:
+                res = json.loads(response.read().decode('utf-8'))
+                details.extend(res.get("response", {}).get("publishedfiledetails", []))
+        except Exception as e:
+            print(f"  ⚠️  Steam API Error: {e}")
+    return details
 
 def get_mod_categories():
     included = []
@@ -134,20 +142,68 @@ def get_workshop_config():
                     if m: config["tags"] = [t.strip().strip('"').strip("'") for t in m.group(1).split(",")]
     return config
 
+def scrape_required_items(published_id):
+    """Fallback: Scrape the HTML page for 'Required Items' if API fails."""
+    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={published_id}"
+    req_ids = set()
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            html_content = response.read().decode('utf-8')
+            # Look for Required Items section links
+            # Pattern: <div class="requiredItem">...href="...id=(\d+)"
+            matches = re.findall(r'class="requiredItem".*?id=(\d+)', html_content, re.DOTALL)
+            for m in matches:
+                req_ids.add(m)
+    except: pass
+    return req_ids
+
 def create_vdf(app_id, workshop_id, content_path, changelog):
     desc = ""
     desc_tmpl = os.path.join(PROJECT_ROOT, "workshop_description.txt")
     if os.path.exists(desc_tmpl):
         with open(desc_tmpl, "r") as f: desc = f.read()
+    
     included, required = get_mod_categories()
+    
+    # Discovery: Transitive Dependencies
+    print(f"🔍 Analyzing transitive dependencies for {len(included)} included mods...")
+    included_ids = {m['id'] for m in included}
+    required_ids = {m['id'] for m in required}
+    
+    # Use API first, then Scrape for each included mod
+    transitive_ids = set()
+    for mid in included_ids:
+        # 1. Try Scrape (More reliable for Required Items section)
+        found = scrape_required_items(mid)
+        # 2. Add only if not already in our lists
+        for fid in found:
+            if fid not in included_ids and fid not in required_ids:
+                transitive_ids.add(fid)
+    
+    if transitive_ids:
+        print(f"📦 Found {len(transitive_ids)} transitive dependencies. Resolving names...")
+        trans_details = get_workshop_details(list(transitive_ids))
+        for td in trans_details:
+            tid = td.get("publishedfileid")
+            tname = td.get("title", f"Mod {tid}")
+            required.append({"id": tid, "name": f"{tname} (Transitive Dependency)"})
+
+    # 1. Included Content
     content_list = generate_content_list(included)
     desc = desc.replace("{{INCLUDED_CONTENT}}", content_list)
+    
+    # 2. Required Dependencies
     if required:
         dep_text = "\n[b]Required Mod Dependencies:[/b]\n"
-        for mod in sorted(required, key=lambda x: x['name']):
+        # Sort by name, then deduplicate just in case
+        unique_reqs = {r['id']: r for r in required}.values()
+        for mod in sorted(unique_reqs, key=lambda x: x['name']):
             dep_text += f" • [url=https://steamcommunity.com/sharedfiles/filedetails/?id={mod['id']}]{mod['name']}[/url]\n"
     else: dep_text = "None."
+    
     desc = desc.replace("{{MOD_DEPENDENCIES}}", dep_text)
+    
     config = get_workshop_config()
     tags_vdf = "".join([f'        "{i}" "{t}"\n' for i, t in enumerate(config["tags"])])
     vdf = f"""
@@ -165,10 +221,12 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
 """
     vdf_path = os.path.join(HEMTT_OUT, "upload.vdf")
     with open(vdf_path, "w") as f: f.write(vdf.strip())
+    
     if not os.getenv("PYTEST_CURRENT_TEST"):
         desc_out = os.path.join(PROJECT_ROOT, "workshop_description_final.txt")
         with open(desc_out, "w") as f: f.write(desc)
     else: desc_out = "workshop_description_final.txt"
+    
     return vdf_path, desc_out
 
 def main():
@@ -181,15 +239,17 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--offline", action="store_true", help="Generate description/VDF but skip Steam upload")
     args = parser.parse_args()
-    print_steam_info()
+
     cur_v, _ = get_current_version()
     print(f"Current version: {cur_v}")
+    
     choice = 'n'
     if args.patch: choice = 'p'
     elif args.minor: choice = 'm'
     elif args.major: choice = 'major'
     elif args.none: choice = 'n'
     elif not args.yes: choice = input("Bump version? [p]atch/[m]inor/[M]ajor/[n]one: ").lower()
+
     new_v = cur_v
     if choice in ['p', 'm', 'major']:
         part = "patch"
@@ -199,20 +259,22 @@ def main():
         if not args.dry_run:
             subprocess.run(["git", "add", VERSION_FILE], check=True)
             subprocess.run(["git", "commit", "-S", "-m", f"chore: bump version to {new_v}"], check=True)
+
     print(f"Running Robust Release Build (v{new_v})...")
     subprocess.run(["bash", "build.sh", "release"], check=True)
+
     ws_config = get_workshop_config()
     workshop_id = ws_config["id"]
     if (not workshop_id or workshop_id == "0") and not args.dry_run and not args.offline:
         workshop_id = input("Enter Workshop ID to update: ").strip()
+
     vdf_path, desc_path = create_vdf("107410", workshop_id, STAGING_DIR, "Release v" + new_v)
+    
     if args.offline:
         print(f"\n[OFFLINE] Final Workshop description generated at: {desc_path}")
         print("[OFFLINE] VDF generated at: " + vdf_path)
         return
-    if args.dry_run:
-        print(f"\n[DRY-RUN] VDF generated at: {vdf_path}")
-        return
+
     print("\n--- Steam Workshop Upload ---")
     username = os.getenv("STEAM_USERNAME") or input("Steam Username: ").strip()
     cmd = ["steamcmd", "+login", username, "+workshop_build_item", vdf_path, "validate", "+quit"]
@@ -225,4 +287,5 @@ def main():
     except Exception as e:
         print(f"Error: {e}"); sys.exit(1)
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
