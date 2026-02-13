@@ -255,8 +255,10 @@ def main():
     try:
         subprocess.run(cmd, check=True)
         print("\n✅ Mod updated on Workshop.")
-    tag_name = f"v{new_v}"
-    subprocess.run(["git", "tag", "-s", tag_name, "-m", f"Release {new_v}", "-f"], check=True)
-    subprocess.run(["git", "push", "origin", "main", "--tags", "-f"], check=False)
+        tag_name = f"v{new_v}"
+        subprocess.run(["git", "tag", "-s", tag_name, "-m", f"Release {new_v}", "-f"], check=True)
+        subprocess.run(["git", "push", "origin", "main", "--tags", "-f"], check=False)
+    except Exception as e:
+        print(f"Error: {e}"); sys.exit(1)
 
 if __name__ == "__main__": main()
