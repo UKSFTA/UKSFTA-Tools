@@ -23,7 +23,16 @@ except ImportError:
     rprint = print
 
 # --- CONFIGURATION ---
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Try to find the project root by looking for .hemtt/project.toml or mods.lock
+def resolve_project_root():
+    current = os.getcwd()
+    # Check current directory first (most common for release.py execution)
+    if os.path.exists(os.path.join(current, ".hemtt", "project.toml")) or os.path.exists(os.path.join(current, "mod_sources.txt")):
+        return current
+    # Fallback to script location parent
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+PROJECT_ROOT = resolve_project_root()
 HEMTT_OUT = os.path.join(PROJECT_ROOT, ".hemttout")
 STAGING_DIR = os.path.join(HEMTT_OUT, "release")
 PROJECT_TOML = os.path.join(PROJECT_ROOT, ".hemtt", "project.toml")
