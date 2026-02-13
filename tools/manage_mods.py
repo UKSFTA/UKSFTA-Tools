@@ -187,20 +187,25 @@ def get_workshop_cache_path():
         if os.path.exists(p): return p
     return None
 
-def sync_mods(resolved_info):
+def sync_mods(resolved_info, dry_run=False):
     if os.path.exists(LOCK_FILE):
         with open(LOCK_FILE, "r") as f:
             lock_data = json.load(f); lock_mods = lock_data.get("mods", {})
     else: lock_mods = {}
+    
     current_mods = {}
     impact_report = {"added": [], "removed": [], "total_size": 0, "added_size": 0}
     base_workshop_path = get_workshop_cache_path()
+    
     if not base_workshop_path:
         if "pytest" in sys.modules: base_workshop_path = "/tmp/workshop_mock"; os.makedirs(base_workshop_path, exist_ok=True)
         else: print("Error: Workshop cache not found."); sys.exit(1)
-    os.makedirs(ADDONS_DIR, exist_ok=True)
-    if os.path.exists(KEYS_DIR): shutil.rmtree(KEYS_DIR)
-    os.makedirs(KEYS_DIR, exist_ok=True)
+
+    if not dry_run:
+        os.makedirs(ADDONS_DIR, exist_ok=True)
+        if os.path.exists(KEYS_DIR): shutil.rmtree(KEYS_DIR)
+        os.makedirs(KEYS_DIR, exist_ok=True)
+
     for mid, info in resolved_info.items():
         is_new = mid not in lock_mods
         mod_path = os.path.join(base_workshop_path, mid)
@@ -219,10 +224,16 @@ def sync_mods(resolved_info):
             impact_report["added"].append({"name": info["name"], "id": mid, "size": mod_size, "deps": [d["name"] for d in info["dependencies"]]})
 
         if current_ts == locked_ts and files_exist:
-            print(f"--- Mod up to date: {info['name']} (v{current_ts}) ---")
+            if not dry_run: print(f"--- Mod up to date: {info['name']} (v{current_ts}) ---")
             current_mods[mid] = locked_info; continue
+            
         if not os.path.exists(mod_path):
             print(f"Warning: Mod {info['name']} ({mid}) missing from cache."); continue
+            
+        if dry_run:
+            print(f"--- [DRY-RUN] Would sync: {info['name']} (v{current_ts}) ---")
+            continue
+
         print(f"--- Syncing: {info['name']} (v{current_ts}) ---")
         current_mods[mid] = {"files": [], "name": info["name"], "dependencies": info["dependencies"], "updated": current_ts}
         for root, _, files in os.walk(mod_path):
@@ -230,14 +241,20 @@ def sync_mods(resolved_info):
                 if file.lower().endswith(".pbo"):
                     dest = os.path.join(ADDONS_DIR, file); shutil.copy2(os.path.join(root, file), dest)
                     os.utime(dest, None); current_mods[mid]["files"].append(os.path.relpath(dest))
+
     for old_mid in list(lock_mods.keys()):
         if old_mid not in resolved_info:
-            print(f"--- Cleaning up Mod ID: {old_mid} ---")
             impact_report["removed"].append(lock_mods[old_mid].get("name", old_mid))
-            for rel in lock_mods[old_mid].get("files", []):
-                if os.path.exists(rel): os.remove(rel)
-    with open(LOCK_FILE, "w") as f: json.dump({"mods": current_mods}, f, indent=2)
-    sync_hemtt_launch(set(resolved_info.keys()))
+            if dry_run: print(f"--- [DRY-RUN] Would clean up Mod ID: {old_mid} ---")
+            else:
+                print(f"--- Cleaning up Mod ID: {old_mid} ---")
+                for rel in lock_mods[old_mid].get("files", []):
+                    if os.path.exists(rel): os.remove(rel)
+
+    if not dry_run:
+        with open(LOCK_FILE, "w") as f: json.dump({"mods": current_mods}, f, indent=2)
+        sync_hemtt_launch(set(resolved_info.keys()))
+        
     return impact_report
 
 def sync_hemtt_launch(mod_ids):
@@ -259,14 +276,18 @@ def sync_hemtt_launch(mod_ids):
 if __name__ == "__main__":
     load_env(); parser = argparse.ArgumentParser(description="UKSFTA Mod Manager")
     parser.add_argument("command", nargs='?', default="sync", choices=["sync", "identify"])
-    parser.add_argument("--offline", action="store_true"); args = parser.parse_args()
+    parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate sync and preview Discord notification")
+    args = parser.parse_args()
+    
+    if args.command == "identify": identify_existing_pbos(); sys.exit(0)
     initial_mods = get_mod_ids_from_file(); ignored_ids = get_ignored_ids_from_file()
     try:
         resolved_info = {}
         if initial_mods:
             resolved_info = resolve_dependencies(initial_mods, ignored_ids)
             is_offline = args.offline or os.getenv("UKSFTA_OFFLINE") == "1"
-            if not is_offline:
+            if not is_offline and not args.dry_run:
                 lock_data = {"mods": {}}
                 if os.path.exists(LOCK_FILE):
                     with open(LOCK_FILE, "r") as f: lock_data = json.load(f)
@@ -276,12 +297,19 @@ if __name__ == "__main__":
                     if info["updated"] != locked_mod.get("updated", "0") or not all(os.path.exists(f) for f in locked_mod.get("files", [])):
                         needs_download.append(mid)
                 if needs_download: run_steamcmd(needs_download)
+            elif args.dry_run: print("\n[!] Dry-Run Mode: Simulating impact and notification...")
             else: print("\n[!] Offline Mode: Syncing from cache only.")
-        impact = sync_mods(resolved_info)
-        if (impact["added"] or impact["removed"]) and not args.offline:
+            
+        impact = sync_mods(resolved_info, dry_run=args.dry_run)
+        
+        if (impact["added"] or impact["removed"]):
             notifier = os.path.join(PROJECT_ROOT, "tools", "notify_discord.py")
             if os.path.exists(notifier):
-                subprocess.run([sys.executable, notifier, "--type", "update", "--impact", json.dumps(impact)])
-        print("\nSuccess: Workspace synced.")
+                cmd = [sys.executable, notifier, "--type", "update", "--impact", json.dumps(impact)]
+                if args.dry_run: cmd.append("--dry-run")
+                subprocess.run(cmd)
+                
+        if not args.dry_run: print("\nSuccess: Workspace synced.")
+        else: print("\n✨ Dry-run verification complete.")
     except Exception as e:
         print(f"\nError: {e}"); sys.exit(1)
