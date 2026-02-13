@@ -5,7 +5,6 @@ import sys
 import json
 import subprocess
 import argparse
-import getpass
 from pathlib import Path
 
 # --- CONFIGURATION ---
@@ -54,10 +53,21 @@ def add_to_inventory(name, host, dry_run=False):
     with open(INVENTORY_PATH, "w") as f: json.dump(data, f, indent=4)
     print(f"✅ Added {name} ({host}) to inventory.")
 
-def setup_node(name, host, initial_user, dry_run=False):
+def setup_node(connection_str, name=None, dry_run=False):
     ensure_dirs()
     key_path = generate_managed_key()
     pub_key_path = key_path.with_suffix(".pub")
+
+    # Parse user@host
+    if "@" in connection_str:
+        initial_user, host = connection_str.split("@", 1)
+    else:
+        initial_user = "root"
+        host = connection_str
+    
+    # Auto-generate name if not provided
+    if not name:
+        name = host
 
     print(f"\n--- Phase 1: Establish Initial Access ({host}) ---")
     if dry_run:
@@ -95,13 +105,16 @@ def setup_node(name, host, initial_user, dry_run=False):
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Remote Node Manager")
     subparsers = parser.add_subparsers(dest="command")
+    
     setup_p = subparsers.add_parser("setup", help="Onboard a new VPS node")
-    setup_p.add_argument("name", help="Logical name for server")
-    setup_p.add_argument("host", help="IP or domain")
-    setup_p.add_argument("--user", default="root", help="Initial user")
+    setup_p.add_argument("host", help="Target host (format: [user@]host)")
+    setup_p.add_argument("name", nargs="?", help="Logical name for server (optional, defaults to host)")
     setup_p.add_argument("--dry-run", action="store_true", help="Simulate setup")
+    
     args = parser.parse_args()
-    if args.command == "setup": setup_node(args.name, args.host, args.user, dry_run=args.dry_run)
-    else: parser.print_help()
+    if args.command == "setup":
+        setup_node(args.host, args.name, dry_run=args.dry_run)
+    else:
+        parser.print_help()
 
 if __name__ == "__main__": main()

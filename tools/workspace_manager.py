@@ -121,6 +121,7 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]generate-docs    [/]", "[dim]Auto-generate API Manual from SQF headers[/]")
     prod_table.add_row("[bold cyan]convert          [/]", "[dim]Optimize media for Arma (WAV/PNG -> OGG/PAA)[/]")
     prod_table.add_row("[bold cyan]workshop-tags    [/]", "[dim]List all valid Arma 3 Steam Workshop tags[/]")
+    prod_table.add_row("[bold cyan]remote setup     [/]", "[dim]Onboard VPS: remote setup user@host [name][/]")
     prod_table.add_row("[bold cyan]remote           [/]", "[dim]Manage distributed VPS nodes and remote DevOps[/]")
     console.print(ws_table); console.print(intel_table); console.print(audit_table); console.print(prod_table)
     console.print("\n[bold]Tip:[/bold] Run [cyan]./tools/workspace_manager.py <command> --help[/cyan] for detailed options and examples.\n")
