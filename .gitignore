@@ -37,3 +37,6 @@ __pycache__/
 Thumbs.db
 all_releases/*.zip
 all_releases/*.zip
+
+# DevOps Artifacts
+UNIT_HEALTH_REPORT.md

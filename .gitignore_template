@@ -40,3 +40,6 @@ tools/
 # System
 .DS_Store
 Thumbs.db
+
+# DevOps Artifacts
+UNIT_HEALTH_REPORT.md
