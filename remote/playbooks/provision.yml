@@ -46,6 +46,11 @@
         state: present
       ignore_errors: yes
 
+    - name: Install Python dependencies
+      pip:
+        name: [rich, requests]
+        executable: pip3
+
     - name: Check if HEMTT is installed
       stat:
         path: /usr/local/bin/hemtt

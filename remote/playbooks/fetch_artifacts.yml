@@ -1,0 +1,10 @@
+---
+- name: Fetch Build Artifacts from Remote
+  hosts: all
+  tasks:
+    - name: Pull all_releases folder
+      ansible.posix.synchronize:
+        mode: pull
+        src: "/opt/uksfta/workspace/all_releases/"
+        dest: "../../all_releases/"
+        recursive: yes

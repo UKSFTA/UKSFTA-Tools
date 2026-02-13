@@ -1,0 +1,20 @@
+---
+- name: Monitor Production Node Health
+  hosts: all
+  tasks:
+    - name: Check Disk Space
+      command: df -h /
+      register: disk_info
+      changed_when: false
+
+    - name: Check System Uptime
+      command: uptime
+      register: uptime_info
+      changed_when: false
+
+    - name: Output Stats
+      debug:
+        msg: 
+          - "--- {{ inventory_hostname }} ---"
+          - "Disk: {{ disk_info.stdout_lines[1] }}"
+          - "Uptime: {{ uptime_info.stdout }}"

@@ -57,6 +57,38 @@ def is_node_provisioned(host):
         return "OK" in res.stdout
     except: return False
 
+def run_ansible(playbook_name, node=None, extra_vars=None):
+    hosts = get_inventory()
+    if not hosts: return False
+    
+    playbook = REMOTE_ROOT / "playbooks" / playbook_name
+    ini_path = Path("/tmp/uksfta_temp_inventory.ini")
+    
+    valid_count = 0
+    with open(ini_path, "w") as f:
+        f.write("[production_nodes]\n")
+        for name, data in hosts.items():
+            if name == "example_vps" or "ansible_ssh_private_key_file" not in data: continue
+            f.write(f"{name} ansible_host={data['ansible_host']} ansible_user={data['ansible_user']} ansible_ssh_private_key_file={data['ansible_ssh_private_key_file']}\n")
+            valid_count += 1
+
+    if valid_count == 0: return False
+
+    env = os.environ.copy()
+    env["ANSIBLE_CONFIG"] = str(REMOTE_ROOT / "ansible.cfg")
+    
+    ansible_cmd = ["ansible-playbook", "-i", str(ini_path), str(playbook)]
+    if node: ansible_cmd.extend(["--limit", node])
+    if extra_vars:
+        ev_str = " ".join([f"{k}={v}" for k, v in extra_vars.items()])
+        ansible_cmd.extend(["--extra-vars", ev_str])
+    
+    try:
+        res = subprocess.run(ansible_cmd, cwd=str(REMOTE_ROOT.parent), env=env)
+        return res.returncode == 0
+    finally:
+        if ini_path.exists(): os.remove(ini_path)
+
 def cmd_list(args):
     hosts = get_inventory()
     if not hosts:
@@ -95,45 +127,28 @@ def cmd_test(args):
         status = "✅ CONNECTED" if res else "❌ FAILED"
         print(f" • {name:<15} ({host}): {status}")
 
-def run_ansible(playbook_name, node=None, extra_vars=None):
-    hosts = get_inventory()
-    if not hosts: return False
-    
-    playbook = REMOTE_ROOT / "playbooks" / playbook_name
-    ini_path = Path("/tmp/uksfta_temp_inventory.ini")
-    
-    with open(ini_path, "w") as f:
-        f.write("[production_nodes]\n")
-        for name, data in hosts.items():
-            if name == "example_vps" or "ansible_ssh_private_key_file" not in data: continue
-            f.write(f"{name} ansible_host={data['ansible_host']} ansible_user={data['ansible_user']} ansible_ssh_private_key_file={data['ansible_ssh_private_key_file']}\n")
-
-    env = os.environ.copy()
-    env["ANSIBLE_CONFIG"] = str(REMOTE_ROOT / "ansible.cfg")
-    
-    ansible_cmd = ["ansible-playbook", "-i", str(ini_path), str(playbook)]
-    if node: ansible_cmd.extend(["--limit", node])
-    if extra_vars:
-        ev_str = " ".join([f"{k}={v}" for k, v in extra_vars.items()])
-        ansible_cmd.extend(["--extra-vars", ev_str])
-    
-    try:
-        res = subprocess.run(ansible_cmd, cwd=str(REMOTE_ROOT.parent), env=env)
-        return res.returncode == 0
-    finally:
-        if ini_path.exists(): os.remove(ini_path)
-
 def cmd_provision(args):
     print(f"🚀 Provisioning software stack on: {args.node if args.node else 'all'}")
     run_ansible("provision.yml", node=args.node)
+
+def cmd_sync_secrets(args):
+    print(f"🔐 Synchronizing secrets to: {args.node if args.node else 'all'}")
+    run_ansible("sync_secrets.yml", node=args.node)
+
+def cmd_fetch_artifacts(args):
+    print(f"📦 Fetching artifacts from: {args.node if args.node else 'all'}")
+    run_ansible("fetch_artifacts.yml", node=args.node)
+
+def cmd_monitor(args):
+    print(f"📊 Querying health stats from: {args.node if args.node else 'all'}")
+    run_ansible("monitor.yml", node=args.node)
 
 def cmd_run(args):
     hosts = get_inventory()
     if not hosts: return
     
     target_name = args.node
-    if target_name not in hosts:
-        # If no node specified or wrong, pick first OK node
+    if not target_name or target_name not in hosts:
         target_name = next((n for n, d in hosts.items() if is_node_provisioned(d['ansible_host'])), None)
         if not target_name:
             print("❌ Error: No available production nodes found.")
@@ -148,7 +163,6 @@ def cmd_run(args):
             print("❌ Synchronization failed. Aborting run.")
             return
 
-    # Execute remote command
     toolkit_cmd = " ".join(args.remote_args)
     print(f"🖥️  Executing on {target_name}: {toolkit_cmd}")
     
@@ -157,7 +171,6 @@ def cmd_run(args):
         f"{DEVOPS_USER}@{host}",
         f"cd {REMOTE_WORKSPACE} && ./tools/workspace_manager.py {toolkit_cmd}"
     ]
-    
     subprocess.run(ssh_cmd)
 
 def setup_node(connection_str, name=None, dry_run=False):
@@ -215,24 +228,30 @@ def main():
     setup_p = subparsers.add_parser("setup", help="Onboard a new VPS node")
     setup_p.add_argument("host", help="Target host ([user@]host)")
     setup_p.add_argument("name", nargs="?", help="Logical name")
-    setup_p.add_argument("--dry-run", action="store_true", help="Simulate setup")
+    setup_p.add_argument("--dry-run", action="store_true")
     
     subparsers.add_parser("list", help="List registered nodes")
     subparsers.add_parser("test", help="Test node connectivity")
+    subparsers.add_parser("monitor", help="Check remote resource health")
+    subparsers.add_parser("sync-secrets", help="Deploy .env and unit signing keys")
+    subparsers.add_parser("fetch-artifacts", help="Pull remote builds to local")
     
     prov_p = subparsers.add_parser("provision", help="Install production stack")
-    prov_p.add_argument("--node", help="Target specific node")
+    prov_p.add_argument("--node")
 
     run_p = subparsers.add_parser("run", help="Delegate command to remote node")
-    run_p.add_argument("--node", help="Target node name")
-    run_p.add_argument("--no-sync", action="store_true", help="Skip workspace sync before running")
-    run_p.add_argument("remote_args", nargs=argparse.REMAINDER, help="Arguments for workspace_manager.py on remote")
+    run_p.add_argument("--node")
+    run_p.add_argument("--no-sync", action="store_true")
+    run_p.add_argument("remote_args", nargs=argparse.REMAINDER)
 
     args = parser.parse_args()
     if args.command == "setup": setup_node(args.host, args.name, dry_run=args.dry_run)
     elif args.command == "list": cmd_list(args)
     elif args.command == "test": cmd_test(args)
     elif args.command == "provision": cmd_provision(args)
+    elif args.command == "monitor": cmd_monitor(args)
+    elif args.command == "sync-secrets": cmd_sync_secrets(args)
+    elif args.command == "fetch-artifacts": cmd_fetch_artifacts(args)
     elif args.command == "run": cmd_run(args)
     else: parser.print_help()
 
