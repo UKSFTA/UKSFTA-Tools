@@ -136,10 +136,11 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     # Discovery: Transitive Dependencies
     print(f"🔍 Analyzing transitive dependencies for {len(included)} included mods...")
     transitive_ids = set()
+    ignored_app_ids = {"107410", "228800"} # Arma 3, Arma 3 Tools
     for mod in included:
         found = scrape_required_items(mod['id'])
         for fid in found:
-            if fid not in all_mentioned_ids:
+            if fid not in all_mentioned_ids and fid not in ignored_app_ids:
                 transitive_ids.add(fid)
     
     required_entries = []
