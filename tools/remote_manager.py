@@ -128,12 +128,16 @@ def cmd_provision(args):
         if ini_path.exists(): os.remove(ini_path)
         return
 
+    # Run from PROJECT_ROOT to keep relative key paths valid
+    env = os.environ.copy()
+    env["ANSIBLE_CONFIG"] = str(REMOTE_ROOT / "ansible.cfg")
+    
     ansible_cmd = ["ansible-playbook", "-i", str(ini_path), str(playbook)]
     if args.node:
         ansible_cmd.extend(["--limit", args.node])
     
     try:
-        subprocess.run(ansible_cmd)
+        subprocess.run(ansible_cmd, cwd=str(REMOTE_ROOT.parent), env=env)
     finally:
         if ini_path.exists(): os.remove(ini_path)
 

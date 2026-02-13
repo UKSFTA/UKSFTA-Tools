@@ -5,7 +5,7 @@
   tasks:
     - name: Install baseline dependencies
       apt:
-        name: [git, zip, unzip, curl, python3-pip, lib32gcc-s1, lib32stdc++6, software-properties-common]
+        name: [git, zip, unzip, curl, python3-pip, lib32gcc-s1, lib32stdc++6, software-properties-common, python3-debian, debconf-utils]
         update_cache: yes
 
     - name: Setup UKSFTA Directory Structure
@@ -16,29 +16,45 @@
         mode: '0755'
       loop: [tools, workspace, cache]
 
+    - name: Enable i386 architecture for SteamCMD
+      command: dpkg --add-architecture i386
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Enable non-free and contrib for SteamCMD (Debian)
+      apt_repository:
+        repo: "deb http://deb.debian.org/debian {{ ansible_facts['distribution_release'] }} main contrib non-free"
+        state: present
+      when: ansible_facts['os_family'] == 'Debian' and ansible_facts['distribution'] != 'Ubuntu'
+
+    - name: Pre-accept SteamCMD license
+      debconf:
+        name: steamcmd
+        question: steam/question
+        value: 'I AGREE'
+        vtype: select
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Update apt cache after architecture and repo change
+      apt:
+        update_cache: yes
+      when: ansible_facts['os_family'] == 'Debian'
+
     - name: Install SteamCMD
       apt:
         name: steamcmd
         state: present
-      # steamcmd is often in non-free/multiverse
       ignore_errors: yes
 
-    - name: Check for HEMTT
-      command: hemtt --version
-      register: hemtt_check
-      ignore_errors: yes
-      changed_when: false
+    - name: Check if HEMTT is installed
+      stat:
+        path: /usr/local/bin/hemtt
+      register: hemtt_binary
 
-    - name: Download HEMTT if missing
-      get_url:
-        url: "https://github.com/mharis001/hemtt/releases/latest/download/hemtt-x86_64-unknown-linux-gnu.zip"
-        dest: "/tmp/hemtt.zip"
-      when: hemtt_check.rc != 0
-
-    - name: Install HEMTT
-      unarchive:
-        src: "/tmp/hemtt.zip"
-        dest: "/usr/local/bin"
-        remote_src: yes
-        mode: '0755'
-      when: hemtt_check.rc != 0
+    - name: Install HEMTT via official script
+      shell: "curl -sSf https://hemtt.dev/install.sh | sh"
+      args:
+        creates: /usr/local/bin/hemtt
+      when: not hemtt_binary.stat.exists
+      environment:
+        INSTALL_DIR: "/usr/local/bin"
