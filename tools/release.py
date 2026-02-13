@@ -134,21 +134,24 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     content_list = ""
     if included:
         for mod in included:
-            content_list += f" • {mod['name']} (Workshop ID: {mod['id']})\n"
+            content_list += f" [*] {mod['name']} (Workshop ID: {mod['id']})\n"
     else:
         pbos = glob.glob(os.path.join(STAGING_DIR, "addons", "*.pbo"))
-        if not pbos: content_list = "No components found."
+        if not pbos: content_list = " [*] No components found."
         else:
-            content_list = "\n[b]Included Components:[/b]\n"
-            for p in sorted(pbos): content_list += f" • {os.path.basename(p)}\n"
+            content_list = "\n[b]Included Components:[/b]\n[list]\n"
+            for p in sorted(pbos): content_list += f" [*] {os.path.basename(p)}\n"
+            content_list += "[/list]\n"
     desc = desc.replace("{{INCLUDED_CONTENT}}", content_list)
     
     # 2. Requirements (Transitive dependencies bundled in the repack)
     if transitive_requirements:
         dep_text = "[b]Repacked Dependencies:[/b]\n"
         dep_text += "[i]The following items are already included in this modpack and do not require separate subscription:[/i]\n"
+        dep_text += "[list]\n"
         for mod in sorted(transitive_requirements, key=lambda x: x['name']):
-            dep_text += f" • {mod['name']} (Workshop ID: {mod['id']})\n"
+            dep_text += f" [*] {mod['name']} (Workshop ID: {mod['id']})\n"
+        dep_text += "[/list]\n"
     else:
         dep_text = "None. (All core requirements handled by unit launcher)"
     
