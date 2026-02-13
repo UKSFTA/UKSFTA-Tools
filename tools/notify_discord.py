@@ -76,7 +76,10 @@ def main():
         if impact["added"]:
             added_list = ""
             for mod in impact["added"]:
-                added_list += f" • **{mod['name']}** ({format_size(mod['size'])})\n"
+                name_str = f"**{mod['name']}**"
+                if mod.get("is_dependency"):
+                    name_str += " [italic](Dependency)[/italic]"
+                added_list += f" • {name_str} ({format_size(mod['size'])})\n"
                 if mod["deps"]:
                     deps = ", ".join(mod["deps"][:5]) + ("..." if len(mod["deps"]) > 5 else "")
                     added_list += f"   [dim]Deps: {deps}[/dim]\n"

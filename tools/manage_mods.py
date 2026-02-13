@@ -208,6 +208,7 @@ def sync_mods(resolved_info, dry_run=False):
 
     for mid, info in resolved_info.items():
         is_new = mid not in lock_mods
+        is_dep = mid not in initial_mods
         mod_path = os.path.join(base_workshop_path, mid)
         locked_info = lock_mods.get(mid, {})
         locked_ts = locked_info.get("updated", "0"); current_ts = info.get("updated", "1")
@@ -221,7 +222,13 @@ def sync_mods(resolved_info, dry_run=False):
         impact_report["total_size"] += mod_size
         if is_new:
             impact_report["added_size"] += mod_size
-            impact_report["added"].append({"name": info["name"], "id": mid, "size": mod_size, "deps": [d["name"] for d in info["dependencies"]]})
+            impact_report["added"].append({
+                "name": info["name"], 
+                "id": mid, 
+                "size": mod_size, 
+                "deps": [d["name"] for d in info["dependencies"]],
+                "is_dependency": is_dep
+            })
 
         if current_ts == locked_ts and files_exist:
             if not dry_run: print(f"--- Mod up to date: {info['name']} (v{current_ts}) ---")
