@@ -31,81 +31,77 @@ def generate_managed_key():
         ], check=True)
     return key_path
 
-def add_to_inventory(name, host):
+def add_to_inventory(name, host, dry_run=False):
     data = {"production_nodes": {"hosts": {}}}
     if INVENTORY_PATH.exists():
-        with open(INVENTORY_PATH, "r") as f:
-            data = json.load(f)
+        try:
+            with open(INVENTORY_PATH, "r") as f: data = json.load(f)
+        except: pass
     
-    data["production_nodes"]["hosts"][name] = {
+    node_data = {
         "ansible_host": host,
         "ansible_user": DEVOPS_USER,
         "ansible_ssh_private_key_file": f"remote/keys/{SSH_KEY_NAME}"
     }
     
-    with open(INVENTORY_PATH, "w") as f:
-        json.dump(data, f, indent=4)
+    if dry_run:
+        print("\n--- [DRY-RUN] Inventory Update ---")
+        print(f"Node: {name} ({host})")
+        print(json.dumps(node_data, indent=4))
+        return
+
+    data["production_nodes"]["hosts"][name] = node_data
+    with open(INVENTORY_PATH, "w") as f: json.dump(data, f, indent=4)
     print(f"✅ Added {name} ({host}) to inventory.")
 
-def setup_node(name, host, initial_user):
+def setup_node(name, host, initial_user, dry_run=False):
     ensure_dirs()
     key_path = generate_managed_key()
     pub_key_path = key_path.with_suffix(".pub")
 
-    print(f"
---- Phase 1: Establish Initial Access ({host}) ---")
-    print(f"Connecting as {initial_user}... You will be prompted for the password.")
-    
-    # Copy the local user's pubkey so we can run Ansible
-    # We use subprocess.run to allow the user to interact with the password prompt
-    try:
-        subprocess.run(["ssh-copy-id", "-o", "ConnectTimeout=10", f"{initial_user}@{host}"], check=True)
-    except subprocess.CalledProcessError:
-        print("❌ Failed to copy SSH key. Ensure initial user has password auth enabled.")
-        return
+    print(f"\n--- Phase 1: Establish Initial Access ({host}) ---")
+    if dry_run:
+        print(f"[DRY-RUN] Would run: ssh-copy-id -o ConnectTimeout=10 {initial_user}@{host}")
+    else:
+        print(f"Connecting as {initial_user}... You will be prompted for the password.")
+        try:
+            subprocess.run(["ssh-copy-id", "-o", "ConnectTimeout=10", f"{initial_user}@{host}"], check=True)
+        except subprocess.CalledProcessError:
+            print("❌ Failed to copy SSH key.")
+            return
 
-    print("
---- Phase 2: User Provisioning via Ansible ---")
-    # Run the setup playbook
-    # We use the current user's default SSH key for this initial run
+    print("\n--- Phase 2: User Provisioning via Ansible ---")
     playbook = REMOTE_ROOT / "playbooks" / "setup_node.yml"
     ansible_cmd = [
-        "ansible-playbook", 
-        "-i", f"{host},", 
-        "-u", initial_user, 
-        str(playbook),
+        "ansible-playbook", "-i", f"{host},", "-u", initial_user, str(playbook),
         "--extra-vars", f"devops_user={DEVOPS_USER} pub_key_path={pub_key_path}"
     ]
     
-    res = subprocess.run(ansible_cmd)
-    
-    if res.returncode == 0:
-        print("
---- Phase 3: Finalizing Inventory ---")
-        add_to_inventory(name, host)
-        print(f"
-✨ Node {name} is now production-ready!")
-        print(f"Dedicated User: {DEVOPS_USER}")
-        print(f"Access Method: Managed SSH Key ({SSH_KEY_NAME})")
+    if dry_run:
+        print(f"[DRY-RUN] Would execute: {' '.join(ansible_cmd)}")
+        success = True
     else:
-        print("❌ Provisioning failed during Ansible execution.")
+        res = subprocess.run(ansible_cmd)
+        success = (res.returncode == 0)
+    
+    if success:
+        print("\n--- Phase 3: Finalizing Inventory ---")
+        add_to_inventory(name, host, dry_run=dry_run)
+        msg = "✨ [DRY-RUN] Verification complete." if dry_run else f"✨ Node {name} is now production-ready!"
+        print(f"\n{msg}")
+    else:
+        print("❌ Provisioning failed.")
 
 def main():
     parser = argparse.ArgumentParser(description="UKSFTA Remote Node Manager")
     subparsers = parser.add_subparsers(dest="command")
-
-    # Setup command
     setup_p = subparsers.add_parser("setup", help="Onboard a new VPS node")
-    setup_p.add_argument("name", help="Logical name for the server (e.g. uk-prod-1)")
-    setup_p.add_argument("host", help="IP address or domain of the VPS")
-    setup_p.add_argument("--user", default="root", help="Initial user for setup (default: root)")
-
+    setup_p.add_argument("name", help="Logical name for server")
+    setup_p.add_argument("host", help="IP or domain")
+    setup_p.add_argument("--user", default="root", help="Initial user")
+    setup_p.add_argument("--dry-run", action="store_true", help="Simulate setup")
     args = parser.parse_args()
+    if args.command == "setup": setup_node(args.name, args.host, args.user, dry_run=args.dry_run)
+    else: parser.print_help()
 
-    if args.command == "setup":
-        setup_node(args.name, args.host, args.user)
-    else:
-        parser.print_help()
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()

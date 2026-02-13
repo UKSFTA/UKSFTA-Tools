@@ -16,11 +16,24 @@ def format_size(size_bytes):
     s = round(size_bytes / p, 2)
     return "%s %s" % (s, size_name[i])
 
-def send_discord_notification(webhook_url, content=None, embed=None):
-    if not webhook_url: return
+def send_discord_notification(webhook_url, content=None, embed=None, dry_run=False):
     payload = {}
     if content: payload["content"] = content
     if embed: payload["embeds"] = [embed]
+    
+    if dry_run:
+        print("\n--- 🕵️ DISCORD DRY-RUN PREVIEW ---")
+        if HAS_RICH:
+            from rich.syntax import Syntax
+            json_str = json.dumps(payload, indent=2)
+            syntax = Syntax(json_str, "json", theme="monokai", line_numbers=True)
+            Console().print(syntax)
+        else:
+            print(json.dumps(payload, indent=2))
+        print("---------------------------------\n")
+        return
+
+    if not webhook_url: return
     try:
         req = urllib.request.Request(webhook_url, data=json.dumps(payload).encode('utf-8'), headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req): pass
@@ -32,10 +45,11 @@ def main():
     parser.add_argument("--type", choices=["update", "release", "alert"], default="update")
     parser.add_argument("--title")
     parser.add_argument("--impact", help="JSON string of modpack impact report")
+    parser.add_argument("--dry-run", action="store_true", help="Preview notification without sending")
     args = parser.parse_args()
 
     webhook_url = os.getenv("DISCORD_WEBHOOK")
-    if not webhook_url:
+    if not webhook_url and not args.dry_run:
         print("Skipping: DISCORD_WEBHOOK not set.")
         sys.exit(0)
 
@@ -71,8 +85,8 @@ def main():
         stats += f"**Total Modset Size:** {format_size(impact['total_size'])}"
         embed["fields"].append({"name": "📊 Resource Impact", "value": stats, "inline": True})
 
-        send_discord_notification(webhook_url, embed=embed)
-        print("✅ Impact notification sent.")
+        send_discord_notification(webhook_url, embed=embed, dry_run=args.dry_run)
+        if not args.dry_run: print("✅ Impact notification sent.")
         return
 
     # 2. Manual/Generic Logic
@@ -82,8 +96,8 @@ def main():
         if args.type == "release": color = 0x2ecc71
         elif args.type == "alert": color = 0xe74c3c
         embed = {"title": title, "description": args.message or "Update in progress.", "color": color, "footer": {"text": "UKSFTA DevOps"}, "timestamp": datetime.datetime.utcnow().isoformat()}
-        send_discord_notification(webhook_url, embed=embed)
-        print("✅ Manual notification sent.")
+        send_discord_notification(webhook_url, embed=embed, dry_run=args.dry_run)
+        if not args.dry_run: print("✅ Manual notification sent.")
         return
 
 if __name__ == "__main__":
