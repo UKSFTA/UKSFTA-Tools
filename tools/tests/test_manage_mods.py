@@ -42,15 +42,22 @@ class TestManageMods(unittest.TestCase):
                 self.assertIn("77777777", ignored)
                 self.assertNotIn("12345678", ignored)
 
-    @patch("manage_mods.get_workshop_metadata")
-    def test_resolve_dependencies_with_ignore(self, mock_meta):
-        # Setup mock metadata
+    @patch("manage_mods.get_bulk_metadata")
+    @patch("manage_mods.scrape_mod_metadata")
+    def test_resolve_dependencies_with_ignore(self, mock_scrape, mock_bulk):
+        # Setup mock metadata logic
         # 123 depends on 456
-        # 456 depends on 789
-        mock_meta.side_effect = [
-            {"name": "Mod 123", "dependencies": [{"id": "456", "name": "Mod 456"}]},
-            {"name": "Mod 456", "dependencies": [{"id": "789", "name": "Mod 789"}]},
-            {"name": "Mod 789", "dependencies": []}
+        # 456 depends on 789 (but 789 is in ignored list)
+        mock_bulk.return_value = {
+            "123": {"name": "Mod 123", "updated": "1", "dependencies": []},
+            "456": {"name": "Mod 456", "updated": "1", "dependencies": []}
+        }
+        
+        # Scraper provides the actual dependencies
+        mock_scrape.side_effect = [
+            {"name": "Mod 123", "dependencies": [{"id": "456", "name": "Mod 456"}], "updated": "1"},
+            {"name": "Mod 456", "dependencies": [{"id": "789", "name": "Mod 789"}], "updated": "1"},
+            {"name": "Mod 789", "dependencies": [], "updated": "1"}
         ]
         
         initial = {"123": "Tag"}
@@ -89,7 +96,6 @@ class TestManageMods(unittest.TestCase):
         }
         
         # Run sync with EMPTY resolved_info
-        # We need to bypass the workshop directory search for this test
         with patch("os.path.expanduser", return_value="/tmp"):
             with patch("os.makedirs"):
                 manage_mods.sync_mods({})
