@@ -71,23 +71,27 @@ def bump_version(part="patch"):
 
 def get_mod_categories():
     included = []
-    all_acknowledged = set()
-    if not os.path.exists(MOD_SOURCES_FILE): return included, all_acknowledged
+    ignored = set()
+    all_ack = set()
+    if not os.path.exists(MOD_SOURCES_FILE): return included, ignored, all_ack
     is_ignore_section = False
     with open(MOD_SOURCES_FILE, "r") as f:
-        content = f.read(); all_acknowledged.update(re.findall(r"(\d{8,})", content))
+        f_content = f.read(); all_ack.update(re.findall(r"(\d{8,})", f_content))
         f.seek(0)
         for line in f:
-            clean_line = line.strip()
-            if not clean_line or clean_line.startswith("#"): continue
-            if "[ignore]" in clean_line.lower(): is_ignore_section = True; continue
-            m = re.search(r"(\d{8,})", clean_line)
-            if m and not is_ignore_section:
-                mid = m.group(1); name = f"Mod {mid}"
-                if "#" in clean_line: name = clean_line.split("#", 1)[1].strip()
-                if "|" in name: parts = name.split("|"); name = f"{parts[1].strip()} ({parts[0].strip()})"
-                included.append({"id": mid, "name": name})
-    return included, all_acknowledged
+            cl = line.strip()
+            if not cl or cl.startswith("#"): continue
+            if "[ignore]" in cl.lower(): is_ignore_section = True; continue
+            m = re.search(r"(\d{8,})", cl)
+            if m:
+                mid = m.group(1)
+                if is_ignore_section: ignored.add(mid)
+                else:
+                    name = f"Mod {mid}"
+                    if "#" in cl: name = cl.split("#", 1)[1].strip()
+                    if "|" in name: parts = name.split("|"); name = f"{parts[1].strip()} ({parts[0].strip()})"
+                    included.append({"id": mid, "name": name})
+    return included, ignored, all_ack
 
 def create_vdf(app_id, workshop_id, content_path, changelog):
     desc = ""
@@ -95,27 +99,19 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     if os.path.exists(tmpl_path):
         with open(tmpl_path, "r") as f: desc = f.read()
     
-    included, all_acknowledged = get_mod_categories()
+    included, ignored, all_ack = get_mod_categories()
     
-    # Discovery: Truly New Dependencies Only
-    print(f"🔍 Analyzing dependencies for {len(included)} bundled mods...")
+    # Discovery: Check what else is being bundled
+    print(f"🔍 Analyzing dependencies for {len(included)} direct mods...")
     inc_ids = [m['id'] for m in included]
-    resolved = resolve_transitive_dependencies(inc_ids, all_acknowledged)
+    resolved = resolve_transitive_dependencies(inc_ids, all_ack)
     
-    # We ONLY include IDs that are NOT in mod_sources.txt (bundled or ignored)
-    all_required_ids = set()
-    for mid in resolved:
-        if mid not in all_acknowledged:
-            all_required_ids.add(mid)
+    # Any transitive dependency that is NOT ignored is INCLUDED in the repack
+    for mid, meta in resolved.items():
+        if mid not in inc_ids and mid not in ignored:
+            included.append({"id": mid, "name": f"{meta['name']} (Transitive)"})
 
-    # Resolution: Final Name Check for Truly New Dependencies
-    if all_required_ids:
-        unresolved_reqs = [rid for rid in all_required_ids if rid not in resolved]
-        if unresolved_reqs:
-            print(f"  🔍 Resolving names for {len(unresolved_reqs)} new transitive dependencies...")
-            resolved.update(get_bulk_metadata(unresolved_reqs))
-
-    # 1. Included Content (PLAIN TEXT)
+    # 1. Included Content (Repacked mods)
     content_list = ""
     if included:
         for mod in included:
@@ -128,19 +124,14 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
             for p in sorted(pbos): content_list += f" • {os.path.basename(p)}\n"
     desc = desc.replace("{{INCLUDED_CONTENT}}", content_list)
     
-    # 2. Required Dependencies (ONLY if truly new transitive deps found)
-    if all_required_ids:
-        dep_text = "This mod utilizes Steam's [b]Required Items[/b] feature. Please see the official list on the right.\n\n"
-        dep_text += "[b]Missing Dependency Checklist:[/b]\n"
-        for rid in sorted(list(all_required_ids)):
-            name = resolved.get(rid, {}).get('name', f"Mod {rid}")
-            dep_text += f" • {name} (Workshop ID: {rid})\n"
-    else:
-        dep_text = "None. (All core requirements handled by unit launcher)"
-    
+    # 2. Required Dependencies
+    # Per instructions: Ignored mods hidden, bundled dependencies hidden from VDF.
+    # We only show a note if there are truly external requirements.
+    # In our repack model, this is usually empty.
+    dep_text = "None. (All core requirements handled by unit launcher)"
     desc = desc.replace("{{MOD_DEPENDENCIES}}", dep_text)
     
-    # VDF Config
+    # Build VDF
     config = {"id": "0", "tags": ["Mod", "Addon"]}
     if os.path.exists(PROJECT_TOML):
         with open(PROJECT_TOML, "r") as f:
@@ -152,14 +143,6 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     
     tags_vdf = "".join([f'        "{i}" "{t}"\n' for i, t in enumerate(config["tags"])])
     
-    # Native Dependencies Block (ONLY for non-bundled, non-ignored mods)
-    deps_vdf = ""
-    if all_required_ids:
-        deps_vdf = '    "dependencies"\n    {\n'
-        for i, rid in enumerate(sorted(list(all_required_ids))):
-            deps_vdf += f'        "{i}" "{rid}"\n'
-        deps_vdf += '    }\n'
-
     vdf = f"""
 "workshopitem"
 {{
@@ -171,7 +154,7 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     "tags"
     {{
 {tags_vdf}    }}
-{deps_vdf}}}
+}}
 """
     vdf_path = os.path.join(HEMTT_OUT, "upload.vdf")
     os.makedirs(os.path.dirname(vdf_path), exist_ok=True)
