@@ -239,9 +239,22 @@ def main():
         print(f"\n[DRY-RUN] VDF: {vdf_p}")
         return
 
-    username = os.getenv("STEAM_USERNAME") or input("Steam Username: ").strip()
-    subprocess.run(["steamcmd", "+login", username, "+workshop_build_item", vdf_p, "validate", "+quit"], check=True)
-    print("\n✅ Mod updated on Workshop.")
+    username = os.getenv("STEAM_USERNAME")
+    password = os.getenv("STEAM_PASSWORD")
+    
+    if not username and not args.dry_run and not args.offline:
+        username = input("Steam Username: ").strip()
+
+    print("\n--- Steam Workshop Upload ---")
+    login_args = [username]
+    if password:
+        login_args.append(password)
+    
+    cmd = ["steamcmd", "+login"] + login_args + ["+workshop_build_item", vdf_p, "validate", "+quit"]
+    
+    try:
+        subprocess.run(cmd, check=True)
+        print("\n✅ Mod updated on Workshop.")
     tag_name = f"v{new_v}"
     subprocess.run(["git", "tag", "-s", tag_name, "-m", f"Release {new_v}", "-f"], check=True)
     subprocess.run(["git", "push", "origin", "main", "--tags", "-f"], check=False)
