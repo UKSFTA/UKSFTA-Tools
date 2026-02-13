@@ -190,6 +190,7 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
 }}
 """
     vdf_path = os.path.join(HEMTT_OUT, "upload.vdf")
+    os.makedirs(os.path.dirname(vdf_path), exist_ok=True)
     with open(vdf_path, "w") as f: f.write(vdf.strip())
     if not os.getenv("PYTEST_CURRENT_TEST"):
         desc_out = os.path.join(PROJECT_ROOT, "workshop_description_final.txt")
