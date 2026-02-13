@@ -47,6 +47,23 @@ def find_version_file():
 
 VERSION_FILE = find_version_file()
 
+def load_env():
+    # 1. Check local project .env
+    env_paths = [
+        os.path.join(PROJECT_ROOT, ".env"),
+        os.path.join(PROJECT_ROOT, "..", "UKSFTA-Tools", ".env")
+    ]
+    for env_path in env_paths:
+        if os.path.exists(env_path):
+            with open(env_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"): continue
+                    if "=" in line:
+                        parts = line.split("=", 1)
+                        if len(parts) == 2: os.environ[parts[0].strip()] = parts[1].strip()
+            return
+
 def get_current_version():
     if not VERSION_FILE or not os.path.exists(VERSION_FILE): return "0.0.0", (0, 0, 0)
     with open(VERSION_FILE, "r") as f: content = f.read()
@@ -171,6 +188,7 @@ def create_vdf(app_id, workshop_id, content_path, changelog):
     return vdf_path, desc_out
 
 def main():
+    load_env()
     parser = argparse.ArgumentParser(description="UKSFTA Release Tool")
     parser.add_argument("-p", "--patch", action="store_true", help="Bump patch")
     parser.add_argument("-m", "--minor", action="store_true", help="Bump minor")
