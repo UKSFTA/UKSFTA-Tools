@@ -57,7 +57,7 @@ def is_node_provisioned(host):
         return "OK" in res.stdout
     except: return False
 
-def run_ansible(playbook_name, node=None, extra_vars=None):
+def run_ansible(playbook_name, node=None, extra_vars=None, dry_run=False):
     hosts = get_inventory()
     if not hosts: return False
     
@@ -72,16 +72,22 @@ def run_ansible(playbook_name, node=None, extra_vars=None):
             f.write(f"{name} ansible_host={data['ansible_host']} ansible_user={data['ansible_user']} ansible_ssh_private_key_file={data['ansible_ssh_private_key_file']}\n")
             valid_count += 1
 
-    if valid_count == 0: return False
+    if valid_count == 0:
+        print("❌ No valid nodes found in inventory.")
+        return False
 
     env = os.environ.copy()
     env["ANSIBLE_CONFIG"] = str(REMOTE_ROOT / "ansible.cfg")
     
     ansible_cmd = ["ansible-playbook", "-i", str(ini_path), str(playbook)]
     if node: ansible_cmd.extend(["--limit", node])
+    if dry_run: ansible_cmd.append("--check")
     if extra_vars:
         ev_str = " ".join([f"{k}={v}" for k, v in extra_vars.items()])
         ansible_cmd.extend(["--extra-vars", ev_str])
+    
+    if dry_run:
+        print(f"--- [DRY-RUN] Executing: {' '.join(ansible_cmd)} ---")
     
     try:
         res = subprocess.run(ansible_cmd, cwd=str(REMOTE_ROOT.parent), env=env)
@@ -128,20 +134,24 @@ def cmd_test(args):
         print(f" • {name:<15} ({host}): {status}")
 
 def cmd_provision(args):
-    print(f"🚀 Provisioning software stack on: {args.node if args.node else 'all'}")
-    run_ansible("provision.yml", node=args.node)
+    target = args.node if args.node else 'all'
+    print(f"🚀 Provisioning software stack on: {target} {'[DRY-RUN]' if args.dry_run else ''}")
+    run_ansible("provision.yml", node=args.node, dry_run=args.dry_run)
 
 def cmd_sync_secrets(args):
-    print(f"🔐 Synchronizing secrets to: {args.node if args.node else 'all'}")
-    run_ansible("sync_secrets.yml", node=args.node)
+    target = args.node if args.node else 'all'
+    print(f"🔐 Synchronizing secrets to: {target} {'[DRY-RUN]' if args.dry_run else ''}")
+    run_ansible("sync_secrets.yml", node=args.node, dry_run=args.dry_run)
 
 def cmd_fetch_artifacts(args):
-    print(f"📦 Fetching artifacts from: {args.node if args.node else 'all'}")
-    run_ansible("fetch_artifacts.yml", node=args.node)
+    target = args.node if args.node else 'all'
+    print(f"📦 Fetching artifacts from: {target} {'[DRY-RUN]' if args.dry_run else ''}")
+    run_ansible("fetch_artifacts.yml", node=args.node, dry_run=args.dry_run)
 
 def cmd_monitor(args):
-    print(f"📊 Querying health stats from: {args.node if args.node else 'all'}")
-    run_ansible("monitor.yml", node=args.node)
+    target = args.node if args.node else 'all'
+    print(f"📊 Querying health stats from: {target} {'[DRY-RUN]' if args.dry_run else ''}")
+    run_ansible("monitor.yml", node=args.node, dry_run=args.dry_run)
 
 def cmd_run(args):
     hosts = get_inventory()
@@ -158,20 +168,25 @@ def cmd_run(args):
     host = target_data['ansible_host']
     
     if not args.no_sync:
-        print(f"🔄 Synchronizing workspace to {target_name}...")
-        if not run_ansible("sync_workspace.yml", node=target_name):
-            print("❌ Synchronization failed. Aborting run.")
-            return
+        print(f"🔄 Synchronizing workspace to {target_name} {'[DRY-RUN]' if args.dry_run else ''}...")
+        if not run_ansible("sync_workspace.yml", node=target_name, dry_run=args.dry_run):
+            if not args.dry_run:
+                print("❌ Synchronization failed. Aborting run.")
+                return
 
     toolkit_cmd = " ".join(args.remote_args)
-    print(f"🖥️  Executing on {target_name}: {toolkit_cmd}")
+    print(f"🖥️  Executing on {target_name}: {toolkit_cmd} {'[DRY-RUN]' if args.dry_run else ''}")
     
     ssh_cmd = [
         "ssh", "-i", str(REMOTE_ROOT.parent / target_data['ansible_ssh_private_key_file']),
         f"{DEVOPS_USER}@{host}",
         f"cd {REMOTE_WORKSPACE} && ./tools/workspace_manager.py {toolkit_cmd}"
     ]
-    subprocess.run(ssh_cmd)
+    
+    if args.dry_run:
+        print(f"[DRY-RUN] Would run via SSH: {' '.join(ssh_cmd)}")
+    else:
+        subprocess.run(ssh_cmd)
 
 def setup_node(connection_str, name=None, dry_run=False):
     ensure_dirs()
@@ -193,7 +208,7 @@ def setup_node(connection_str, name=None, dry_run=False):
         except subprocess.CalledProcessError: print("❌ Failed to copy SSH key."); return
 
     print("\n--- Phase 2: User Provisioning via Ansible ---")
-    success = run_ansible("setup_node.yml", node=None, extra_vars={"devops_user": DEVOPS_USER, "pub_key_path": str(pub_key_path)}) if not dry_run else True
+    success = run_ansible("setup_node.yml", node=None, extra_vars={"devops_user": DEVOPS_USER, "pub_key_path": str(pub_key_path)}, dry_run=dry_run)
     
     if success:
         print("\n--- Phase 3: Finalizing Inventory ---")
@@ -232,16 +247,27 @@ def main():
     
     subparsers.add_parser("list", help="List registered nodes")
     subparsers.add_parser("test", help="Test node connectivity")
-    subparsers.add_parser("monitor", help="Check remote resource health")
-    subparsers.add_parser("sync-secrets", help="Deploy .env and unit signing keys")
-    subparsers.add_parser("fetch-artifacts", help="Pull remote builds to local")
+    
+    monitor_p = subparsers.add_parser("monitor", help="Check remote resource health")
+    monitor_p.add_argument("--node")
+    monitor_p.add_argument("--dry-run", action="store_true")
+    
+    secrets_p = subparsers.add_parser("sync-secrets", help="Deploy .env and unit signing keys")
+    secrets_p.add_argument("--node")
+    secrets_p.add_argument("--dry-run", action="store_true")
+    
+    fetch_p = subparsers.add_parser("fetch-artifacts", help="Pull remote builds to local")
+    fetch_p.add_argument("--node")
+    fetch_p.add_argument("--dry-run", action="store_true")
     
     prov_p = subparsers.add_parser("provision", help="Install production stack")
     prov_p.add_argument("--node")
+    prov_p.add_argument("--dry-run", action="store_true")
 
     run_p = subparsers.add_parser("run", help="Delegate command to remote node")
     run_p.add_argument("--node")
     run_p.add_argument("--no-sync", action="store_true")
+    run_p.add_argument("--dry-run", action="store_true")
     run_p.add_argument("remote_args", nargs=argparse.REMAINDER)
 
     args = parser.parse_args()
