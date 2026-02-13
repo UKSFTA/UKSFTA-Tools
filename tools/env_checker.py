@@ -39,6 +39,7 @@ def main():
     critical.append(check_command("steamcmd", "SteamCMD"))
     critical.append(check_command("zip", "Zip"))
     critical.append(check_command("ansible-playbook", "Ansible"))
+    critical.append(check_command("ansible-lint", "Ansible Lint"))
     
     print("\n[Assurance & Security]")
     check_command("gh", "GitHub CLI")

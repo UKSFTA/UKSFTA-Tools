@@ -298,10 +298,17 @@ def cmd_lint(args):
     if args.fix: cmd_biome = ["npx", "--yes", "@biomejs/biome", "check", "--write", "."]
     subprocess.run(cmd_biome)
 
-    # 3. Project Checkers
+    # 3. Ansible Audit
+    console.print("\n[bold]3. Ansible Infrastructure Audit:[/bold]")
+    if shutil.which("ansible-lint"):
+        subprocess.run(["ansible-lint", "remote/"])
+    else:
+        console.print("[yellow]! Skipping: ansible-lint not found.[/yellow]")
+
+    # 4. Project Checkers
     projects = get_projects()
     for p in projects:
-        console.print(f"\n[bold]3. Project Audit: {p.name}[/bold]")
+        console.print(f"\n[bold]4. Project Audit: {p.name}[/bold]")
         # Config
         subprocess.run([sys.executable, str(Path(__file__).parent / "config_style_checker.py"), str(p)])
         # SQF

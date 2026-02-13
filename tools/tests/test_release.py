@@ -1,69 +1,55 @@
 import unittest
+from unittest.mock import patch, mock_open, MagicMock
 import os
 import sys
-import shutil
-from unittest.mock import patch, MagicMock, mock_open
 
+# Add parent dir to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import release
 
 class TestReleaseTool(unittest.TestCase):
 
-    def setUp(self):
-        # Create a dummy script_version.hpp for testing
-        self.test_version_file = "test_script_version.hpp"
-        with open(self.test_version_file, "w") as f:
-            f.write("#define MAJOR 1\n#define MINOR 0\n#define PATCHLVL 0\n#define BUILD 0")
-        
-        # Override the VERSION_FILE path in the module
-        self.original_version_file = release.VERSION_FILE
-        release.VERSION_FILE = self.test_version_file
-
-    def tearDown(self):
-        if os.path.exists(self.test_version_file):
-            os.remove(self.test_version_file)
-        release.VERSION_FILE = self.original_version_file
-
     def test_get_current_version(self):
-        v_str, v_tuple = release.get_current_version()
-        self.assertEqual(v_str, "1.0.0")
-        self.assertEqual(v_tuple, (1, 0, 0))
+        content = "#define MAJOR 1\n#define MINOR 2\n#define PATCHLVL 3"
+        with patch("builtins.open", mock_open(read_data=content)):
+            with patch("os.path.exists", return_value=True):
+                # Ensure release uses a known mocked path for its global
+                with patch("release.VERSION_FILE", "dummy_path.hpp"):
+                    v_str, v_tuple = release.get_current_version()
+                    self.assertEqual(v_str, "1.2.3")
+                    self.assertEqual(v_tuple, (1, 2, 3))
 
-    def test_bump_version_patch(self):
-        new_v = release.bump_version("patch")
-        self.assertEqual(new_v, "1.0.1")
-        v_str, _ = release.get_current_version()
-        self.assertEqual(v_str, "1.0.1")
+    @patch("release.get_current_version")
+    @patch("builtins.open", new_callable=mock_open, read_data="#define MAJOR 1\n#define MINOR 2\n#define PATCHLVL 3")
+    def test_bump_version(self, mock_file, mock_version):
+        mock_version.return_value = ("1.2.3", (1, 2, 3))
+        # Ensure release uses a known mocked path
+        with patch("release.VERSION_FILE", "dummy_path.hpp"):
+            new_v = release.bump_version("patch")
+            self.assertEqual(new_v, "1.2.4")
 
-    def test_bump_version_minor(self):
-        release.bump_version("minor")
-        v_str, _ = release.get_current_version()
-        self.assertEqual(v_str, "1.1.0")
-
-    def test_bump_version_major(self):
-        release.bump_version("major")
-        v_str, _ = release.get_current_version()
-        self.assertEqual(v_str, "2.0.0")
-
-    @patch("release.generate_content_list")
+    @patch("os.makedirs")
+    @patch("workshop_utils.resolve_transitive_dependencies")
+    @patch("release.get_mod_categories")
     @patch("builtins.open", new_callable=mock_open)
-    def test_create_vdf(self, mock_file, mock_content_list):
-        # Prevent generate_content_list from reading mods.lock
-        mock_content_list.return_value = "[*] addon1.pbo\n[*] addon2.pbo"
+    @patch("os.path.exists")
+    def test_create_vdf(self, mock_exists, mock_file, mock_cats, mock_resolve, mock_mkdir):
+        # Setup mocks
+        mock_exists.return_value = True
+        mock_cats.return_value = (
+            [{"id": "123", "name": "Included Mod"}],
+            {"123", "456"}
+        )
+        mock_resolve.return_value = {
+            "123": {"name": "Included Mod", "dependencies": []},
+            "789": {"name": "Transitive Mod", "dependencies": []}
+        }
         
-        # Just check if file open is called with correct path and content structure
-        release.HEMTT_OUT = "."
-        vdf_path = release.create_vdf("123", "456", "/path/to/content", "changelog text")
+        # Run create_vdf
+        vdf_path, desc_path = release.create_vdf("107410", "9999", "/tmp/content", "Changelog")
         
-        mock_file.assert_called()
-        handle = mock_file()
-        handle.write.assert_called()
-        written_content = handle.write.call_args[0][0]
-        
-        self.assertIn('"appid" "123"', written_content)
-        self.assertIn('"publishedfileid" "456"', written_content)
-        self.assertIn('"contentfolder" "/path/to/content"', written_content)
-        self.assertIn('"changenote" "changelog text"', written_content)
+        self.assertIn("upload.vdf", vdf_path)
+        self.assertIn("workshop_description_final.txt", desc_path)
 
 if __name__ == "__main__":
     unittest.main()

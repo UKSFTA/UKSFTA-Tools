@@ -42,8 +42,8 @@ class TestManageMods(unittest.TestCase):
                 self.assertIn("77777777", ignored)
                 self.assertNotIn("12345678", ignored)
 
-    @patch("manage_mods.get_bulk_metadata")
-    @patch("manage_mods.scrape_mod_metadata")
+    @patch("workshop_utils.get_bulk_metadata")
+    @patch("workshop_utils.scrape_required_items")
     def test_resolve_dependencies_with_ignore(self, mock_scrape, mock_bulk):
         # Setup mock metadata logic
         # 123 depends on 456
@@ -55,15 +55,17 @@ class TestManageMods(unittest.TestCase):
         
         # Scraper provides the actual dependencies
         mock_scrape.side_effect = [
-            {"name": "Mod 123", "dependencies": [{"id": "456", "name": "Mod 456"}], "updated": "1"},
-            {"name": "Mod 456", "dependencies": [{"id": "789", "name": "Mod 789"}], "updated": "1"},
-            {"name": "Mod 789", "dependencies": [], "updated": "1"}
+            {"456"},
+            {"789"},
+            set()
         ]
         
         initial = {"123": "Tag"}
         ignored = {"789"}
         
-        resolved = manage_mods.resolve_dependencies(initial, ignored)
+        # We mock open for MOD_SOURCES_FILE check in resolve_dependencies
+        with patch("builtins.open", mock_open(read_data="123\n789")):
+            resolved = manage_mods.resolve_transitive_dependencies(initial.keys(), {"123", "789"})
         
         self.assertIn("123", resolved)
         self.assertIn("456", resolved)
@@ -76,14 +78,14 @@ class TestManageMods(unittest.TestCase):
     def test_sync_mods_cleanup(self, mock_file, mock_exists, mock_load, mock_remove):
         # Scenario: Mod 999 was installed (has lock entry), but is now ignored or removed.
         manage_mods.LOCK_FILE = "mods.lock"
-        
+    
         # Mocking existence checks
         def side_effect_exists(path):
             if path == "mods.lock": return True
             if "addons/" in path: return True
             return False
         mock_exists.side_effect = side_effect_exists
-        
+    
         # Lock file has entry for 999
         mock_load.return_value = {
             "mods": {
@@ -94,11 +96,11 @@ class TestManageMods(unittest.TestCase):
                 }
             }
         }
-        
+    
         # Run sync with EMPTY resolved_info
         with patch("os.path.expanduser", return_value="/tmp"):
             with patch("os.makedirs"):
-                manage_mods.sync_mods({})
+                manage_mods.sync_mods({}, {})
         
         # Verify removal was called for the file belonging to mod 999
         mock_remove.assert_called_with("addons/old_mod.pbo")
