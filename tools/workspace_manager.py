@@ -146,6 +146,7 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]rebin-guard      [/]", "[dim]Pre-binarization geometry and path health check[/]")
     prod_table.add_row("[bold cyan]import-wizard    [/]", "[dim]One-click automated ingestion of external assets[/]")
     prod_table.add_row("[bold cyan]unit-wide-sync   [/]", "[dim]Automated bulk normalization of all unit repositories[/]")
+    prod_table.add_row("[bold cyan]optimize-assets  [/]", "[dim]Active texture downscaling and optimization[/]")
     prod_table.add_row("[bold cyan]trend-analyze    [/]", "[dim]Track and report on unit health score trends[/]")
     console.print(ws_table); console.print(intel_table); console.print(audit_table); console.print(prod_table)
     console.print("\n[bold]Tip:[/bold] Run [cyan]./tools/workspace_manager.py <command> --help[/cyan] for detailed options and examples.\n")
@@ -479,6 +480,7 @@ def main():
     p_rebin = subparsers.add_parser("rebin-guard", help="Validate asset readiness for binarization"); p_rebin.add_argument("file")
     p_wizard = subparsers.add_parser("import-wizard", help="Automated asset porting wizard"); p_wizard.add_argument("source"); p_wizard.add_argument("name"); p_wizard.add_argument("prefix")
     p_unit_sync = subparsers.add_parser("unit-wide-sync", help="Bulk normalize all unit repositories"); p_unit_sync.add_argument("old_tag")
+    p_opt = subparsers.add_parser("optimize-assets", help="Active asset optimization"); p_opt.add_argument("path"); p_opt.add_argument("--apply", action="store_true", help="Apply optimizations (overwrite files)")
     p_trend = subparsers.add_parser("trend-analyze", help="Track unit health trends"); p_trend.add_argument("--report", action="store_true", help="Show trend report instead of capturing snapshot")
     
     args = parser.parse_args(); console = Console(force_terminal=True)
@@ -500,6 +502,7 @@ def main():
         "rebin-guard": lambda a: subprocess.run([sys.executable, "tools/rebin_guard.py", a.file]),
         "import-wizard": lambda a: subprocess.run([sys.executable, "tools/import_wizard.py", a.source, a.name, a.prefix]),
         "unit-wide-sync": lambda a: [subprocess.run([sys.executable, "tools/path_refactor.py", str(p), a.old_tag]) for p in get_projects()],
+        "optimize-assets": lambda a: subprocess.run([sys.executable, "tools/asset_optimizer.py", a.path] + (["--apply"] if a.apply else [])),
         "trend-analyze": lambda a: subprocess.run([sys.executable, "tools/trend_analyzer.py"] + (["report"] if a.report else [])),
         "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console),
         "lint": cmd_lint
