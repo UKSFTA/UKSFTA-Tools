@@ -55,15 +55,26 @@
     - Seamless signing of debinarized artifacts within the HEMTT pipeline.
 
 ## Phase 5: Asset Ingestion & Porting (v1.4.0)
-*Status: Initializing*
+*Status: Complete*
 
-- [ ] **`import-wizard`**:
+- [x] **`import-wizard`**:
     - Automated "One-Click" porting of legacy/external assets.
     - Recursive filename sanitization (lower_case + snake_case).
     - **RVMAT Refactoring**: Bulk path remapping in material files.
     - **Boilerplate Generator**: Auto-generate `config.cpp` entries via asset classification.
 - [ ] **Unit-Wide Normalization**:
     - Bulk migrate all existing `UKSFTA-*` repositories to the new VFS prefix standard.
+
+## Phase 6: Global Path Normalization (v1.5.0)
+*Status: Initializing*
+
+- [ ] **`path-refactor`**:
+    - Global "Search & Destroy" for legacy paths in `.cpp`, `.hpp`, `.sqf`.
+    - Context-aware re-prefixing (Identifies PBO root and maps to unit standard).
+- [ ] **`audit-code-links`**:
+    - Extend asset auditor to scan source code for path leaks.
+- [ ] **Path Guard (HEMTT)**:
+    - Pre-build hook to block non-unit path references.
 
 ---
 *Maintained by UKSFTA Senior Production Engineer*

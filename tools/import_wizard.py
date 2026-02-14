@@ -8,6 +8,7 @@ from pathlib import Path
 from asset_classifier import classify_asset
 from rebin_guard import check_geometry_health
 from p3d_debinarizer import run_debinarizer
+from path_refactor import refactor_paths
 
 # --- CONFIGURATION ---
 UNIT_PREFIX = r"z\uksfta\addons"
@@ -114,6 +115,9 @@ def run_wizard(input_dir, addon_name, old_prefix):
     new_vfs_prefix = f"{UNIT_PREFIX}\\{addon_name}"
     print(f"[*] Refactoring P3D paths: {old_prefix} -> {new_vfs_prefix}")
     run_debinarizer(target_dir, recursive=True, rename=(old_prefix, new_vfs_prefix))
+    
+    # 2b. Refactor Source Code (config.cpp, sqf, etc)
+    refactor_paths(target_dir, old_prefix, new_vfs_prefix)
     
     # 3. Refactor RVMATS
     refactor_rvmats(target_dir, old_prefix, new_vfs_prefix)

@@ -132,6 +132,7 @@ def audit_project_assets(project_path):
     all_leaks = []
     all_missing = []
     
+    # 2a. P3D Scans
     for a in assets:
         if a.suffix.lower() == ".p3d":
             forensic_results, textures = audit_p3d(a, project_path)
@@ -140,6 +141,20 @@ def audit_project_assets(project_path):
             leaks, missing = validate_vfs_links(textures, project_path)
             all_leaks.extend([(a.name, l) for l in leaks])
             all_missing.extend([(a.name, m) for m in missing])
+
+    # 2b. Source Code Scans (Check for leaks in config/scripts)
+    path_regex = re.compile(r'[\'"]\\?([a-zA-Z0-9_][a-zA-Z0-9_\\.-]+\.(paa|rvmat|p3d))[\'"]', re.IGNORECASE)
+    for c in code_files:
+        try:
+            content = c.read_text(errors='ignore')
+            matches = path_regex.findall(content)
+            # Findall returns tuples if there are multiple groups, we want group 1 (the path)
+            code_paths = [m[0] for m in matches]
+            
+            leaks, missing = validate_vfs_links(code_paths, project_path)
+            all_leaks.extend([(c.name, l) for l in leaks])
+            all_missing.extend([(c.name, m) for m in missing])
+        except: pass
 
     # 3. SUMMARY REPORT
     print("\n[Summary Report]")
