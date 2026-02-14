@@ -348,7 +348,7 @@ def cmd_clean_strings(args):
     for p in get_projects(): subprocess.run([sys.executable, str(cleaner), str(p)])
 
 def cmd_audit_performance(args):
-    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "performance_auditor.py"
+    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "weight_reporter.py"
     for p in get_projects(): subprocess.run([sys.executable, str(auditor), str(p)])
 
 def cmd_classify_mod(args):

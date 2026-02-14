@@ -66,15 +66,28 @@
     - Bulk migrate all existing `UKSFTA-*` repositories to the new VFS prefix standard.
 
 ## Phase 6: Global Path Normalization (v1.5.0)
-*Status: Initializing*
+*Status: Complete*
 
-- [ ] **`path-refactor`**:
+- [x] **`path-refactor`**:
     - Global "Search & Destroy" for legacy paths in `.cpp`, `.hpp`, `.sqf`.
     - Context-aware re-prefixing (Identifies PBO root and maps to unit standard).
-- [ ] **`audit-code-links`**:
+- [x] **`audit-code-links`**:
     - Extend asset auditor to scan source code for path leaks.
-- [ ] **Path Guard (HEMTT)**:
+- [x] **Path Guard (HEMTT)**:
     - Pre-build hook to block non-unit path references.
+
+## Phase 7: Strategic Command & Intelligence (v1.6.0)
+*Status: Initializing*
+
+- [ ] **Asset "Weight" Analytics**:
+    - `weight-reporter`: Detect high-poly models and oversized textures.
+    - Flag performance bottlenecks before they hit the server.
+- [ ] **Dependency Graph Analysis**:
+    - `dep-graph`: Map project inter-dependencies and flag circular links.
+- [ ] **The "Platinum Health Score"**:
+    - A centralized metric (0-100) for every project based on DevOps compliance.
+- [ ] **Automated Workshop Sync**:
+    - Dynamic update of Workshop descriptions and "Required Items" via CLI.
 
 ---
 *Maintained by UKSFTA Senior Production Engineer*
