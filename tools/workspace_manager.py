@@ -41,11 +41,15 @@ except ImportError:
         def fit(text, title=None, **kwargs): return f"--- {title} ---\n{text}"
 
 def get_projects():
-    parent_dir = Path(__file__).parent.parent.parent
+    # Parent directory of the UKSFTA-Tools folder
+    parent_dir = Path(__file__).parent.parent.parent.resolve()
     projects = []
-    for d in parent_dir.iterdir():
-        if d.is_dir() and d.name.startswith("UKSFTA-") and (d / ".hemtt" / "project.toml").exists():
-            projects.append(d)
+    if parent_dir.exists():
+        for d in parent_dir.iterdir():
+            if d.is_dir() and d.name.startswith("UKSFTA-"):
+                # Check for hemtt project marker
+                if (d / ".hemtt" / "project.toml").exists() or (d / "mod_sources.txt").exists():
+                    projects.append(d)
     return sorted(projects)
 
 def get_live_timestamp(mid):
@@ -447,11 +451,66 @@ def main():
     p_wizard = subparsers.add_parser("import-wizard", help="Automated asset porting wizard"); p_wizard.add_argument("source"); p_wizard.add_argument("name"); p_wizard.add_argument("prefix")
     p_trend = subparsers.add_parser("trend-analyze", help="Track unit health trends"); p_trend.add_argument("--report", action="store_true", help="Show trend report instead of capturing snapshot")
     
+def get_dir_size(path):
+    total = 0
+    with os.scandir(path) as it:
+        for entry in it:
+            if entry.is_file(): total += entry.stat().st_size
+            elif entry.is_dir(): total += get_dir_size(entry.path)
+    return total
+
+def format_bytes(size):
+    for unit in ['B','KB','MB','GB']:
+        if size < 1024: return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+def cmd_clean(args):
+    for p in get_projects():
+        target = p / ".hemttout"
+        if target.exists():
+            shutil.rmtree(target)
+            print(f"  ✅ Cleaned: {p.name}")
+
+def cmd_cache(args):
+    total = 0
+    for p in get_projects():
+        target = p / ".hemttout"
+        if target.exists():
+            sz = get_dir_size(target)
+            total += sz
+            print(f"  {p.name:<20} : {format_bytes(sz)}")
+    print(f"\n[bold]Total Unit Cache:[/] {format_bytes(total)}")
+
+def main():
+    parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
+    parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
+    subparsers = parser.add_subparsers(dest="command")
+    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "audit-keys", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "setup-git-hooks", "check-env", "fix-syntax", "clean-strings", "update", "self-update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
+        subparsers.add_parser(cmd, help=f"Run {cmd} utility")
+    
+    p_lint = subparsers.add_parser("lint", help="Full Quality Lint")
+    p_lint.add_argument("--fix", action="store_true", help="Auto-fix formatting errors")
+
+    p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path", help="Path to mission folder"); p_ms.add_argument("--framework", action="store_true", help="Inject Mission Framework"); p_ms.epilog = "Example: ./tools/workspace_manager.py mission-setup my_op --framework"
+    p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true")
+    subparsers.add_parser("pull-mods", help="Alias for sync").add_argument("--offline", action="store_true")
+    p_pub = subparsers.add_parser("publish", help="Upload to Steam"); p_pub.add_argument("--dry-run", action="store_true")
+    p_pub.add_argument("--offline", action="store_true", help="Generate local metadata only")
+    p_conv = subparsers.add_parser("convert", help="Convert media"); p_conv.add_argument("files", nargs="+")
+    p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO"); p_miss.add_argument("pbo")
+    p_asset_class = subparsers.add_parser("classify-asset", help="Determine category of a P3D asset"); p_asset_class.add_argument("file", help="Path to P3D file")
+    p_model_diff = subparsers.add_parser("diff-models", help="Compare two P3D assets"); p_model_diff.add_argument("file_a"); p_model_diff.add_argument("file_b")
+    p_proxy = subparsers.add_parser("manage-proxies", help="Proxy injection and sanitization"); p_proxy.add_argument("file"); p_proxy.add_argument("action", choices=["list", "sanitize", "inject"]); p_proxy.add_argument("--proxy"); p_proxy.add_argument("--pos")
+    p_rebin = subparsers.add_parser("rebin-guard", help="Validate asset readiness for binarization"); p_rebin.add_argument("file")
+    p_wizard = subparsers.add_parser("import-wizard", help="Automated asset porting wizard"); p_wizard.add_argument("source"); p_wizard.add_argument("name"); p_wizard.add_argument("prefix")
+    p_trend = subparsers.add_parser("trend-analyze", help="Track unit health trends"); p_trend.add_argument("--report", action="store_true", help="Show trend report instead of capturing snapshot")
+    
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
         "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
-        "test": lambda a: subprocess.run(["pytest"]), "clean": lambda a: [subprocess.run(["rm", "-rf", ".hemttout"], cwd=p) for p in get_projects()],
-        "cache": lambda a: [subprocess.run(["du", "-sh", ".hemttout"], cwd=p) for p in get_projects() if (p/".hemttout").exists()],
+        "test": lambda a: subprocess.run(["pytest"]), "clean": cmd_clean,
+        "cache": cmd_cache,
         "publish": cmd_publish, "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "apply-updates": cmd_apply_updates, "audit-deps": cmd_audit_deps,
         "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings, "audit-security": cmd_audit_security, "audit-signatures": cmd_audit_signatures,
         "audit-performance": cmd_audit_performance, "audit-keys": cmd_audit_keys, "audit-mission": cmd_audit_mission, "mission-setup": cmd_mission_setup, 

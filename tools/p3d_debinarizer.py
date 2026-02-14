@@ -6,16 +6,21 @@ import shutil
 from pathlib import Path
 
 def get_binary_path():
-    """Locates the debinarizer binary within the UKSFTA-Tools suite."""
-    # Assuming standard location: bin/linux-x64/debinarizer
+    """Locates the debinarizer binary based on the current OS."""
     tools_root = Path(__file__).parent.parent
-    bin_path = tools_root / "bin" / "linux-x64" / "debinarizer"
+    
+    if sys.platform == "win32":
+        bin_path = tools_root / "bin" / "win-x64" / "debinarizer.exe"
+    else:
+        bin_path = tools_root / "bin" / "linux-x64" / "debinarizer"
+
     if bin_path.exists():
         return str(bin_path)
     
     # Fallback to PATH
-    if shutil.which("debinarizer"):
-        return "debinarizer"
+    fallback = "debinarizer.exe" if sys.platform == "win32" else "debinarizer"
+    if shutil.which(fallback):
+        return fallback
         
     return None
 
