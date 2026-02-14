@@ -99,3 +99,12 @@
 - [ ] **`asset-optimizer`**: Automated texture downscaling and LOD pruning.
 - [ ] **`audit-preset`**: Compliance check for external Workshop modlists.
 
+
+## Phase 10: Advanced Operations (v1.9.0)
+*Status: Initializing*
+
+- [ ] **`audit-preset`**: Deep-scan compliance check for external Workshop modlists.
+- [ ] **Unit Signer**: Automated .bisign generation within the release pipeline.
+- [ ] **Remote-Orchestrator**: One-click build delegation to VPS nodes.
+- [ ] **The Virtual Armory**: Automated JSON asset catalog generation.
+
