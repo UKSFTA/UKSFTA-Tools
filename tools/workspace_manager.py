@@ -130,36 +130,8 @@ def cmd_help(console):
     console.print("\n[bold]Tip:[/bold] Run [cyan]./tools/workspace_manager.py <command> --help[/cyan] for detailed options and examples.\n")
 
 def cmd_dashboard(args):
-    projects = get_projects(); results = []
-    for p in projects:
-        version = "0.0.0"; pbos = []; ext_count = 0; sync_state = "OK"
-        addons_dir = p / "addons"; sources_path = p / "mod_sources.txt"; lock_path = p / "mods.lock"
-        if addons_dir.exists():
-            for entry in addons_dir.iterdir():
-                if entry.is_dir() and not entry.name.startswith("."): pbos.append(entry.name)
-                elif entry.suffix.lower() == ".pbo": pbos.append(entry.stem)
-        if sources_path.exists():
-            with open(sources_path, 'r') as f:
-                for line in f:
-                    if re.search(r"(\d{8,})", line) and "[ignore]" not in line.lower() and "ignore=" not in line.lower(): ext_count += 1
-        if ext_count > 0 and not lock_path.exists(): sync_state = "PENDING"
-        v_path = p / "addons" / "main" / "script_version.hpp"
-        if v_path.exists():
-            with open(v_path, 'r') as f:
-                vc = f.read(); ma = re.search(r'#define MAJOR (.*)', vc); mi = re.search(r'#define MINOR (.*)', vc); pa = re.search(r'#define PATCHLVL (.*)', vc)
-                if ma and mi and pa: version = f"{ma.group(1).strip()}.{mi.group(1).strip()}.{pa.group(1).strip()}"
-        results.append({"project": p.name, "version": version, "pbos": pbos, "external_count": ext_count, "sync_state": sync_state})
-    if args.json: print(json.dumps(results, indent=2)); return
-    console = Console(force_terminal=True); print_banner(console)
-    table = Table(title=f"Unit Workspace Overview ({len(projects)} Projects)", box=box.ROUNDED, header_style="bold magenta", border_style="blue")
-    table.add_column("Project", style="cyan", no_wrap=True); table.add_column("Version", style="bold yellow")
-    table.add_column("Components (PBOs)", style="dim"); table.add_column("External Mods", justify="center")
-    table.add_column("Sync State", justify="center")
-    for r in results:
-        pbo_str = ", ".join(r["pbos"][:3]) + (f" (+{len(r['pbos'])-3})" if len(r["pbos"])>3 else "")
-        sync_color = "[bold green]OK[/bold green]" if r["sync_state"] == "OK" else "[bold red]PENDING[/bold red]"
-        table.add_row(r["project"], r["version"], pbo_str if r["pbos"] else "-", str(r["external_count"]) if r["external_count"] else "-", sync_color)
-    console.print(table)
+    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "platinum_score.py"
+    subprocess.run([sys.executable, str(auditor)])
 
 def cmd_gh_runs(args):
     projects = get_projects(); workflow_names = set(); all_stats = []
@@ -364,22 +336,8 @@ def cmd_modlist_audit(args):
     subprocess.run(cmd)
 
 def cmd_audit_deps(args):
-    console = Console(force_terminal=True); print_banner(console); projects = get_projects(); defined_patches = set(); dependencies = {}
-    for p in projects:
-        for config in p.glob("addons/*/config.cpp"):
-            with open(config, 'r', errors='ignore') as f:
-                content = f.read()
-                for m in re.finditer(r'class\s+CfgPatches\s*\{[^}]*class\s+([a-zA-Z0-9_]+)', content, re.MULTILINE | re.DOTALL): defined_patches.add(m.group(1))
-                rm = re.search(r'requiredAddons\[\]\s*=\s*\{([^}]*)\}', content, re.MULTILINE | re.DOTALL)
-                if rm: dependencies[config] = [r.strip().replace('"', '').replace("'", "") for r in rm.group(1).split(',') if r.strip()]
-    table = Table(title="Dependency Scan", box=box.ROUNDED, border_style="blue")
-    table.add_column("Config File", style="dim"); table.add_column("Health", justify="center"); table.add_column("Issues", style="bold red")
-    for cfg, reqs in dependencies.items():
-        rel = cfg.relative_to(Path(__file__).parent.parent.parent); exts = ["A3_", "cba_", "ace_", "task_force_radio", "acre_", "rhsusf_", "rhs_", "cup_", "uk3cb_", "Peral_", "Arlit_"]
-        miss = [r for r in reqs if r not in defined_patches and not any(r.lower().startswith(x.lower()) for x in exts)]
-        if miss: table.add_row(str(rel), "❌ [bold red]FAIL[/bold red]", ", ".join(miss))
-        else: table.add_row(str(rel), "✅ [bold green]PASS[/bold green]", "[dim]Healthy[/dim]")
-    console.print(table)
+    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "dependency_graph.py"
+    subprocess.run([sys.executable, str(auditor)])
 
 def cmd_audit_mission(args):
     console = Console(force_terminal=True); print_banner(console); from mission_auditor import audit_mission; defined_patches = set()
