@@ -93,7 +93,6 @@ def cmd_help(console):
     intel_table.add_row("[bold cyan]audit-updates   [/]", "[dim]Check live Workshop for pending mod updates[/]")
     intel_table.add_row("[bold cyan]apply-updates   [/]", "[dim]Automatically update and sync all out-of-date mods[/]")
     intel_table.add_row("[bold cyan]gh-runs         [/]", "[dim]Real-time monitoring of GitHub Actions runners[/]")
-    intel_table.add_row("[bold cyan]list-models     [/]", "[dim]Audit all P3D models within a HEMTT project[/]")
     audit_table = Table(title="[Assurance & Quality]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold yellow")
     audit_table.add_row("[bold cyan]audit            [/]", "[dim]Master Audit: Run all health and security checks[/]")
     audit_table.add_row("[bold cyan]lint             [/]", "[dim]Full Quality Suite (Markdown, JSON, Config, SQF)[/]")
@@ -117,15 +116,12 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]generate-vscode  [/]", "[dim]Setup VS Code Tasks for one-click development[/]")
     prod_table.add_row("[bold cyan]setup-git-hooks  [/]", "[dim]Install local pre-commit quality/security guards[/]")
     prod_table.add_row("[bold cyan]fix-syntax       [/]", "[dim]Standardize indentation and formatting in all repos[/]")
-    prod_table.add_row("[bold cyan]debinarize       [/]", "[dim]Convert Arma 3 models (ODOL -> MLOD) with path fixing[/]")
-    prod_table.add_row("[bold cyan]migrate-prefix   [/]", "[dim]Bulk migrate texture/material paths in a project[/]")
     prod_table.add_row("[bold cyan]clean-strings    [/]", "[dim]Purge unused keys from all stringtable.xml files[/]")
     prod_table.add_row("[bold cyan]notify           [/]", "[dim]Send a manual development update to Discord[/]")
     prod_table.add_row("[bold cyan]generate-docs    [/]", "[dim]Auto-generate API Manual from SQF headers[/]")
     prod_table.add_row("[bold cyan]convert          [/]", "[dim]Optimize media for Arma (WAV/PNG -> OGG/PAA)[/]")
     prod_table.add_row("[bold cyan]workshop-tags    [/]", "[dim]List all valid Arma 3 Steam Workshop tags[/]")
-    prod_table.add_row("[bold cyan]remote setup     [/]", "[dim]Onboard VPS: remote setup user@host [name][/]")
-    prod_table.add_row("[bold cyan]remote           [/]", "[dim]Manage distributed VPS nodes and remote DevOps[/]")
+    prod_table.add_row("[bold cyan]classify-asset   [/]", "[dim]Deep forensic classification of any P3D asset[/]")
     console.print(ws_table); console.print(intel_table); console.print(audit_table); console.print(prod_table)
     console.print("\n[bold]Tip:[/bold] Run [cyan]./tools/workspace_manager.py <command> --help[/cyan] for detailed options and examples.\n")
 
@@ -165,7 +161,7 @@ def cmd_gh_runs(args):
     projects = get_projects(); workflow_names = set(); all_stats = []
     for p in projects:
         try:
-            res = subprocess.run(["gh", "run", list, "--limit", "15", "--json", "workflowName"], cwd=p, capture_output=True, text=True)
+            res = subprocess.run(["gh", "run", "list", "--limit", "15", "--json", "workflowName"], cwd=p, capture_output=True, text=True)
             if res.returncode == 0:
                 for r in json.loads(res.stdout): workflow_names.add(r['workflowName'])
         except: pass
@@ -279,7 +275,6 @@ def cmd_audit_keys(args):
 def cmd_notify(args):
     notifier = Path(__file__).parent / "notify_discord.py"; cmd = [sys.executable, str(notifier), "--message", args.message, "--type", args.type]
     if args.title: cmd.extend(["--title", args.title])
-    if args.dry_run: cmd.append("--dry-run")
     subprocess.run(cmd)
 
 def cmd_audit_full(args):
@@ -302,17 +297,10 @@ def cmd_lint(args):
     if args.fix: cmd_biome = ["npx", "--yes", "@biomejs/biome", "check", "--write", "."]
     subprocess.run(cmd_biome)
 
-    # 3. Ansible Audit
-    console.print("\n[bold]3. Ansible Infrastructure Audit:[/bold]")
-    if shutil.which("ansible-lint"):
-        subprocess.run(["ansible-lint", "remote/"])
-    else:
-        console.print("[yellow]! Skipping: ansible-lint not found.[/yellow]")
-
-    # 4. Project Checkers
+    # 3. Project Checkers
     projects = get_projects()
     for p in projects:
-        console.print(f"\n[bold]4. Project Audit: {p.name}[/bold]")
+        console.print(f"\n[bold]3. Project Audit: {p.name}[/bold]")
         # Config
         subprocess.run([sys.executable, str(Path(__file__).parent / "config_style_checker.py"), str(p)])
         # SQF
@@ -349,9 +337,7 @@ def cmd_check_env(args):
 
 def cmd_fix_syntax(args):
     fixer = Path(__file__).parent / "syntax_fixer.py"
-    cmd = [sys.executable, str(fixer), args.target]
-    if args.dry_run: cmd.append("--dry-run")
-    subprocess.run(cmd)
+    for p in get_projects(): subprocess.run([sys.executable, str(fixer), str(p)])
 
 def cmd_clean_strings(args):
     cleaner = Path(__file__).parent / "string_cleaner.py"
@@ -422,7 +408,6 @@ def cmd_sync(args):
     for p in get_projects(): 
         cmd = [sys.executable, "tools/manage_mods.py", "sync"]
         if args.offline: cmd.append("--offline")
-        if args.dry_run: cmd.append("--dry-run")
         subprocess.run(cmd, cwd=p)
     from manifest_generator import generate_total_manifest; generate_total_manifest(Path(__file__).parent.parent)
 
@@ -467,150 +452,48 @@ def cmd_workshop_tags(args):
     tags = Path(__file__).parent / "workshop_tags.txt"
     if tags.exists(): print(tags.read_text())
 
-def cmd_debinarize(args):
-    console = Console(force_terminal=True); print_banner(console)
-    from p3d_debinarizer import run_debinarizer
-    rename = (args.old, args.new) if args.old and args.new else None
-    run_debinarizer(args.input, args.output, args.info, args.map, args.recursive, rename)
-
-def cmd_migrate_prefix(args):
-    console = Console(force_terminal=True); print_banner(console)
-    from p3d_debinarizer import fix_project_paths
-    projects = get_projects()
-    target = next((p for p in projects if p.name.lower() == args.project.lower()), None)
-    
-    if not target:
-        console.print(f"[bold red]Error:[/] Project {args.project} not found in workspace."); return
-
-    # Try to resolve new prefix from project.toml
-    new_prefix = args.new_prefix
-    if not new_prefix:
-        toml_path = target / ".hemtt" / "project.toml"
-        if toml_path.exists():
-            with open(toml_path, 'r') as f:
-                content = f.read()
-                main_p = re.search(r'mainprefix = "(.*)"', content)
-                p = re.search(r'prefix = "(.*)"', content)
-                if main_p and p: new_prefix = f"{main_p.group(1)}\\{p.group(1)}"
-    
-    if not new_prefix:
-        console.print("[bold red]Error:[/] Could not determine new prefix. Please specify --new-prefix."); return
-
-    fix_project_paths(target, args.old_prefix, new_prefix)
-
-def cmd_list_models(args):
-    console = Console(force_terminal=True); print_banner(console)
-    from p3d_debinarizer import run_debinarizer
-    projects = get_projects()
-    target = next((p for p in projects if p.name.lower() == args.project.lower()), None)
-    
-    if not target:
-        console.print(f"[bold red]Error:[/] Project {args.project} not found in workspace."); return
-
-    addons_dir = target / "addons"
-    if not addons_dir.exists():
-        console.print(f"[bold red]Error:[/] Addons directory not found in {target}"); return
-
-    p3ds = list(addons_dir.glob("**/*.p3d"))
-    if not p3ds:
-        console.print(f"[yellow]! No P3D models found in {target.name}[/yellow]"); return
-
-    table = Table(title=f"Model Inventory: {target.name}", box=box.ROUNDED, border_style="cyan")
-    table.add_column("Path", style="dim"); table.add_column("File", style="bold white")
-    
-    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
-        task = progress.add_task(f"Auditing {len(p3ds)} models...", total=len(p3ds))
-        for p3d in p3ds:
-            rel_path = p3d.relative_to(target)
-            table.add_row(str(rel_path.parent), p3d.name)
-            progress.advance(task)
-
-    console.print(table)
-    console.print(f"\n[dim]Tip: Use [cyan]./tools/workspace_manager.py debinarize --info <path>[/cyan] for deep metadata.[/dim]\n")
-
 def cmd_workshop_info(args):
     auditor = Path(__file__).parent / "workshop_inspector.py"; subprocess.run([sys.executable, str(auditor)])
 
 def main():
-    # 1. Base Parser for Shared Flags
-    base_parser = argparse.ArgumentParser(add_help=False)
-    base_parser.add_argument("--json", action="store_true", help="Output results in JSON")
-    base_parser.add_argument("--dry-run", action="store_true", help="Simulate actions")
-
-    # 2. Main Parser
-    parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", parents=[base_parser])
+    parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
+    parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
     subparsers = parser.add_subparsers(dest="command")
+    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "audit-keys", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "setup-git-hooks", "check-env", "fix-syntax", "clean-strings", "update", "self-update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
+        subparsers.add_parser(cmd, help=f"Run {cmd} utility")
     
-    # Register common utilities
-    simple_cmds = ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "audit-keys", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "setup-git-hooks", "check-env", "clean-strings", "update", "self-update", "workshop-tags", "gh-runs", "workshop-info", "help"]
-    for cmd in simple_cmds:
-        subparsers.add_parser(cmd, help=f"Run {cmd} utility", parents=[base_parser])
-    
-    p_debin = subparsers.add_parser("debinarize", help="ODOL to MLOD conversion", parents=[base_parser])
-    p_debin.add_argument("input", help="Input P3D or directory")
-    p_debin.add_argument("output", nargs="?", help="Output P3D or directory")
-    p_debin.add_argument("--info", action="store_true", help="Show model info")
-    p_debin.add_argument("--map", action="store_true", help="Show structural map")
-    p_debin.add_argument("-r", "--recursive", action="store_true", help="Recursive processing")
-    p_debin.add_argument("--old", help="Old path prefix to rename")
-    p_debin.add_argument("--new", help="New path prefix to rename")
-
-    p_mig = subparsers.add_parser("migrate-prefix", help="Bulk fix paths in a project", parents=[base_parser])
-    p_mig.add_argument("project", help="Name of project (e.g. UKSFTA-Main)")
-    p_mig.add_argument("old_prefix", help="Old prefix to replace (e.g. a3)")
-    p_mig.add_argument("--new-prefix", help="Override new prefix (defaults to project.toml value)")
-
-    p_list_m = subparsers.add_parser("list-models", help="Inventory models in a project", parents=[base_parser])
-    p_list_m.add_argument("project", help="Project name")
-
-    p_lint = subparsers.add_parser("lint", help="Full Quality Lint", parents=[base_parser])
+    p_lint = subparsers.add_parser("lint", help="Full Quality Lint")
     p_lint.add_argument("--fix", action="store_true", help="Auto-fix formatting errors")
 
-    p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder", parents=[base_parser]); p_ms.add_argument("path", help="Path to mission folder"); p_ms.add_argument("--framework", action="store_true", help="Inject Mission Framework"); p_ms.epilog = "Example: ./tools/workspace_manager.py mission-setup my_op --framework"
-    p_sync = subparsers.add_parser("sync", help="Synchronize mods", parents=[base_parser]); p_sync.add_argument("--offline", action="store_true")
-    subparsers.add_parser("pull-mods", help="Alias for sync", parents=[base_parser]).add_argument("--offline", action="store_true")
-    p_pub = subparsers.add_parser("publish", help="Upload to Steam", parents=[base_parser]); p_pub.add_argument("--dry-run-legacy", action="store_true")
+    p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path", help="Path to mission folder"); p_ms.add_argument("--framework", action="store_true", help="Inject Mission Framework"); p_ms.epilog = "Example: ./tools/workspace_manager.py mission-setup my_op --framework"
+    p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true")
+    subparsers.add_parser("pull-mods", help="Alias for sync").add_argument("--offline", action="store_true")
+    p_pub = subparsers.add_parser("publish", help="Upload to Steam"); p_pub.add_argument("--dry-run", action="store_true")
     p_pub.add_argument("--offline", action="store_true", help="Generate local metadata only")
-    p_conv = subparsers.add_parser("convert", help="Convert media", parents=[base_parser]); p_conv.add_argument("files", nargs="+")
-    p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO", parents=[base_parser]); p_miss.add_argument("pbo")
-    p_size = subparsers.add_parser("modlist-size", help="Calculate size", parents=[base_parser]); p_size.add_argument("file", nargs="?", default="mod_sources.txt")
-    p_remote = subparsers.add_parser("remote", help="Distributed infrastructure management", parents=[base_parser]); p_remote.add_argument("cmd", nargs=argparse.REMAINDER)
-    p_notify = subparsers.add_parser("notify", help="Discord update", parents=[base_parser]); p_notify.add_argument("message", nargs="?"); p_notify.add_argument("--type", choices=["update", "release", "alert"], default="update"); p_notify.add_argument("--title")
-    p_class = subparsers.add_parser("classify-mod", help="Classify mod side requirement", parents=[base_parser]); p_class.add_argument("id", help="Steam Workshop ID or URL")
-    p_list_class = subparsers.add_parser("modlist-classify", help="Classify entire modlist requirements", parents=[base_parser]); p_list_class.add_argument("file", nargs="?", default="mod_sources.txt", help="Path to modlist file")
-    p_list_audit = subparsers.add_parser("modlist-audit", help="Compare modlist against reference sources", parents=[base_parser]); p_list_audit.add_argument("reference", help="Master HTML preset or TXT source"); p_list_audit.add_argument("targets", nargs="+", help="Sources to check against reference"); p_list_audit.add_argument("--deep", action="store_true", help="Scan dependencies of targets")
+    p_conv = subparsers.add_parser("convert", help="Convert media"); p_conv.add_argument("files", nargs="+")
+    p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO"); p_miss.add_argument("pbo")
+    p_size = subparsers.add_parser("modlist-size", help="Calculate size"); p_size.add_argument("file", nargs="?", default="mod_sources.txt")
+    p_notify = subparsers.add_parser("notify", help="Discord update"); p_notify.add_argument("message"); p_notify.add_argument("--type", choices=["update", "release", "alert"], default="update"); p_notify.add_argument("--title")
+    p_class = subparsers.add_parser("classify-mod", help="Classify mod side requirement"); p_class.add_argument("id", help="Steam Workshop ID or URL")
+    p_list_class = subparsers.add_parser("modlist-classify", help="Classify entire modlist requirements"); p_list_class.add_argument("file", nargs="?", default="mod_sources.txt", help="Path to modlist file")
+    p_list_audit = subparsers.add_parser("modlist-audit", help="Compare modlist against reference sources"); p_list_audit.add_argument("reference", help="Master HTML preset or TXT source"); p_list_audit.add_argument("targets", nargs="+", help="Sources to check against reference"); p_list_audit.add_argument("--deep", action="store_true", help="Scan dependencies of targets")
+    p_asset_class = subparsers.add_parser("classify-asset", help="Determine category of a P3D asset"); p_asset_class.add_argument("file", help="Path to P3D file")
     
-    p_fix = subparsers.add_parser("fix-syntax", help="Standardize indentation", parents=[base_parser])
-    p_fix.add_argument("target", nargs="?", default=".", help="Target directory")
-
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
-        "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, 
-        "release": lambda a: subprocess.run([sys.executable, "tools/release.py"] + (["--dry-run"] if a.dry_run else [])), 
+        "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
         "test": lambda a: subprocess.run(["pytest"]), "clean": lambda a: [subprocess.run(["rm", "-rf", ".hemttout"], cwd=p) for p in get_projects()],
         "cache": lambda a: [subprocess.run(["du", "-sh", ".hemttout"], cwd=p) for p in get_projects() if (p/".hemttout").exists()],
         "publish": cmd_publish, "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "apply-updates": cmd_apply_updates, "audit-deps": cmd_audit_deps,
         "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings, "audit-security": cmd_audit_security, "audit-signatures": cmd_audit_signatures,
         "audit-performance": cmd_audit_performance, "audit-keys": cmd_audit_keys, "audit-mission": cmd_audit_mission, "mission-setup": cmd_mission_setup, 
-        "generate-docs": cmd_generate_docs, 
-        "generate-manifest": lambda a: subprocess.run([sys.executable, "tools/manifest_generator.py"] + (["--dry-run"] if a.dry_run else [])), 
-        "generate-preset": lambda a: subprocess.run([sys.executable, "tools/preset_generator.py"] + (["--dry-run"] if a.dry_run else [])), 
-        "generate-report": lambda a: subprocess.run([sys.executable, "tools/report_generator.py"] + (["--dry-run"] if a.dry_run else [])), 
-        "generate-vscode": cmd_generate_vscode, 
-        "generate-changelog": lambda a: subprocess.run([sys.executable, "tools/changelog_generator.py"] + (["--dry-run"] if a.dry_run else [])), 
-        "setup-git-hooks": cmd_setup_git_hooks,
-        "check-env": cmd_check_env, 
-        "fix-syntax": cmd_fix_syntax, 
-        "debinarize": cmd_debinarize,
-        "migrate-prefix": cmd_migrate_prefix,
-        "list-models": cmd_list_models,
-        "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
+        "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest, "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, 
+        "generate-vscode": cmd_generate_vscode, "generate-changelog": cmd_generate_changelog, "setup-git-hooks": cmd_setup_git_hooks,
+        "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
         "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "classify-mod": cmd_classify_mod, "modlist-classify": cmd_modlist_classify, "modlist-audit": cmd_modlist_audit,
-        "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), 
-        "notify": cmd_notify, 
-        "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console),
-        "lint": cmd_lint,
-        "remote": lambda a: subprocess.run([sys.executable, "tools/remote_manager.py"] + (["--dry-run"] if a.dry_run else []) + a.cmd)
+        "classify-asset": lambda a: subprocess.run([sys.executable, "tools/asset_classifier.py", a.file]),
+        "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console),
+        "lint": cmd_lint
     }
     if args.command in cmds: cmds[args.command](args)
     else: cmd_help(console)
