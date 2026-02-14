@@ -37,19 +37,6 @@ def recursive_sanitize(directory):
             if old_path != new_path:
                 os.rename(old_path, new_path)
 
-def refactor_rvmats(directory, old_prefix, new_prefix):
-    """Bulk replaces paths inside .rvmat files."""
-    print(f"[*] Refactoring RVMAT paths: {old_prefix} -> {new_prefix}")
-    for root, _, files in os.walk(directory):
-        for f in files:
-            if f.endswith(".rvmat"):
-                path = Path(root) / f
-                content = path.read_text(errors='ignore')
-                if old_prefix in content:
-                    new_content = content.replace(old_prefix, new_prefix)
-                    path.write_text(new_content)
-                    print(f"  ✅ Patched: {f}")
-
 def generate_config_boilerplate(directory, addon_name):
     """Generates a config.cpp based on classified assets."""
     print(f"[*] Generating config.cpp boilerplate for {addon_name}...")
@@ -111,19 +98,19 @@ def run_wizard(input_dir, addon_name, old_prefix):
     # 1. Sanitize
     recursive_sanitize(target_dir)
     
-    # 2. Refactor P3Ds
+    # 2. Refactor P3Ds (Binary)
     new_vfs_prefix = f"{UNIT_PREFIX}\\{addon_name}"
     print(f"[*] Refactoring P3D paths: {old_prefix} -> {new_vfs_prefix}")
     run_debinarizer(target_dir, recursive=True, rename=(old_prefix, new_vfs_prefix))
     
-    # 2b. Refactor Source Code (config.cpp, sqf, etc)
+    # 3. Refactor Source Code (Text)
     refactor_paths(target_dir, old_prefix, new_vfs_prefix)
     
-    # 3. Refactor RVMATS
-    refactor_rvmats(target_dir, old_prefix, new_vfs_prefix)
-    
-    # 4. Generate Config
-    generate_config_boilerplate(target_dir, addon_name)
+    # 4. Generate Config (only if missing)
+    if not (target_dir / "config.cpp").exists():
+        generate_config_boilerplate(target_dir, addon_name)
+    else:
+        print("[*] Existing config.cpp found. Refactoring paths only.")
     
     # 5. Final Guard
     print("\n[*] Running final integrity check...")

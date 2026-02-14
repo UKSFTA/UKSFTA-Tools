@@ -18,7 +18,7 @@ def get_project_vfs_path(project_path):
 def refactor_paths(project_path, old_tag, new_prefix=None):
     r"""
     Scans code files and replaces legacy paths.
-    Uses literal replacement to avoid Unicode escape issues with Arma paths like \u...
+    Example: \custom_vests\data\tex.paa -> \z\uksfta\addons\jacks_kit\data\tex.paa
     """
     project_path = Path(project_path)
     if not new_prefix:
@@ -71,6 +71,7 @@ def refactor_paths(project_path, old_tag, new_prefix=None):
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage: path_refactor.py <project_path> <old_tag_to_replace> [new_prefix_override]")
+        print("Example: path_refactor.py . custom_vests")
         sys.exit(1)
     
     override = sys.argv[3] if len(sys.argv) > 3 else None
