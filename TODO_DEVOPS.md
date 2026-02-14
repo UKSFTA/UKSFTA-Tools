@@ -28,10 +28,10 @@
 - [x] **`remap-advanced`**:
     - Bone remapping (Map legacy skeleton to UKSFTA standard).
     - Material swapping (Bulk replace legacy shaders with optimized versions).
-- [ ] **`manage-proxies`**:
+- [x] **`manage-proxies`**:
     - CLI-based proxy injection (Inject rails/lasers to groups of models).
     - Proxy sanitization (Remove orphaned attachment points).
-- [ ] **`rebin-guard`**:
+- [x] **`rebin-guard`**:
     - Pre-binarization check for "Micro-gap" geometry.
     - Ensure debinarized MLODs meet standard BI tool requirements.
 
@@ -41,7 +41,7 @@
 - [x] **`diff-models`**:
     - Binary-level comparison of ODOL versions.
     - Human-readable changelog generation for asset updates.
-- [ ] **`auto-classifier`**:
+- [x] **`auto-classifier`**:
     - Use forensic patterns to identify asset categories (Uniform, Vest, Weapon).
     - Auto-generate Workshop tags and manifest entries.
 
