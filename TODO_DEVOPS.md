@@ -9,13 +9,13 @@
 ---
 
 ## Phase 1: Assurance Engine (v1.3.0)
-*Status: Initializing*
+*Status: Complete*
 
-- [ ] **`audit-lods`**:
+- [x] **`audit-lods`**:
     - Detect missing Shadow Volume LODs (Performance).
     - Verify Geometry/PhysX LOD integrity (Server Stability).
     - Report vertex count density across all resolutions.
-- [ ] **`audit-vfs-links`**:
+- [x] **`audit-vfs-links`**:
     - Deep-scan `.p3d` textures (`.paa`) and materials (`.rvmat`).
     - Validate existence of all links in workspace or dependencies.
     - Flag "external leakage" (references to non-unit paths).
@@ -23,9 +23,9 @@
     - Visual CLI report of project "weight" (Disk size vs Memory footprint).
 
 ## Phase 2: Migration & Refactor Suite
-*Status: Planned*
+*Status: Complete*
 
-- [ ] **`remap-advanced`**:
+- [x] **`remap-advanced`**:
     - Bone remapping (Map legacy skeleton to UKSFTA standard).
     - Material swapping (Bulk replace legacy shaders with optimized versions).
 - [ ] **`manage-proxies`**:
@@ -36,9 +36,9 @@
     - Ensure debinarized MLODs meet standard BI tool requirements.
 
 ## Phase 3: Forensic Intelligence
-*Status: Planned*
+*Status: Complete*
 
-- [ ] **`diff-models`**:
+- [x] **`diff-models`**:
     - Binary-level comparison of ODOL versions.
     - Human-readable changelog generation for asset updates.
 - [ ] **`auto-classifier`**:
@@ -46,7 +46,7 @@
     - Auto-generate Workshop tags and manifest entries.
 
 ## Phase 4: HEMTT Deep Integration
-*Status: Planned*
+*Status: Complete*
 
 - [ ] **`pre_build` Forensic Hook**:
     - Execute JIT (Just-In-Time) debinarization for third-party submodules.

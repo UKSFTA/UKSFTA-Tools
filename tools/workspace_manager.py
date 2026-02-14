@@ -122,6 +122,7 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]convert          [/]", "[dim]Optimize media for Arma (WAV/PNG -> OGG/PAA)[/]")
     prod_table.add_row("[bold cyan]workshop-tags    [/]", "[dim]List all valid Arma 3 Steam Workshop tags[/]")
     prod_table.add_row("[bold cyan]classify-asset   [/]", "[dim]Deep forensic classification of any P3D asset[/]")
+    prod_table.add_row("[bold cyan]diff-models      [/]", "[dim]Binary-level structural comparison of two P3D assets[/]")
     console.print(ws_table); console.print(intel_table); console.print(audit_table); console.print(prod_table)
     console.print("\n[bold]Tip:[/bold] Run [cyan]./tools/workspace_manager.py <command> --help[/cyan] for detailed options and examples.\n")
 
@@ -477,9 +478,9 @@ def main():
     p_class = subparsers.add_parser("classify-mod", help="Classify mod side requirement"); p_class.add_argument("id", help="Steam Workshop ID or URL")
     p_list_class = subparsers.add_parser("modlist-classify", help="Classify entire modlist requirements"); p_list_class.add_argument("file", nargs="?", default="mod_sources.txt", help="Path to modlist file")
     p_list_audit = subparsers.add_parser("modlist-audit", help="Compare modlist against reference sources"); p_list_audit.add_argument("reference", help="Master HTML preset or TXT source"); p_list_audit.add_argument("targets", nargs="+", help="Sources to check against reference"); p_list_audit.add_argument("--deep", action="store_true", help="Scan dependencies of targets")
-    p_asset_class = subparsers.add_parser("classify-asset", help="Determine category of a P3D asset"); p_asset_class.add_argument("file", help="Path to P3D file")
-    
-    args = parser.parse_args(); console = Console(force_terminal=True)
+        p_asset_class = subparsers.add_parser("classify-asset", help="Determine category of a P3D asset"); p_asset_class.add_argument("file", help="Path to P3D file")
+        p_model_diff = subparsers.add_parser("diff-models", help="Compare two P3D assets"); p_model_diff.add_argument("file_a"); p_model_diff.add_argument("file_b")
+        args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
         "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
         "test": lambda a: subprocess.run(["pytest"]), "clean": lambda a: [subprocess.run(["rm", "-rf", ".hemttout"], cwd=p) for p in get_projects()],
@@ -492,6 +493,7 @@ def main():
         "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
         "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "classify-mod": cmd_classify_mod, "modlist-classify": cmd_modlist_classify, "modlist-audit": cmd_modlist_audit,
         "classify-asset": lambda a: subprocess.run([sys.executable, "tools/asset_classifier.py", a.file]),
+        "diff-models": lambda a: subprocess.run([sys.executable, "tools/model_diff.py", a.file_a, a.file_b]),
         "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console),
         "lint": cmd_lint
     }
