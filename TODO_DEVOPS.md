@@ -11,100 +11,63 @@
 ## Phase 1: Assurance Engine (v1.3.0)
 *Status: Complete*
 
-- [x] **`audit-lods`**:
-    - Detect missing Shadow Volume LODs (Performance).
-    - Verify Geometry/PhysX LOD integrity (Server Stability).
-    - Report vertex count density across all resolutions.
-- [x] **`audit-vfs-links`**:
-    - Deep-scan `.p3d` textures (`.paa`) and materials (`.rvmat`).
-    - Validate existence of all links in workspace or dependencies.
-    - Flag "external leakage" (references to non-unit paths).
-- [ ] **`optimize-dashboard`**:
-    - Visual CLI report of project "weight" (Disk size vs Memory footprint).
+- [x] **`audit-lods`**: Automated detection of missing Shadow Volume and Geometry LODs.
+- [x] **`audit-vfs-links`**: Deep-scan P3D and source code for path leaks.
+- [ ] **`optimize-dashboard`**: Visual CLI report of project "weight".
 
 ## Phase 2: Migration & Refactor Suite
 *Status: Complete*
 
-- [x] **`remap-advanced`**:
-    - Bone remapping (Map legacy skeleton to UKSFTA standard).
-    - Material swapping (Bulk replace legacy shaders with optimized versions).
-- [x] **`manage-proxies`**:
-    - CLI-based proxy injection (Inject rails/lasers to groups of models).
-    - Proxy sanitization (Remove orphaned attachment points).
-- [x] **`rebin-guard`**:
-    - Pre-binarization check for "Micro-gap" geometry.
-    - Ensure debinarized MLODs meet standard BI tool requirements.
+- [x] **`remap-advanced`**: Bone/Material remapping and path renaming.
+- [x] **`manage-proxies`**: CLI-based proxy listing and sanitization framework.
+- [x] **`rebin-guard`**: Pre-binarization quality assurance.
 
 ## Phase 3: Forensic Intelligence
 *Status: Complete*
 
-- [x] **`diff-models`**:
-    - Binary-level comparison of ODOL versions.
-    - Human-readable changelog generation for asset updates.
-- [x] **`auto-classifier`**:
-    - Use forensic patterns to identify asset categories (Uniform, Vest, Weapon).
-    - Auto-generate Workshop tags and manifest entries.
+- [x] **`diff-models`**: Binary-level comparison of P3D assets.
+- [x] **`auto-classifier`**: Automated asset categorization via internal metadata.
 
 ## Phase 4: HEMTT Deep Integration
 *Status: Complete*
 
-- [x] **`pre_build` Forensic Hook**:
-    - Execute JIT (Just-In-Time) debinarization for third-party submodules.
-    - Dynamic path re-prefixing during the HEMTT build cycle.
-- [ ] **Unit Signer Integration**:
-    - Seamless signing of debinarized artifacts within the HEMTT pipeline.
+- [x] **`pre_build` Forensic Hook**: Automated asset validation during build cycle.
+- [ ] **Unit Signer Integration**: Seamless signing within the pipeline.
 
 ## Phase 5: Asset Ingestion & Porting (v1.4.0)
 *Status: Complete*
 
-- [x] **`import-wizard`**:
-    - Automated "One-Click" porting of legacy/external assets.
-    - Recursive filename sanitization (lower_case + snake_case).
-    - **RVMAT Refactoring**: Bulk path remapping in material files.
-    - **Boilerplate Generator**: Auto-generate `config.cpp` entries via asset classification.
-- [ ] **Unit-Wide Normalization**:
-    - Bulk migrate all existing `UKSFTA-*` repositories to the new VFS prefix standard.
+- [x] **`import-wizard`**: One-click ingestion of external assets.
 
 ## Phase 6: Global Path Normalization (v1.5.0)
 *Status: Complete*
 
-- [x] **`path-refactor`**:
-    - Global "Search & Destroy" for legacy paths in `.cpp`, `.hpp`, `.sqf`.
-    - Context-aware re-prefixing (Identifies PBO root and maps to unit standard).
-- [x] **`audit-code-links`**:
-    - Extend asset auditor to scan source code for path leaks.
-- [x] **Path Guard (HEMTT)**:
-    - Pre-build hook to block non-unit path references.
+- [x] **`path-refactor`**: Recursive automated path repair in code and assets.
 
 ## Phase 7: Strategic Command & Intelligence (v1.6.0)
 *Status: Complete*
 
-- [ ] **Asset "Weight" Analytics**:
-    - `weight-reporter`: Detect high-poly models and oversized textures.
-    - Flag performance bottlenecks before they hit the server.
-- [ ] **Dependency Graph Analysis**:
-    - `dep-graph`: Map project inter-dependencies and flag circular links.
-- [x] **The "Platinum Health Score"**:
-    - A centralized metric (0-100) for every project based on DevOps compliance.
-- [x] **Automated Workshop Sync**:
-    - Dynamic update of Workshop descriptions and "Required Items" via CLI.
+- [x] **`weight-reporter`**: Performance analytics for high-poly/large-texture assets.
+- [x] **`dep-graph`**: Unit-wide dependency mapping.
+- [x] **`trend-analyze`**: Longitudinal health tracking and dashboard.
+
+## Phase 10: Advanced Operations (v1.9.0)
+*Status: Complete*
+
+- [x] **`audit-preset`**: Compliance check for external Workshop modlists.
+- [ ] **Unit Signer**: Automated .bisign generation.
+- [ ] **Remote-Orchestrator**: One-click build delegation to VPS nodes.
+
+## Phase 11: Deep Inspection (v2.0.0)
+*Status: Initializing*
+
+- [x] **`pbo-cracker`**:
+    - Integrate `hemtt extract` for just-in-time forensic auditing of packed assets.
+    - Automated recursive unpacking of large modsets.
+- [ ] **Active Asset Optimization**:
+    - Functional `asset-optimizer --apply` with PAA -> PNG -> PAA bridge.
+- [ ] **The Virtual Armory**:
+    - Automated visual asset catalog generation.
 
 ---
 *Maintained by UKSFTA Senior Production Engineer*
-
-## Phase 9: Tactical Optimization (v1.8.0)
-*Status: Initializing*
-
-- [ ] **Unit-Wide Normalization**: Bulk migrate all unit repos to `z\uksftaddons`.
-- [ ] **`asset-optimizer`**: Automated texture downscaling and LOD pruning.
-- [ ] **`audit-preset`**: Compliance check for external Workshop modlists.
-
-
-## Phase 10: Advanced Operations (v1.9.0)
-*Status: Initializing*
-
-- [ ] **`audit-preset`**: Deep-scan compliance check for external Workshop modlists.
-- [ ] **Unit Signer**: Automated .bisign generation within the release pipeline.
-- [ ] **Remote-Orchestrator**: One-click build delegation to VPS nodes.
-- [ ] **The Virtual Armory**: Automated JSON asset catalog generation.
-

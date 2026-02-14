@@ -472,7 +472,7 @@ def main():
     p_pub.add_argument("--offline", action="store_true", help="Generate local metadata only")
     p_conv = subparsers.add_parser("convert", help="Convert media"); p_conv.add_argument("files", nargs="+")
     p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO"); p_miss.add_argument("pbo")
-    p_audit_preset = subparsers.add_parser("audit-preset", help="Audit all mods in a Launcher preset"); p_audit_preset.add_argument("file")
+    p_audit_preset = subparsers.add_parser("audit-preset", help="Audit all mods in a Launcher preset"); p_audit_preset.add_argument("file"); p_audit_preset.add_argument("--deep", action="store_true", help="Unpack PBOs for deep forensic analysis")
     p_asset_class = subparsers.add_parser("classify-asset", help="Determine category of a P3D asset"); p_asset_class.add_argument("file", help="Path to P3D file")
     p_model_diff = subparsers.add_parser("diff-models", help="Compare two P3D assets"); p_model_diff.add_argument("file_a"); p_model_diff.add_argument("file_b")
     p_proxy = subparsers.add_parser("manage-proxies", help="Proxy injection and sanitization"); p_proxy.add_argument("file"); p_proxy.add_argument("action", choices=["list", "sanitize", "inject"]); p_proxy.add_argument("--proxy"); p_proxy.add_argument("--pos")
@@ -489,7 +489,7 @@ def main():
         "publish": cmd_publish, "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "apply-updates": cmd_apply_updates, "audit-deps": cmd_audit_deps,
         "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings, "audit-security": cmd_audit_security, "audit-signatures": cmd_audit_signatures,
         "audit-performance": cmd_audit_performance, "audit-keys": cmd_audit_keys, "audit-mission": cmd_audit_mission, "mission-setup": cmd_mission_setup, 
-        "audit-preset": lambda a: subprocess.run([sys.executable, "tools/modlist_auditor.py", a.file]),
+        "audit-preset": lambda a: subprocess.run([sys.executable, "tools/modlist_auditor.py", a.file] + (["--deep"] if a.deep else [])),
         "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest, "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, 
         "generate-vscode": cmd_generate_vscode, "generate-changelog": cmd_generate_changelog, "setup-git-hooks": cmd_setup_git_hooks,
         "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
