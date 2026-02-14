@@ -91,3 +91,11 @@
 
 ---
 *Maintained by UKSFTA Senior Production Engineer*
+
+## Phase 9: Tactical Optimization (v1.8.0)
+*Status: Initializing*
+
+- [ ] **Unit-Wide Normalization**: Bulk migrate all unit repos to `z\uksftaddons`.
+- [ ] **`asset-optimizer`**: Automated texture downscaling and LOD pruning.
+- [ ] **`audit-preset`**: Compliance check for external Workshop modlists.
+
