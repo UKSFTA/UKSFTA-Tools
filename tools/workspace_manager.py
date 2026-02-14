@@ -93,6 +93,7 @@ def cmd_help(console):
     intel_table.add_row("[bold cyan]audit-updates   [/]", "[dim]Check live Workshop for pending mod updates[/]")
     intel_table.add_row("[bold cyan]apply-updates   [/]", "[dim]Automatically update and sync all out-of-date mods[/]")
     intel_table.add_row("[bold cyan]gh-runs         [/]", "[dim]Real-time monitoring of GitHub Actions runners[/]")
+    intel_table.add_row("[bold cyan]list-models     [/]", "[dim]Audit all P3D models within a HEMTT project[/]")
     audit_table = Table(title="[Assurance & Quality]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold yellow")
     audit_table.add_row("[bold cyan]audit            [/]", "[dim]Master Audit: Run all health and security checks[/]")
     audit_table.add_row("[bold cyan]lint             [/]", "[dim]Full Quality Suite (Markdown, JSON, Config, SQF)[/]")
@@ -116,6 +117,8 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]generate-vscode  [/]", "[dim]Setup VS Code Tasks for one-click development[/]")
     prod_table.add_row("[bold cyan]setup-git-hooks  [/]", "[dim]Install local pre-commit quality/security guards[/]")
     prod_table.add_row("[bold cyan]fix-syntax       [/]", "[dim]Standardize indentation and formatting in all repos[/]")
+    prod_table.add_row("[bold cyan]debinarize       [/]", "[dim]Convert Arma 3 models (ODOL -> MLOD) with path fixing[/]")
+    prod_table.add_row("[bold cyan]migrate-prefix   [/]", "[dim]Bulk migrate texture/material paths in a project[/]")
     prod_table.add_row("[bold cyan]clean-strings    [/]", "[dim]Purge unused keys from all stringtable.xml files[/]")
     prod_table.add_row("[bold cyan]notify           [/]", "[dim]Send a manual development update to Discord[/]")
     prod_table.add_row("[bold cyan]generate-docs    [/]", "[dim]Auto-generate API Manual from SQF headers[/]")
@@ -464,6 +467,67 @@ def cmd_workshop_tags(args):
     tags = Path(__file__).parent / "workshop_tags.txt"
     if tags.exists(): print(tags.read_text())
 
+def cmd_debinarize(args):
+    console = Console(force_terminal=True); print_banner(console)
+    from p3d_debinarizer import run_debinarizer
+    rename = (args.old, args.new) if args.old and args.new else None
+    run_debinarizer(args.input, args.output, args.info, args.map, args.recursive, rename)
+
+def cmd_migrate_prefix(args):
+    console = Console(force_terminal=True); print_banner(console)
+    from p3d_debinarizer import fix_project_paths
+    projects = get_projects()
+    target = next((p for p in projects if p.name.lower() == args.project.lower()), None)
+    
+    if not target:
+        console.print(f"[bold red]Error:[/] Project {args.project} not found in workspace."); return
+
+    # Try to resolve new prefix from project.toml
+    new_prefix = args.new_prefix
+    if not new_prefix:
+        toml_path = target / ".hemtt" / "project.toml"
+        if toml_path.exists():
+            with open(toml_path, 'r') as f:
+                content = f.read()
+                main_p = re.search(r'mainprefix = "(.*)"', content)
+                p = re.search(r'prefix = "(.*)"', content)
+                if main_p and p: new_prefix = f"{main_p.group(1)}\\{p.group(1)}"
+    
+    if not new_prefix:
+        console.print("[bold red]Error:[/] Could not determine new prefix. Please specify --new-prefix."); return
+
+    fix_project_paths(target, args.old_prefix, new_prefix)
+
+def cmd_list_models(args):
+    console = Console(force_terminal=True); print_banner(console)
+    from p3d_debinarizer import run_debinarizer
+    projects = get_projects()
+    target = next((p for p in projects if p.name.lower() == args.project.lower()), None)
+    
+    if not target:
+        console.print(f"[bold red]Error:[/] Project {args.project} not found in workspace."); return
+
+    addons_dir = target / "addons"
+    if not addons_dir.exists():
+        console.print(f"[bold red]Error:[/] Addons directory not found in {target}"); return
+
+    p3ds = list(addons_dir.glob("**/*.p3d"))
+    if not p3ds:
+        console.print(f"[yellow]! No P3D models found in {target.name}[/yellow]"); return
+
+    table = Table(title=f"Model Inventory: {target.name}", box=box.ROUNDED, border_style="cyan")
+    table.add_column("Path", style="dim"); table.add_column("File", style="bold white")
+    
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
+        task = progress.add_task(f"Auditing {len(p3ds)} models...", total=len(p3ds))
+        for p3d in p3ds:
+            rel_path = p3d.relative_to(target)
+            table.add_row(str(rel_path.parent), p3d.name)
+            progress.advance(task)
+
+    console.print(table)
+    console.print(f"\n[dim]Tip: Use [cyan]./tools/workspace_manager.py debinarize --info <path>[/cyan] for deep metadata.[/dim]\n")
+
 def cmd_workshop_info(args):
     auditor = Path(__file__).parent / "workshop_inspector.py"; subprocess.run([sys.executable, str(auditor)])
 
@@ -482,6 +546,23 @@ def main():
     for cmd in simple_cmds:
         subparsers.add_parser(cmd, help=f"Run {cmd} utility", parents=[base_parser])
     
+    p_debin = subparsers.add_parser("debinarize", help="ODOL to MLOD conversion", parents=[base_parser])
+    p_debin.add_argument("input", help="Input P3D or directory")
+    p_debin.add_argument("output", nargs="?", help="Output P3D or directory")
+    p_debin.add_argument("--info", action="store_true", help="Show model info")
+    p_debin.add_argument("--map", action="store_true", help="Show structural map")
+    p_debin.add_argument("-r", "--recursive", action="store_true", help="Recursive processing")
+    p_debin.add_argument("--old", help="Old path prefix to rename")
+    p_debin.add_argument("--new", help="New path prefix to rename")
+
+    p_mig = subparsers.add_parser("migrate-prefix", help="Bulk fix paths in a project", parents=[base_parser])
+    p_mig.add_argument("project", help="Name of project (e.g. UKSFTA-Main)")
+    p_mig.add_argument("old_prefix", help="Old prefix to replace (e.g. a3)")
+    p_mig.add_argument("--new-prefix", help="Override new prefix (defaults to project.toml value)")
+
+    p_list_m = subparsers.add_parser("list-models", help="Inventory models in a project", parents=[base_parser])
+    p_list_m.add_argument("project", help="Project name")
+
     p_lint = subparsers.add_parser("lint", help="Full Quality Lint", parents=[base_parser])
     p_lint.add_argument("--fix", action="store_true", help="Auto-fix formatting errors")
 
@@ -520,6 +601,9 @@ def main():
         "setup-git-hooks": cmd_setup_git_hooks,
         "check-env": cmd_check_env, 
         "fix-syntax": cmd_fix_syntax, 
+        "debinarize": cmd_debinarize,
+        "migrate-prefix": cmd_migrate_prefix,
+        "list-models": cmd_list_models,
         "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
         "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "classify-mod": cmd_classify_mod, "modlist-classify": cmd_modlist_classify, "modlist-audit": cmd_modlist_audit,
         "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), 

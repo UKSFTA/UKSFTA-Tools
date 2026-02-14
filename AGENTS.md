@@ -22,3 +22,15 @@ Consult the following before suggesting architectural changes:
 
 - `docs/ARCHITECTURE.md`: VFS and Logic/Asset separation rules.
 - `docs/WORKFLOW.md`: The 4-step pipeline (Sync -> Test -> Build -> Release).
+
+## 🚀 Modernized Toolset Integration (2026-02-14)
+
+### P3D Debinarizer (v1.2.0)
+- **Status:** Integrated into Platinum DevOps Suite.
+- **HEMTT Alignment:** Fully compatible with HEMTT project structures and prefix mapping.
+- **Integrated Commands:**
+  - `debinarize`: High-fidelity ODOL to MLOD conversion with path fixing.
+  - `migrate-prefix`: Automated project-wide prefix remapping (uses .hemtt/project.toml).
+  - `list-models`: HEMTT-aware asset inventory and metadata reporting.
+- **Distribution:** Binary deployed at `bin/linux-x64/debinarizer`, Python wrapper in `tools/p3d_debinarizer.py`.
+- **Reverse Engineering:** First comprehensive documentation of ODOL v73 format in `docs/ODOL_v73_SPEC.md` (in debinarizer repo).
