@@ -294,7 +294,7 @@ def cmd_lint(args):
     if args.fix: cmd_md.append("--fix")
     subprocess.run(cmd_md)
 
-    # 2. JSON/Metadata (Biome)
+    # 2. JSON & Metadata (Biome)
     console.print("\n[bold]2. JSON & Metadata (Biome):[/bold]")
     cmd_biome = ["npx", "--yes", "@biomejs/biome", "ci", "."]
     if args.fix: cmd_biome = ["npx", "--yes", "@biomejs/biome", "check", "--write", "."]
@@ -480,11 +480,13 @@ def main():
     p_class = subparsers.add_parser("classify-mod", help="Classify mod side requirement"); p_class.add_argument("id", help="Steam Workshop ID or URL")
     p_list_class = subparsers.add_parser("modlist-classify", help="Classify entire modlist requirements"); p_list_class.add_argument("file", nargs="?", default="mod_sources.txt", help="Path to modlist file")
     p_list_audit = subparsers.add_parser("modlist-audit", help="Compare modlist against reference sources"); p_list_audit.add_argument("reference", help="Master HTML preset or TXT source"); p_list_audit.add_argument("targets", nargs="+", help="Sources to check against reference"); p_list_audit.add_argument("--deep", action="store_true", help="Scan dependencies of targets")
-        p_asset_class = subparsers.add_parser("classify-asset", help="Determine category of a P3D asset"); p_asset_class.add_argument("file", help="Path to P3D file")
-            p_model_diff = subparsers.add_parser("diff-models", help="Compare two P3D assets"); p_model_diff.add_argument("file_a"); p_model_diff.add_argument("file_b")
-                p_proxy = subparsers.add_parser("manage-proxies", help="Proxy injection and sanitization"); p_proxy.add_argument("file"); p_proxy.add_argument("action", choices=["list", "sanitize", "inject"]); p_proxy.add_argument("--proxy"); p_proxy.add_argument("--pos")
-                p_rebin = subparsers.add_parser("rebin-guard", help="Validate asset readiness for binarization"); p_rebin.add_argument("file")
-                args = parser.parse_args(); console = Console(force_terminal=True)    cmds = {
+    p_asset_class = subparsers.add_parser("classify-asset", help="Determine category of a P3D asset"); p_asset_class.add_argument("file", help="Path to P3D file")
+    p_model_diff = subparsers.add_parser("diff-models", help="Compare two P3D assets"); p_model_diff.add_argument("file_a"); p_model_diff.add_argument("file_b")
+    p_proxy = subparsers.add_parser("manage-proxies", help="Proxy injection and sanitization"); p_proxy.add_argument("file"); p_proxy.add_argument("action", choices=["list", "sanitize", "inject"]); p_proxy.add_argument("--proxy"); p_proxy.add_argument("--pos")
+    p_rebin = subparsers.add_parser("rebin-guard", help="Validate asset readiness for binarization"); p_rebin.add_argument("file")
+    
+    args = parser.parse_args(); console = Console(force_terminal=True)
+    cmds = {
         "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
         "test": lambda a: subprocess.run(["pytest"]), "clean": lambda a: [subprocess.run(["rm", "-rf", ".hemttout"], cwd=p) for p in get_projects()],
         "cache": lambda a: [subprocess.run(["du", "-sh", ".hemttout"], cwd=p) for p in get_projects() if (p/".hemttout").exists()],
