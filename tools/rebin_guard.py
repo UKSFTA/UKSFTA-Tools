@@ -18,8 +18,7 @@ def check_geometry_health(p3d_path):
     if not DEBINARIZER.exists():
         return "❌ Binary Missing"
 
-    print(f"
-[*] Checking Binarization Readiness: {os.path.basename(p3d_path)}")
+    print(f"\n[*] Checking Binarization Readiness: {os.path.basename(p3d_path)}")
     
     # 1. Check for missing critical LODs
     cmd = [str(DEBINARIZER), str(p3d_path), "-audit-lods"]
@@ -37,7 +36,7 @@ def check_geometry_health(p3d_path):
     try:
         res = subprocess.run(cmd_info, capture_output=True, text=True, timeout=10)
         # Search for any non-normalized paths (e.g., local C:\ paths)
-        local_path_match = re.search(r'[a-z]:', res.stdout, re.IGNORECASE)
+        local_path_match = re.search(r'[a-z]:\\', res.stdout, re.IGNORECASE)
         if local_path_match:
             print(f"  ❌ FAIL: Non-normalized path detected: {local_path_match.group(0)}")
             return False

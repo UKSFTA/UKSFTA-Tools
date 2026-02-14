@@ -48,11 +48,22 @@
 ## Phase 4: HEMTT Deep Integration
 *Status: Complete*
 
-- [ ] **`pre_build` Forensic Hook**:
+- [x] **`pre_build` Forensic Hook**:
     - Execute JIT (Just-In-Time) debinarization for third-party submodules.
     - Dynamic path re-prefixing during the HEMTT build cycle.
 - [ ] **Unit Signer Integration**:
     - Seamless signing of debinarized artifacts within the HEMTT pipeline.
+
+## Phase 5: Asset Ingestion & Porting (v1.4.0)
+*Status: Initializing*
+
+- [ ] **`import-wizard`**:
+    - Automated "One-Click" porting of legacy/external assets.
+    - Recursive filename sanitization (lower_case + snake_case).
+    - **RVMAT Refactoring**: Bulk path remapping in material files.
+    - **Boilerplate Generator**: Auto-generate `config.cpp` entries via asset classification.
+- [ ] **Unit-Wide Normalization**:
+    - Bulk migrate all existing `UKSFTA-*` repositories to the new VFS prefix standard.
 
 ---
 *Maintained by UKSFTA Senior Production Engineer*
