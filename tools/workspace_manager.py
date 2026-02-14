@@ -126,6 +126,7 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]manage-proxies   [/]", "[dim]CLI-based proxy injection and sanitization[/]")
     prod_table.add_row("[bold cyan]rebin-guard      [/]", "[dim]Pre-binarization geometry and path health check[/]")
     prod_table.add_row("[bold cyan]import-wizard    [/]", "[dim]One-click automated ingestion of external assets[/]")
+    prod_table.add_row("[bold cyan]trend-analyze    [/]", "[dim]Track and report on unit health score trends[/]")
     console.print(ws_table); console.print(intel_table); console.print(audit_table); console.print(prod_table)
     console.print("\n[bold]Tip:[/bold] Run [cyan]./tools/workspace_manager.py <command> --help[/cyan] for detailed options and examples.\n")
 
@@ -444,6 +445,7 @@ def main():
     p_proxy = subparsers.add_parser("manage-proxies", help="Proxy injection and sanitization"); p_proxy.add_argument("file"); p_proxy.add_argument("action", choices=["list", "sanitize", "inject"]); p_proxy.add_argument("--proxy"); p_proxy.add_argument("--pos")
     p_rebin = subparsers.add_parser("rebin-guard", help="Validate asset readiness for binarization"); p_rebin.add_argument("file")
     p_wizard = subparsers.add_parser("import-wizard", help="Automated asset porting wizard"); p_wizard.add_argument("source"); p_wizard.add_argument("name"); p_wizard.add_argument("prefix")
+    p_trend = subparsers.add_parser("trend-analyze", help="Track unit health trends"); p_trend.add_argument("--report", action="store_true", help="Show trend report instead of capturing snapshot")
     
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
@@ -462,6 +464,7 @@ def main():
         "manage-proxies": lambda a: subprocess.run([sys.executable, "tools/proxy_manager.py", a.file, a.action] + (["--proxy", a.proxy] if a.proxy else []) + (["--pos", a.pos] if a.pos else [])),
         "rebin-guard": lambda a: subprocess.run([sys.executable, "tools/rebin_guard.py", a.file]),
         "import-wizard": lambda a: subprocess.run([sys.executable, "tools/import_wizard.py", a.source, a.name, a.prefix]),
+        "trend-analyze": lambda a: subprocess.run([sys.executable, "tools/trend_analyzer.py"] + (["report"] if a.report else [])),
         "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console),
         "lint": cmd_lint
     }
