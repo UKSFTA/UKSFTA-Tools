@@ -154,46 +154,53 @@ def cmd_dashboard(args):
     subprocess.run([sys.executable, str(auditor)])
 
 def cmd_gh_runs(args):
-    projects = get_projects(); workflow_names = set(); all_stats = []
-    for p in projects:
-        try:
-            res = subprocess.run(["gh", "run", "list", "--limit", "15", "--json", "workflowName"], cwd=p, capture_output=True, text=True)
-            if res.returncode == 0:
-                for r in json.loads(res.stdout): workflow_names.add(r['workflowName'])
-        except: pass
-    sorted_workflows = sorted(list(workflow_names))
-    for p in projects:
-        stats = {"project": p.name, "workflows": {}, "latest_age": "-"}
-        try:
-            res = subprocess.run(["gh", "run", "list", "--limit", "20", "--json", "workflowName,conclusion,status,createdAt"], cwd=p, capture_output=True, text=True)
-            if res.returncode == 0:
-                for run in json.loads(res.stdout):
-                    wf = run['workflowName']
-                    if wf not in stats["workflows"]:
-                        stats["workflows"][wf] = {"status": run['status'], "conclusion": run['conclusion']}
-                        if stats["latest_age"] == "-":
-                            created = datetime.fromisoformat(run['createdAt'].replace('Z', '+00:00'))
-                            diff = datetime.now(created.tzinfo) - created
-                            stats["latest_age"] = f"{diff.days}d" if diff.days > 0 else f"{diff.seconds // 3600}h"
-        except: pass
-        all_stats.append(stats)
-    if args.json: print(json.dumps(all_stats, indent=2)); return
     console = Console(force_terminal=True); print_banner(console)
-    if not sorted_workflows: console.print("[yellow]! No runs found.[/yellow]"); return
-    display_names = {wf: os.path.basename(wf).replace(".yml", "").capitalize() for wf in sorted_workflows}
-    table = Table(title="Pipeline Matrix", box=box.ROUNDED, border_style="blue")
-    table.add_column("Project", style="cyan"); [table.add_column(display_names[wf], justify="center") for wf in sorted_workflows]; table.add_column("Age", justify="right")
+    projects = get_projects(); workflow_names = set(); all_stats = []
+    
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
+        task = progress.add_task("[cyan]Gathering pipeline intelligence...", total=len(projects))
+        for p in projects:
+            stats = {"project": p.name, "workflows": {}, "latest_age": "-"}
+            try:
+                res = subprocess.run(["gh", "run", "list", "--limit", "10", "--json", "workflowName,conclusion,status,createdAt"], cwd=p, capture_output=True, text=True)
+                if res.returncode == 0:
+                    runs = json.loads(res.stdout)
+                    for run in runs:
+                        wf = run['workflowName']
+                        workflow_names.add(wf)
+                        if wf not in stats["workflows"]:
+                            stats["workflows"][wf] = {"status": run['status'], "conclusion": run['conclusion']}
+                            if stats["latest_age"] == "-":
+                                created = datetime.fromisoformat(run['createdAt'].replace('Z', '+00:00'))
+                                diff = datetime.now(created.tzinfo) - created
+                                stats["latest_age"] = f"{diff.days}d" if diff.days > 0 else f"{diff.seconds // 3600}h"
+            except: pass
+            all_stats.append(stats)
+            progress.advance(task)
+
+    if not workflow_names: console.print("[yellow]! No pipeline data found. Ensure 'gh' CLI is authenticated.[/yellow]"); return
+    
+    sorted_workflows = sorted(list(workflow_names))
+    display_names = {wf: wf.replace(".yml", "").replace("🤖 Agent: ", "").capitalize() for wf in sorted_workflows}
+    
+    table = Table(title=f"Unit Pipeline Matrix ({datetime.now().strftime('%H:%M')})", box=box.ROUNDED, border_style="blue")
+    table.add_column("Project", style="cyan")
+    for wf in sorted_workflows: table.add_column(display_names[wf], justify="center")
+    table.add_column("Age", justify="right")
+    
     for s in all_stats:
         row_icons = []
         for wf in sorted_workflows:
             w_stat = s["workflows"].get(wf, {"status": "none", "conclusion": "none"})
-            if w_stat["status"] == "none": icon = "-"
-            elif w_stat["status"] != "completed": icon = "..."
+            if w_stat["status"] == "none": icon = "[dim]-[/dim]"
+            elif w_stat["status"] != "completed": icon = "[bold yellow]...[/]"
             elif w_stat["conclusion"] == "success": icon = "[bold green]PASS[/]"
             else: icon = "[bold red]FAIL[/]"
             row_icons.append(icon)
         table.add_row(s["project"], *row_icons, s["latest_age"])
+    
     console.print(table)
+    console.print("[dim]Legend: PASS | FAIL | ... Running | - No Data[/dim]")
 
 def cmd_audit_updates(args):
     projects = get_projects(); mod_registry = {}
@@ -295,6 +302,7 @@ def cmd_publish(args):
                 if wm and wm.group(1).isdigit(): publishable.append((p, wm.group(1)))
     for p, ws_id in publishable:
         cmd = [sys.executable, "tools/release.py", "-n", "-y"]
+        if args.offline: cmd.append("--offline")
         if args.dry_run: cmd.append("--dry-run")
         subprocess.run(cmd, cwd=p)
 
@@ -381,7 +389,7 @@ def main():
         "ace-arsenal": lambda a: subprocess.run([sys.executable, "tools/ace_arsenal_helper.py", a.config]),
         "import-wizard": lambda a: subprocess.run([sys.executable, "tools/import_wizard.py", a.source, a.name, a.prefix]),
         "unit-wide-sync": lambda a: [subprocess.run([sys.executable, "tools/path_refactor.py", str(p), a.old_tag]) for p in get_projects()],
-        "lint": cmd_lint, "help": lambda a: cmd_help(console)
+        "gh-runs": cmd_gh_runs, "lint": cmd_lint, "help": lambda a: cmd_help(console)
     }
     if args.command in cmds: cmds[args.command](args)
     else: cmd_help(console)
