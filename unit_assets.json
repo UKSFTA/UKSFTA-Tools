@@ -1,0 +1,93 @@
+[
+  {
+    "className": "UKSFTA_headgear_Pvs_optic",
+    "displayName": "UKSFTA headgear Pvs_optic",
+    "parent": "UKSFTA_headgear_Helmet_Base",
+    "author": "UKSFTA",
+    "project": "UKSFTA-JacksKit"
+  },
+  {
+    "className": "UKSFTA_headgear_Backpackdrawbridge",
+    "displayName": "UKSFTA headgear Backpackdrawbridge",
+    "parent": "UKSFTA_headgear_Helmet_Base",
+    "author": "UKSFTA",
+    "project": "UKSFTA-JacksKit"
+  },
+  {
+    "className": "UKSFTA_headgear_Ball_cap_2_peltors",
+    "displayName": "UKSFTA headgear Ball_cap_2_peltors",
+    "parent": "UKSFTA_headgear_Helmet_Base",
+    "author": "UKSFTA",
+    "project": "UKSFTA-JacksKit"
+  },
+  {
+    "className": "UKSFTA_headgear_Mystery_ranch",
+    "displayName": "UKSFTA headgear Mystery_ranch",
+    "parent": "UKSFTA_headgear_Helmet_Base",
+    "author": "UKSFTA",
+    "project": "UKSFTA-JacksKit"
+  },
+  {
+    "className": "UKSFTA_headgear_Pvs_31",
+    "displayName": "UKSFTA headgear Pvs_31",
+    "parent": "UKSFTA_headgear_Helmet_Base",
+    "author": "UKSFTA",
+    "project": "UKSFTA-JacksKit"
+  },
+  {
+    "className": "UKSFTA_headgear_Pvs_31_down",
+    "displayName": "UKSFTA headgear Pvs_31_down",
+    "parent": "UKSFTA_headgear_Helmet_Base",
+    "author": "UKSFTA",
+    "project": "UKSFTA-JacksKit"
+  },
+  {
+    "className": "UKSFTA_headgear_Recce_bergan",
+    "displayName": "UKSFTA headgear Recce_bergan",
+    "parent": "UKSFTA_headgear_Helmet_Base",
+    "author": "UKSFTA",
+    "project": "UKSFTA-JacksKit"
+  },
+  {
+    "className": "UKSFTA_headgear_Yote_chris",
+    "displayName": "UKSFTA headgear Yote_chris",
+    "parent": "UKSFTA_headgear_Helmet_Base",
+    "author": "UKSFTA",
+    "project": "UKSFTA-JacksKit"
+  },
+  {
+    "className": "UKSFTA_Flag_TFA",
+    "displayName": "Flag (Task Force Alpha)",
+    "parent": "FlagCarrier",
+    "author": "Jack + Ross",
+    "project": "addons"
+  },
+  {
+    "className": "UKSF_LHA",
+    "displayName": "[UKSF] LHA",
+    "parent": "Peral_LHA",
+    "author": "UKSFTA",
+    "project": "UKSFTA-Mods"
+  },
+  {
+    "className": "UKSFTA_Flag_TFA",
+    "displayName": "Flag (Task Force Alpha)",
+    "parent": "FlagCarrier",
+    "author": "Jack + Ross",
+    "project": "addons"
+  },
+  {
+    "className": "UKSFTA_Radio",
+    "displayName": "[UKSF] Music Player",
+    "parent": "Land_FMradio_F",
+    "author": "UKSFTA",
+    "project": "UKSFTA-Tmp"
+  },
+  {
+    "className": "UKSFTA_Radio",
+    "displayName": "[UKSF] Radio",
+    "parent": "Land_FMradio_F",
+    "author": "UKSF Taskforce Alpha",
+    "project": "UKSFTA-Tmp"
+  }
+]

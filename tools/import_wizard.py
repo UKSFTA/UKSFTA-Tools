@@ -13,6 +13,18 @@ from path_refactor import refactor_paths
 # --- CONFIGURATION ---
 UNIT_PREFIX = r"z\uksfta\addons"
 
+def get_vfs_project_name(target_dir):
+    """Attempts to find the HEMTT project prefix."""
+    project_root = Path(target_dir).parent.parent
+    project_toml = project_root / ".hemtt" / "project.toml"
+    if project_toml.exists():
+        content = project_toml.read_text()
+        match = re.search(r'prefix = "([^"]+)"', content)
+        if match: return match.group(1)
+    name = project_root.name.lower()
+    if name.startswith("uksfta-"): name = name.replace("uksfta-", "")
+    return name.replace("-", "_")
+
 def sanitize_name(name):
     """Converts a name to lower_snake_case."""
     base, ext = os.path.splitext(name)
@@ -37,28 +49,33 @@ def recursive_sanitize(directory):
             if old_path != new_path:
                 os.rename(old_path, new_path)
 
-def generate_config_boilerplate(directory, addon_name):
-    """Generates a config.cpp based on classified assets."""
+def generate_config_boilerplate(directory, addon_name, vfs_project):
+    """Generates a config.cpp with clean inheritance and correct paths."""
     print(f"[*] Generating config.cpp boilerplate for {addon_name}...")
     p3ds = list(Path(directory).rglob("*.p3d"))
     
-    cfg_weapons = []
-    cfg_vehicles = []
-    
+    v_weapons = [
+        f'    class UKSFTA_{vfs_project}_{addon_name}_Vest_Base: Vest_Camo_Base {{ scope = 0; displayName = "UKSFTA {addon_name} Base"; }};',
+        f'    class UKSFTA_{vfs_project}_{addon_name}_Helmet_Base: H_HelmetB {{ scope = 0; displayName = "UKSFTA {addon_name} Base"; }};'
+    ]
+    v_vehicles = [
+        f'    class UKSFTA_{vfs_project}_{addon_name}_Uniform_Base: B_Soldier_F {{ scope = 0; displayName = "UKSFTA {addon_name} Base"; }};'
+    ]
+
     for p in p3ds:
         category = classify_asset(p)
         name = p.stem.capitalize()
-        vfs_path = f"{UNIT_PREFIX}\\{addon_name}\\{p.name}"
+        vfs_path = f"{UNIT_PREFIX}\\{vfs_project}\\{addon_name}\\models\\{p.name}"
         
         if category == "Vest":
-            cfg_weapons.append(f'    class UKSFTA_{addon_name}_{name}: Vest_Camo_Base {{ scope = 2; displayName = "UKSFTA {addon_name} {name}"; model = "{vfs_path}"; }};')
+            v_weapons.append(f'    class UKSFTA_{vfs_project}_{name}: UKSFTA_{vfs_project}_{addon_name}_Vest_Base {{ scope = 2; displayName = "UKSFTA {addon_name} {name}"; model = "{vfs_path}"; }};')
         elif category == "Helmet":
-            cfg_weapons.append(f'    class UKSFTA_{addon_name}_{name}: H_HelmetB {{ scope = 2; displayName = "UKSFTA {addon_name} {name}"; model = "{vfs_path}"; }};')
+            v_weapons.append(f'    class UKSFTA_{vfs_project}_{name}: UKSFTA_{vfs_project}_{addon_name}_Helmet_Base {{ scope = 2; displayName = "UKSFTA {addon_name} {name}"; model = "{vfs_path}"; }};')
         elif category == "Uniform":
-            cfg_vehicles.append(f'    class UKSFTA_{addon_name}_{name}_Soldier: B_Soldier_F {{ scope = 2; displayName = "UKSFTA {addon_name} {name}"; model = "{vfs_path}"; }};')
+            v_vehicles.append(f'    class UKSFTA_{vfs_project}_{name}_Soldier: UKSFTA_{vfs_project}_{addon_name}_Uniform_Base {{ scope = 2; displayName = "UKSFTA {addon_name} {name}"; model = "{vfs_path}"; }};')
 
     config = f"""class CfgPatches {{
-    class UKSFTA_{addon_name} {{
+    class UKSFTA_{vfs_project}_{addon_name} {{
         units[] = {{}};
         weapons[] = {{}};
         requiredVersion = 0.1;
@@ -69,60 +86,42 @@ def generate_config_boilerplate(directory, addon_name):
 class CfgWeapons {{
     class Vest_Camo_Base;
     class H_HelmetB;
-{"\n".join(cfg_weapons)}
+{"\n".join(v_weapons)}
 }};
 
 class CfgVehicles {{
     class B_Soldier_F;
-{"\n".join(cfg_vehicles)}
+{"\n".join(v_vehicles)}
 }};
 """
-    (Path(directory) / "config.cpp").write_text(config)
+    (Path(directory) / "config.cpp").write_text(config.strip() + "\n")
 
 def run_wizard(input_dir, addon_name, old_prefix):
     """Main Ingestion Workflow."""
     print(f"\n🧙 [Import Wizard] Ingesting: {addon_name}")
     print(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     
-    # We assume we are running from project root if update was successful
-    # But for UKSFTA-Tools test, let's target our test dir
+    # Target directory logic
     target_root = Path(__file__).parent.parent.parent / "UKSFTA-JacksKit"
     target_addons = target_root / "addons"
     target_addons.mkdir(exist_ok=True, parents=True)
     
     target_dir = target_addons / addon_name
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
+    if target_dir.exists(): shutil.rmtree(target_dir)
     shutil.copytree(input_dir, target_dir)
     
-    # 1. Sanitize
     recursive_sanitize(target_dir)
+    vfs_project = get_vfs_project_name(target_dir)
+    vfs_prefix = f"{UNIT_PREFIX}\\{vfs_project}\\{addon_name}"
+    (target_dir / "$PBOPREFIX$").write_text(vfs_prefix + "\n")
     
-    # 2. Refactor P3Ds (Binary)
-    new_vfs_prefix = f"{UNIT_PREFIX}\\{addon_name}"
-    print(f"[*] Refactoring P3D paths: {old_prefix} -> {new_vfs_prefix}")
-    run_debinarizer(target_dir, recursive=True, rename=(old_prefix, new_vfs_prefix))
+    run_debinarizer(target_dir, recursive=True, rename=(old_prefix, vfs_prefix))
+    refactor_paths(target_dir, old_prefix, vfs_prefix)
+    generate_config_boilerplate(target_dir, addon_name, vfs_project)
     
-    # 3. Refactor Source Code (Text)
-    refactor_paths(target_dir, old_prefix, new_vfs_prefix)
-    
-    # 4. Generate Config (only if missing)
-    if not (target_dir / "config.cpp").exists():
-        generate_config_boilerplate(target_dir, addon_name)
-    else:
-        print("[*] Existing config.cpp found. Refactoring paths only.")
-    
-    # 5. Final Guard
-    print("\n[*] Running final integrity check...")
-    for p in target_dir.rglob("*.p3d"):
-        check_geometry_health(p)
-
     print(f"\n✨ Ingestion Complete: {target_dir}")
-    print(f"ℹ️  Next: Verify config.cpp and run './build.sh build' to test.")
 
 if __name__ == "__main__":
     if len(sys.argv) < 4:
-        print("Usage: import_wizard.py <source_dir> <new_addon_name> <old_vfs_prefix>")
-        sys.exit(1)
-    
+        print("Usage: import_wizard.py <source_dir> <new_addon_name> <old_vfs_prefix>"); sys.exit(1)
     run_wizard(sys.argv[1], sys.argv[2], sys.argv[3])

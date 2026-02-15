@@ -41,13 +41,11 @@ except ImportError:
         def fit(text, title=None, **kwargs): return f"--- {title} ---\n{text}"
 
 def get_projects():
-    # Parent directory of the UKSFTA-Tools folder
     parent_dir = Path(__file__).parent.parent.parent.resolve()
     projects = []
     if parent_dir.exists():
         for d in parent_dir.iterdir():
             if d.is_dir() and d.name.startswith("UKSFTA-"):
-                # Check for hemtt project marker or source list
                 if (d / ".hemtt" / "project.toml").exists() or (d / "mod_sources.txt").exists():
                     projects.append(d)
     return sorted(projects)
@@ -80,15 +78,7 @@ def print_banner(console):
     version = "Unknown"
     v_path = Path(__file__).parent.parent / "VERSION"
     if v_path.exists(): version = v_path.read_text().strip()
-    
-    banner = Text.assemble(
-        ("\n [!] ", "bold blue"),
-        ("UKSF TASKFORCE ALPHA ", "bold white"),
-        ("| ", "dim"),
-        ("PLATINUM DEVOPS SUITE ", "bold cyan"),
-        (f"v{version}", "bold yellow"),
-        ("\n ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", "dim blue")
-    )
+    banner = Text.assemble(("\n [!] ", "bold blue"), ("UKSF TASKFORCE ALPHA ", "bold white"), ("| ", "dim"), ("PLATINUM DEVOPS SUITE ", "bold cyan"), (f"v{version}", "bold yellow"), ("\n ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", "dim blue"))
     console.print(banner)
 
 def cmd_help(console):
@@ -111,6 +101,8 @@ def cmd_help(console):
     intel_table.add_row("[bold cyan]audit-updates   [/]", "[dim]Check live Workshop for pending mod updates[/]")
     intel_table.add_row("[bold cyan]apply-updates   [/]", "[dim]Automatically update and sync all out-of-date mods[/]")
     intel_table.add_row("[bold cyan]gh-runs         [/]", "[dim]Real-time monitoring of GitHub Actions runners[/]")
+    intel_table.add_row("[bold cyan]trend-analyze   [/]", "[dim]Track and report on unit health score trends[/]")
+    intel_table.add_row("[bold cyan]plan            [/]", "[dim]The Architect: Reasoning agent for strategic unit analysis[/]")
     audit_table = Table(title="[Assurance & Quality]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold yellow")
     audit_table.add_row("[bold cyan]audit            [/]", "[dim]Master Audit: Run all health and security checks[/]")
     audit_table.add_row("[bold cyan]lint             [/]", "[dim]Full Quality Suite (Markdown, JSON, Config, SQF)[/]")
@@ -132,22 +124,15 @@ def cmd_help(console):
     prod_table.add_row("[bold cyan]generate-preset  [/]", "[dim]Create master HTML preset of all unit dependencies[/]")
     prod_table.add_row("[bold cyan]generate-report  [/]", "[dim]Create a Markdown health report for the entire unit[/]")
     prod_table.add_row("[bold cyan]generate-manifest[/]", "[dim]Create unit-wide manifest of all mods and PBOs[/]")
+    prod_table.add_row("[bold cyan]generate-changelog[/]", "[dim]Create detailed asset changelogs for every repo[/]")
+    prod_table.add_row("[bold cyan]generate-catalog [/]", "[dim]Generate a visual armory catalog of all unit assets[/]")
     prod_table.add_row("[bold cyan]generate-vscode  [/]", "[dim]Setup VS Code Tasks for one-click development[/]")
-    prod_table.add_row("[bold cyan]setup-git-hooks  [/]", "[dim]Install local pre-commit quality/security guards[/]")
     prod_table.add_row("[bold cyan]fix-syntax       [/]", "[dim]Standardize indentation and formatting in all repos[/]")
-    prod_table.add_row("[bold cyan]clean-strings    [/]", "[dim]Purge unused keys from all stringtable.xml files[/]")
-    prod_table.add_row("[bold cyan]notify           [/]", "[dim]Send a manual development update to Discord[/]")
-    prod_table.add_row("[bold cyan]generate-docs    [/]", "[dim]Auto-generate API Manual from SQF headers[/]")
-    prod_table.add_row("[bold cyan]convert          [/]", "[dim]Optimize media for Arma (WAV/PNG -> OGG/PAA)[/]")
-    prod_table.add_row("[bold cyan]workshop-tags    [/]", "[dim]List all valid Arma 3 Steam Workshop tags[/]")
-    prod_table.add_row("[bold cyan]classify-asset   [/]", "[dim]Deep forensic classification of any P3D asset[/]")
-    prod_table.add_row("[bold cyan]diff-models      [/]", "[dim]Binary-level structural comparison of two P3D assets[/]")
-    prod_table.add_row("[bold cyan]manage-proxies   [/]", "[dim]CLI-based proxy injection and sanitization[/]")
-    prod_table.add_row("[bold cyan]rebin-guard      [/]", "[dim]Pre-binarization geometry and path health check[/]")
     prod_table.add_row("[bold cyan]import-wizard    [/]", "[dim]One-click automated ingestion of external assets[/]")
     prod_table.add_row("[bold cyan]unit-wide-sync   [/]", "[dim]Automated bulk normalization of all unit repositories[/]")
     prod_table.add_row("[bold cyan]optimize-assets  [/]", "[dim]Active texture downscaling and optimization[/]")
-    prod_table.add_row("[bold cyan]trend-analyze    [/]", "[dim]Track and report on unit health score trends[/]")
+    prod_table.add_row("[bold cyan]watch            [/]", "[dim]The Sentinel: Autonomous real-time asset watchdog[/]")
+    prod_table.add_row("[bold cyan]ace-arsenal      [/]", "[dim]Automated grouping for ACE Extended Arsenal[/]")
     console.print(ws_table); console.print(intel_table); console.print(audit_table); console.print(prod_table)
     console.print("\n[bold]Tip:[/bold] Run [cyan]./tools/workspace_manager.py <command> --help[/cyan] for detailed options and examples.\n")
 
@@ -195,7 +180,7 @@ def cmd_gh_runs(args):
             else: icon = "[bold red]FAIL[/]"
             row_icons.append(icon)
         table.add_row(s["project"], *row_icons, s["latest_age"])
-    console.print(table); console.print("[dim]Key: PASS | FAIL | ... Running | - No Data[/dim]")
+    console.print(table)
 
 def cmd_audit_updates(args):
     projects = get_projects(); mod_registry = {}
@@ -248,32 +233,7 @@ def cmd_apply_updates(args):
             subprocess.run([sys.executable, "tools/manage_mods.py", "sync"], cwd=p); subprocess.run(["git", "add", "mods.lock"], cwd=p); subprocess.run(["git", "commit", "-S", "-m", "chore: automated workshop updates"], cwd=p); subprocess.run(["git", "push", "origin", "main"], cwd=p)
 
 def cmd_self_update(args):
-    console = Console(force_terminal=True); print_banner(console)
-    console.print("[bold yellow]🚀 UPDATING PLATINUM DEVOPS TOOLS[/bold yellow]")
-    root = Path(__file__).parent.parent
-    subprocess.run(["git", "pull", "origin", "main"], cwd=root)
-    console.print("[bold green]✅ Tools updated to latest version.[/bold green]")
-
-def cmd_audit_signatures(args):
-    console = Console(force_terminal=True); print_banner(console); projects = get_projects()
-    table = Table(title="Signature Audit", box=box.ROUNDED, border_style="magenta")
-    table.add_column("Project", style="cyan"); table.add_column("PBO", style="dim"); table.add_column("Signed", justify="center")
-    for p in projects:
-        build_addons = p / ".hemttout" / "build" / "addons"
-        if not build_addons.exists(): continue
-        for pbo in build_addons.glob("*.pbo"):
-            signed = (build_addons / f"{pbo.name}.uksfta.bisign").exists() or (build_addons / f"{pbo.name}.UKSFTA.bisign").exists()
-            table.add_row(p.name, pbo.name, "[bold green]SIGNED[/bold green]" if signed else "[bold red]UNSIGNED[/bold red]")
-    console.print(table)
-
-def cmd_audit_keys(args):
-    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "key_auditor.py"
-    for p in get_projects(): subprocess.run([sys.executable, str(auditor), str(p)])
-
-def cmd_notify(args):
-    notifier = Path(__file__).parent / "notify_discord.py"; cmd = [sys.executable, str(notifier), "--message", args.message, "--type", args.type]
-    if args.title: cmd.extend(["--title", args.title])
-    subprocess.run(cmd)
+    console = Console(force_terminal=True); print_banner(console); subprocess.run(["git", "pull", "origin", "main"], cwd=Path(__file__).parent.parent)
 
 def cmd_audit_full(args):
     console = Console(force_terminal=True); print_banner(console); console.print(Panel("[bold yellow]🚀 STARTING GLOBAL UNIT AUDIT[/bold yellow]", border_style="yellow"))
@@ -282,98 +242,56 @@ def cmd_audit_full(args):
 def cmd_lint(args):
     console = Console(force_terminal=True); print_banner(console)
     console.print(Panel("[bold cyan]🚀 STARTING GLOBAL QUALITY LINT[/bold cyan]", border_style="cyan"))
-    
-    # 1. Markdown Linting
-    console.print("\n[bold]1. Markdown Audit:[/bold]")
     cmd_md = ["npx", "--yes", "markdownlint-cli2", "**/*.md", "--config", ".github/linters/.markdownlint.json"]
     if args.fix: cmd_md.append("--fix")
     subprocess.run(cmd_md)
-
-    # 2. JSON & Metadata (Biome)
-    console.print("\n[bold]2. JSON & Metadata (Biome):[/bold]")
     cmd_biome = ["npx", "--yes", "@biomejs/biome", "ci", "."]
     if args.fix: cmd_biome = ["npx", "--yes", "@biomejs/biome", "check", "--write", "."]
     subprocess.run(cmd_biome)
-
-    # 3. Project Checkers
-    projects = get_projects()
-    for p in projects:
+    for p in get_projects():
         console.print(f"\n[bold]3. Project Audit: {p.name}[/bold]")
-        # Config
-        subprocess.run([sys.executable, str(Path(__file__).parent / "config_style_checker.py"), str(p)])
-        # SQF
-        subprocess.run([sys.executable, str(Path(__file__).parent / "sqf_validator.py"), str(p)])
-        # Strings
-        subprocess.run([sys.executable, str(Path(__file__).parent / "stringtable_validator.py"), str(p)])
+        subprocess.run([sys.executable, "tools/config_style_checker.py", str(p)])
+        subprocess.run([sys.executable, "tools/sqf_validator.py", str(p)])
+        subprocess.run([sys.executable, "tools/stringtable_validator.py", str(p)])
 
-def cmd_mission_setup(args):
-    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "mission_scaffolder.py"
-    cmd = [sys.executable, str(auditor), args.path]
-    if args.framework: cmd.append("--framework")
-    subprocess.run(cmd)
+def cmd_sync(args):
+    console = Console(force_terminal=True); print_banner(console)
+    for p in get_projects(): 
+        cmd = [sys.executable, "tools/manage_mods.py", "sync"]
+        if args.offline: cmd.append("--offline")
+        subprocess.run(cmd, cwd=p)
 
-def cmd_generate_preset(args):
-    auditor = Path(__file__).parent / "preset_generator.py"; subprocess.run([sys.executable, str(auditor)])
+def cmd_build(args):
+    for p in get_projects(): subprocess.run(["bash", "build.sh", "build"], cwd=p)
 
-def cmd_generate_report(args):
-    auditor = Path(__file__).parent / "report_generator.py"; subprocess.run([sys.executable, str(auditor)])
+def cmd_release(args):
+    central_dir = Path(__file__).parent.parent / "all_releases"; central_dir.mkdir(exist_ok=True)
+    for p in get_projects(): 
+        subprocess.run(["bash", "build.sh", "release"], cwd=p); proj_releases = p / "releases"
+        if proj_releases.exists():
+            for zf in proj_releases.glob("*.zip"): shutil.move(str(zf), str(central_dir / zf.name))
+            shutil.rmtree(str(proj_releases), ignore_errors=True)
 
-def cmd_generate_changelog(args):
-    tool = Path(__file__).parent / "changelog_generator.py"
-    for p in get_projects(): subprocess.run([sys.executable, str(tool), str(p)])
+def cmd_publish(args):
+    projects = get_projects(); publishable = []
+    for p in projects:
+        cp = p / ".hemtt" / "project.toml"
+        if cp.exists():
+            with open(cp, 'r') as f:
+                wm = re.search(r'workshop_id = "(.*)"', f.read())
+                if wm and wm.group(1).isdigit(): publishable.append((p, wm.group(1)))
+    for p, ws_id in publishable:
+        cmd = [sys.executable, "tools/release.py", "-n", "-y"]
+        if args.dry_run: cmd.append("--dry-run")
+        subprocess.run(cmd, cwd=p)
 
-def cmd_generate_vscode(args):
-    tool = Path(__file__).parent / "vscode_task_generator.py"
-    for p in get_projects(): subprocess.run([sys.executable, str(tool), str(p)])
-
-def cmd_setup_git_hooks(args):
-    tool = Path(__file__).parent / "git_hook_installer.py"
-    for p in get_projects(): subprocess.run([sys.executable, str(tool), str(p)])
-
-def cmd_check_env(args):
-    tool = Path(__file__).parent / "env_checker.py"; subprocess.run([sys.executable, str(tool)])
-
-def cmd_fix_syntax(args):
-    fixer = Path(__file__).parent / "syntax_fixer.py"
-    for p in get_projects(): subprocess.run([sys.executable, str(fixer), str(p)])
-
-def cmd_clean_strings(args):
-    cleaner = Path(__file__).parent / "string_cleaner.py"
-    for p in get_projects(): subprocess.run([sys.executable, str(cleaner), str(p)])
-
-def cmd_audit_performance(args):
-    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "weight_reporter.py"
-    for p in get_projects(): subprocess.run([sys.executable, str(auditor), str(p)])
-
-def cmd_classify_mod(args):
-    tool = Path(__file__).parent / "mod_classifier.py"; subprocess.run([sys.executable, str(tool), args.id])
-
-def cmd_modlist_classify(args):
-    tool = Path(__file__).parent / "modlist_classifier.py"; subprocess.run([sys.executable, str(tool), args.file])
-
-def cmd_modlist_audit(args):
-    tool = Path(__file__).parent / "modlist_auditor.py"
-    cmd = [sys.executable, str(tool), args.reference] + args.targets
-    if args.deep: cmd.append("--deep")
-    subprocess.run(cmd)
+def cmd_update(args):
+    setup = Path(__file__).parent.parent / "setup.py"
+    for p in get_projects(): subprocess.run([sys.executable, str(setup.resolve())], cwd=p)
 
 def cmd_audit_deps(args):
     console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "dependency_graph.py"
     subprocess.run([sys.executable, str(auditor)])
-
-def cmd_audit_mission(args):
-    console = Console(force_terminal=True); print_banner(console); from mission_auditor import audit_mission; defined_patches = set()
-    for p in get_projects():
-        for config in p.glob("addons/*/config.cpp"):
-            with open(config, 'r', errors='ignore') as f:
-                for m in re.finditer(r'class\s+CfgPatches\s*\{[^}]*class\s+([a-zA-Z0-9_]+)', f.read(), re.MULTILINE | re.DOTALL): defined_patches.add(m.group(1))
-    results = audit_mission(args.pbo, defined_patches)
-    if not results: return
-    table = Table(title="Mission Analysis", box=box.ROUNDED, border_style="blue")
-    for m in results["missing"]: table.add_row("Missing", m, "[bold red]❌[/bold red]")
-    for l in results["local"]: table.add_row("UKSFTA", l, "[bold green]✅[/bold green]")
-    for e in results["external"]: table.add_row("External", e, "[bold blue]ℹ️[/bold blue]")
-    console.print(table)
 
 def cmd_audit_assets(args):
     auditor = Path(__file__).parent / "asset_auditor.py"
@@ -387,125 +305,69 @@ def cmd_audit_security(args):
     auditor = Path(__file__).parent / "security_auditor.py"
     for p in get_projects(): subprocess.run([sys.executable, str(auditor), str(p)])
 
-def cmd_sync(args):
-    console = Console(force_terminal=True); print_banner(console)
-    for p in get_projects(): 
-        cmd = [sys.executable, "tools/manage_mods.py", "sync"]
-        if args.offline: cmd.append("--offline")
-        subprocess.run(cmd, cwd=p)
-    from manifest_generator import generate_total_manifest; generate_total_manifest(Path(__file__).parent.parent)
-
-def cmd_build(args):
-    for p in get_projects(): subprocess.run(["bash", "build.sh", "build"], cwd=p)
-
-def cmd_release(args):
-    central_dir = Path(__file__).parent.parent / "all_releases"; central_dir.mkdir(exist_ok=True)
-    for p in get_projects(): 
-        subprocess.run(["bash", "build.sh", "release"], cwd=p); proj_releases = p / "releases"
-        if proj_releases.exists():
-            for zf in proj_releases.glob("*.zip"): shutil.move(str(zf), str(central_dir / zf.name))
-            shutil.rmtree(str(proj_releases), ignore_errors=True)
-    from manifest_generator import generate_total_manifest; generate_total_manifest(Path(__file__).parent.parent)
-
-def cmd_publish(args):
-    projects = get_projects(); publishable = []
+def cmd_audit_signatures(args):
+    console = Console(force_terminal=True); print_banner(console); projects = get_projects()
     for p in projects:
-        cp = p / ".hemtt" / "project.toml"
-        if cp.exists():
-            with open(cp, 'r') as f:
-                wm = re.search(r'workshop_id = "(.*)"', f.read())
-                if wm and wm.group(1).isdigit(): publishable.append((p, wm.group(1)))
-    for p, ws_id in publishable:
-        cmd = [sys.executable, "tools/release.py", "-n", "-y"]
-        if args.offline: cmd.append("--offline")
-        if args.dry_run: cmd.append("--dry-run")
-        subprocess.run(cmd, cwd=p)
+        build_addons = p / ".hemttout" / "build" / "addons"
+        if not build_addons.exists(): continue
+        for pbo in build_addons.glob("*.pbo"):
+            signed = (build_addons / f"{pbo.name}.uksfta.bisign").exists()
+            print(f"  {p.name:<20} | {pbo.name:<30} | {'✅' if signed else '❌'}")
 
-def cmd_update(args):
-    setup = Path(__file__).parent.parent / "setup.py"
-    for p in get_projects(): subprocess.run([sys.executable, str(setup.resolve())], cwd=p)
-
-def cmd_generate_docs(args):
-    gen = Path(__file__).parent / "doc_generator.py"
-    for p in get_projects(): subprocess.run([sys.executable, str(gen), str(p)])
-
-def cmd_generate_manifest(args):
-    from manifest_generator import generate_total_manifest; generate_total_manifest(Path(__file__).parent.parent)
-
-def cmd_workshop_tags(args):
-    tags = Path(__file__).parent / "workshop_tags.txt"
-    if tags.exists(): print(tags.read_text())
-
-def cmd_workshop_info(args):
-    auditor = Path(__file__).parent / "workshop_inspector.py"; subprocess.run([sys.executable, str(auditor)])
+def cmd_audit_keys(args):
+    console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "key_auditor.py"
+    for p in get_projects(): subprocess.run([sys.executable, str(auditor), str(p)])
 
 def cmd_clean(args):
     for p in get_projects():
         target = p / ".hemttout"
-        if target.exists():
-            shutil.rmtree(target)
-            print(f"  ✅ Cleaned: {p.name}")
+        if target.exists(): shutil.rmtree(target); print(f"  ✅ Cleaned: {p.name}")
 
 def cmd_cache(args):
     total = 0
     for p in get_projects():
         target = p / ".hemttout"
-        if target.exists():
-            sz = get_dir_size(target)
-            total += sz
-            print(f"  {p.name:<20} : {format_bytes(sz)}")
+        if target.exists(): sz = get_dir_size(target); total += sz; print(f"  {p.name:<20} : {format_bytes(sz)}")
     print(f"\n[bold]Total Unit Cache:[/] {format_bytes(total)}")
 
 def main():
     parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
-    parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
     subparsers = parser.add_subparsers(dest="command")
-    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "audit-keys", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "setup-git-hooks", "check-env", "fix-syntax", "clean-strings", "update", "self-update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
+    
+    # Generic commands
+    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "audit-keys", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "generate-catalog", "setup-git-hooks", "check-env", "fix-syntax", "update", "self-update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
         subparsers.add_parser(cmd, help=f"Run {cmd} utility")
     
-    p_lint = subparsers.add_parser("lint", help="Full Quality Lint")
-    p_lint.add_argument("--fix", action="store_true", help="Auto-fix formatting errors")
-
-    p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path", help="Path to mission folder"); p_ms.add_argument("--framework", action="store_true", help="Inject Mission Framework"); p_ms.epilog = "Example: ./tools/workspace_manager.py mission-setup my_op --framework"
+    p_lint = subparsers.add_parser("lint", help="Full Quality Lint"); p_lint.add_argument("--fix", action="store_true")
+    p_ms = subparsers.add_parser("mission-setup", help="Standardize a mission folder"); p_ms.add_argument("path")
     p_sync = subparsers.add_parser("sync", help="Synchronize mods"); p_sync.add_argument("--offline", action="store_true")
-    subparsers.add_parser("pull-mods", help="Alias for sync").add_argument("--offline", action="store_true")
     p_pub = subparsers.add_parser("publish", help="Upload to Steam"); p_pub.add_argument("--dry-run", action="store_true")
-    p_pub.add_argument("--offline", action="store_true", help="Generate local metadata only")
-    p_conv = subparsers.add_parser("convert", help="Convert media"); p_conv.add_argument("files", nargs="+")
-    p_miss = subparsers.add_parser("audit-mission", help="Verify mission PBO"); p_miss.add_argument("pbo")
-    p_audit_preset = subparsers.add_parser("audit-preset", help="Audit all mods in a Launcher preset"); p_audit_preset.add_argument("file"); p_audit_preset.add_argument("--deep", action="store_true", help="Unpack PBOs for deep forensic analysis")
-    p_asset_class = subparsers.add_parser("classify-asset", help="Determine category of a P3D asset"); p_asset_class.add_argument("file", help="Path to P3D file")
-    p_model_diff = subparsers.add_parser("diff-models", help="Compare two P3D assets"); p_model_diff.add_argument("file_a"); p_model_diff.add_argument("file_b")
-    p_proxy = subparsers.add_parser("manage-proxies", help="Proxy injection and sanitization"); p_proxy.add_argument("file"); p_proxy.add_argument("action", choices=["list", "sanitize", "inject"]); p_proxy.add_argument("--proxy"); p_proxy.add_argument("--pos")
-    p_rebin = subparsers.add_parser("rebin-guard", help="Validate asset readiness for binarization"); p_rebin.add_argument("file")
+    p_audit_preset = subparsers.add_parser("audit-preset", help="Audit all mods in a Launcher preset"); p_audit_preset.add_argument("file"); p_audit_preset.add_argument("--deep", action="store_true")
     p_wizard = subparsers.add_parser("import-wizard", help="Automated asset porting wizard"); p_wizard.add_argument("source"); p_wizard.add_argument("name"); p_wizard.add_argument("prefix")
     p_unit_sync = subparsers.add_parser("unit-wide-sync", help="Bulk normalize all unit repositories"); p_unit_sync.add_argument("old_tag")
-    p_opt = subparsers.add_parser("optimize-assets", help="Active asset optimization"); p_opt.add_argument("path"); p_opt.add_argument("--apply", action="store_true", help="Apply optimizations (overwrite files)")
-    p_trend = subparsers.add_parser("trend-analyze", help="Track unit health trends"); p_trend.add_argument("--report", action="store_true", help="Show trend report instead of capturing snapshot")
+    p_opt = subparsers.add_parser("optimize-assets", help="Active asset optimization"); p_opt.add_argument("path"); p_opt.add_argument("--apply", action="store_true")
+    p_trend = subparsers.add_parser("trend-analyze", help="Track unit health trends"); p_trend.add_argument("--report", action="store_true")
+    p_plan = subparsers.add_parser("plan", help="The Architect: Strategic reasoning agent")
+    p_watch = subparsers.add_parser("watch", help="The Sentinel: Autonomous real-time watchdog"); p_watch.add_argument("path", nargs="?", default=".")
+    p_arsenal = subparsers.add_parser("ace-arsenal", help="Automated ACE Extended Arsenal grouping"); p_arsenal.add_argument("config")
     
     args = parser.parse_args(); console = Console(force_terminal=True)
     cmds = {
-        "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "pull-mods": cmd_sync, "build": cmd_build, "release": cmd_release,
-        "test": lambda a: subprocess.run(["pytest"]), "clean": cmd_clean,
-        "cache": cmd_cache,
-        "publish": cmd_publish, "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "apply-updates": cmd_apply_updates, "audit-deps": cmd_audit_deps,
+        "dashboard": cmd_dashboard, "status": cmd_status, "sync": cmd_sync, "build": cmd_build, "release": cmd_release,
+        "test": lambda a: subprocess.run(["pytest"]), "clean": cmd_clean, "cache": cmd_cache,
+        "audit": cmd_audit_full, "audit-updates": cmd_audit_updates, "apply-updates": cmd_apply_updates, "audit-deps": cmd_audit_deps,
         "audit-assets": cmd_audit_assets, "audit-strings": cmd_audit_strings, "audit-security": cmd_audit_security, "audit-signatures": cmd_audit_signatures,
-        "audit-performance": cmd_audit_performance, "audit-keys": cmd_audit_keys, "audit-mission": cmd_audit_mission, "mission-setup": cmd_mission_setup, 
+        "audit-performance": lambda a: subprocess.run([sys.executable, "tools/weight_reporter.py", "."]),
         "audit-preset": lambda a: subprocess.run([sys.executable, "tools/modlist_auditor.py", a.file] + (["--deep"] if a.deep else [])),
-        "generate-docs": cmd_generate_docs, "generate-manifest": cmd_generate_manifest, "generate-preset": cmd_generate_preset, "generate-report": cmd_generate_report, 
-        "generate-vscode": cmd_generate_vscode, "generate-changelog": cmd_generate_changelog, "setup-git-hooks": cmd_setup_git_hooks,
-        "check-env": cmd_check_env, "fix-syntax": cmd_fix_syntax, "clean-strings": cmd_clean_strings, "update": cmd_update, "self-update": cmd_self_update,
-        "workshop-tags": cmd_workshop_tags, "gh-runs": cmd_gh_runs, "workshop-info": cmd_workshop_info, "classify-mod": cmd_classify_mod, "modlist-classify": cmd_modlist_classify, "modlist-audit": cmd_modlist_audit,
-        "classify-asset": lambda a: subprocess.run([sys.executable, "tools/asset_classifier.py", a.file]),
-        "diff-models": lambda a: subprocess.run([sys.executable, "tools/model_diff.py", a.file_a, a.file_b]),
-        "manage-proxies": lambda a: subprocess.run([sys.executable, "tools/proxy_manager.py", a.file, a.action] + (["--proxy", a.proxy] if a.proxy else []) + (["--pos", a.pos] if a.pos else [])),
-        "rebin-guard": lambda a: subprocess.run([sys.executable, "tools/rebin_guard.py", a.file]),
-        "import-wizard": lambda a: subprocess.run([sys.executable, "tools/import_wizard.py", a.source, a.name, a.prefix]),
-        "unit-wide-sync": lambda a: [subprocess.run([sys.executable, "tools/path_refactor.py", str(p), a.old_tag]) for p in get_projects()],
+        "generate-catalog": lambda a: subprocess.run([sys.executable, "tools/catalog_generator.py"]),
         "optimize-assets": lambda a: subprocess.run([sys.executable, "tools/asset_optimizer.py", a.path] + (["--apply"] if a.apply else [])),
         "trend-analyze": lambda a: subprocess.run([sys.executable, "tools/trend_analyzer.py"] + (["report"] if a.report else [])),
-        "modlist-size": lambda a: subprocess.run([sys.executable, "tools/modlist_size.py", a.file]), "notify": cmd_notify, "convert": lambda a: [cmd_convert(a)], "help": lambda a: cmd_help(console),
-        "lint": cmd_lint
+        "plan": lambda a: subprocess.run([sys.executable, "tools/agent_architect.py"]),
+        "watch": lambda a: subprocess.run([sys.executable, "tools/agent_sentinel.py", a.path]),
+        "ace-arsenal": lambda a: subprocess.run([sys.executable, "tools/ace_arsenal_helper.py", a.config]),
+        "import-wizard": lambda a: subprocess.run([sys.executable, "tools/import_wizard.py", a.source, a.name, a.prefix]),
+        "unit-wide-sync": lambda a: [subprocess.run([sys.executable, "tools/path_refactor.py", str(p), a.old_tag]) for p in get_projects()],
+        "lint": cmd_lint, "help": lambda a: cmd_help(console)
     }
     if args.command in cmds: cmds[args.command](args)
     else: cmd_help(console)
