@@ -8,7 +8,21 @@ if [ -d ".hemtt" ] && [ -f ".hemtt/project.toml" ]; then
     IS_MOD_PROJECT=true
 fi
 
-# 1. Build Logic
+# 1. Forensic Audit (UKSFTA Diamond Standard)
+# We run this BEFORE hemtt to ensure the build environment is clean.
+if [ "$IS_MOD_PROJECT" = true ] && [ -f "tools/asset_auditor.py" ]; then
+    echo "🛡️  UKSFTA Forensic Audit: Executing deep-scan..."
+    python3 tools/asset_auditor.py .
+    AUDIT_STATUS=$?
+    
+    if [ $AUDIT_STATUS -ne 0 ]; then
+        echo "❌ FAIL: Forensic Audit detected critical defects. Building halted."
+        exit 1
+    fi
+    echo "✅ PASS: Asset integrity verified."
+fi
+
+# 2. Build Logic
 if [ "$IS_MOD_PROJECT" = true ]; then
     if [[ " $* " == *" release "* ]]; then
         CLEAN_ARGS=$(echo "$@" | sed 's/release//g')
@@ -32,14 +46,14 @@ else
 fi
 
 if [ $STATUS -eq 0 ]; then
-    # 2. Fix timestamps (Mod only)
+    # 3. Fix timestamps (Mod only)
     if [ "$IS_MOD_PROJECT" = true ] && [ -f "tools/fix_timestamps.py" ]; then
         PROJECT_NAME=$(grep 'name =' mod.cpp | head -n 1 | cut -d'"' -f2)
         WORKSHOP_ID=$(grep "workshop_id =" .hemtt/project.toml | head -n 1 | sed -E 's/workshop_id = "(.*)"/\1/' | xargs)
         python3 tools/fix_timestamps.py .hemttout "$PROJECT_NAME" "$WORKSHOP_ID"
     fi
 
-    # 3. Manual Packaging for releases
+    # 4. Manual Packaging for releases
     if [ "$IS_RELEASE" = true ]; then
         echo "📦 Packaging Release ZIP..."
         mkdir -p releases
