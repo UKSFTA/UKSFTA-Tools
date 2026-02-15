@@ -40,14 +40,27 @@ except ImportError:
         @staticmethod
         def fit(text, title=None, **kwargs): return f"--- {title} ---\n{text}"
 
+def is_project(path):
+    """Checks if a directory is a valid UKSFTA project."""
+    return (path / ".hemtt" / "project.toml").exists() or (path / "mod_sources.txt").exists()
+
 def get_projects():
+    """
+    Returns a list of projects based on current working directory context.
+    """
+    cwd = Path.cwd()
+    current = cwd
+    while current != current.parent:
+        if is_project(current) and current.name.startswith("UKSFTA-"):
+            return [current]
+        current = current.parent
+
     parent_dir = Path(__file__).parent.parent.parent.resolve()
     projects = []
     if parent_dir.exists():
         for d in parent_dir.iterdir():
-            if d.is_dir() and d.name.startswith("UKSFTA-"):
-                if (d / ".hemtt" / "project.toml").exists() or (d / "mod_sources.txt").exists():
-                    projects.append(d)
+            if d.is_dir() and d.name.startswith("UKSFTA-") and is_project(d):
+                projects.append(d)
     return sorted(projects)
 
 def get_live_timestamp(mid):
@@ -84,15 +97,15 @@ def print_banner(console):
 def cmd_help(console):
     print_banner(console)
     ws_table = Table(title="[Workspace Operations]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold cyan")
-    ws_table.add_row("[bold cyan]status   [/]", "[dim]Show git status summary for every repository[/]")
+    ws_table.add_row("[bold cyan]status   [/]", "[dim]Show git status summary for current context[/]")
     ws_table.add_row("[bold cyan]sync     [/]", "[dim]Pull latest Workshop updates and synchronize mods[/]")
-    ws_table.add_row("[bold cyan]update   [/]", "[dim]Propagate latest UKSFTA-Tools to all projects[/]")
+    ws_table.add_row("[bold cyan]update   [/]", "[dim]Propagate latest UKSFTA-Tools to projects[/]")
     ws_table.add_row("[bold cyan]self-update[/]", "[dim]Pull latest DevOps improvements from Tools repo[/]")
     ws_table.add_row("[bold cyan]cache    [/]", "[dim]Show disk space usage of build artifacts[/]")
     ws_table.add_row("[bold cyan]clean    [/]", "[dim]Wipe all .hemttout build artifacts[/]")
     ws_table.add_row("[bold cyan]check-env[/]", "[dim]Verify local development tools and dependencies[/]")
     intel_table = Table(title="[Unit Intelligence]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold magenta")
-    intel_table.add_row("[bold cyan]dashboard       [/]", "[dim]Visual overview of all projects, components, and versions[/]")
+    intel_table.add_row("[bold cyan]dashboard       [/]", "[dim]Visual overview of projects, components, and versions[/]")
     intel_table.add_row("[bold cyan]workshop-info   [/]", "[dim]Query live versions and timestamps from Steam Workshop[/]")
     intel_table.add_row("[bold cyan]modlist-size    [/]", "[dim]Calculate total data size of any Arma 3 modlist[/]")
     intel_table.add_row("[bold cyan]modlist-classify[/]", "[dim]Audit an entire modlist for side requirements[/]")
@@ -102,7 +115,7 @@ def cmd_help(console):
     intel_table.add_row("[bold cyan]apply-updates   [/]", "[dim]Automatically update and sync all out-of-date mods[/]")
     intel_table.add_row("[bold cyan]gh-runs         [/]", "[dim]Real-time monitoring of GitHub Actions runners[/]")
     intel_table.add_row("[bold cyan]trend-analyze   [/]", "[dim]Track and report on unit health score trends[/]")
-    intel_table.add_row("[bold cyan]plan            [/]", "[dim]The Architect: Reasoning agent for strategic unit analysis[/]")
+    intel_table.add_row("[bold cyan]plan            [/]", "[dim]The Architect: Reasoning agent for strategic analysis[/]")
     audit_table = Table(title="[Assurance & Quality]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold yellow")
     audit_table.add_row("[bold cyan]audit            [/]", "[dim]Master Audit: Run all health and security checks[/]")
     audit_table.add_row("[bold cyan]lint             [/]", "[dim]Full Quality Suite (Markdown, JSON, Config, SQF)[/]")
@@ -117,24 +130,24 @@ def cmd_help(console):
     audit_table.add_row("[bold cyan]audit-mission    [/]", "[dim]Verify a Mission PBO against workspace and externals[/]")
     audit_table.add_row("[bold cyan]audit-preset     [/]", "[dim]Compliance check for external Workshop modlists[/]")
     prod_table = Table(title="[Production & Utilities]", box=box.SIMPLE, show_header=False, title_justify="left", title_style="bold green")
-    prod_table.add_row("[bold cyan]build            [/]", "[dim]Execute HEMTT build on all projects[/]")
+    prod_table.add_row("[bold cyan]build            [/]", "[dim]Execute HEMTT build on projects in context[/]")
     prod_table.add_row("[bold cyan]release          [/]", "[dim]Generate signed/packaged release ZIPs[/]")
     prod_table.add_row("[bold cyan]publish          [/]", "[dim]Upload projects to Steam Workshop[/]")
     prod_table.add_row("[bold cyan]mission-setup    [/]", "[dim]Unit-standardize a mission folder (new or existing)[/]")
     prod_table.add_row("[bold cyan]generate-preset  [/]", "[dim]Create master HTML preset of all unit dependencies[/]")
-    prod_table.add_row("[bold cyan]generate-report  [/]", "[dim]Create a Markdown health report for the entire unit[/]")
+    prod_table.add_row("[bold cyan]generate-report  [/]", "[dim]Create a Markdown health report for context[/]")
     prod_table.add_row("[bold cyan]generate-manifest[/]", "[dim]Create unit-wide manifest of all mods and PBOs[/]")
-    prod_table.add_row("[bold cyan]generate-changelog[/]", "[dim]Create detailed asset changelogs for every repo[/]")
-    prod_table.add_row("[bold cyan]generate-catalog [/]", "[dim]Generate a visual armory catalog of all unit assets[/]")
+    prod_table.add_row("[bold cyan]generate-changelog[/]", "[dim]Create detailed asset changelogs for projects[/]")
+    prod_table.add_row("[bold cyan]generate-catalog [/]", "[dim]Generate a visual armory catalog of assets[/]")
     prod_table.add_row("[bold cyan]generate-vscode  [/]", "[dim]Setup VS Code Tasks for one-click development[/]")
-    prod_table.add_row("[bold cyan]fix-syntax       [/]", "[dim]Standardize indentation and formatting in all repos[/]")
+    prod_table.add_row("[bold cyan]fix-syntax       [/]", "[dim]Standardize indentation and formatting in repos[/]")
     prod_table.add_row("[bold cyan]import-wizard    [/]", "[dim]One-click automated ingestion of external assets[/]")
     prod_table.add_row("[bold cyan]unit-wide-sync   [/]", "[dim]Automated bulk normalization of all unit repositories[/]")
     prod_table.add_row("[bold cyan]optimize-assets  [/]", "[dim]Active texture downscaling and optimization[/]")
     prod_table.add_row("[bold cyan]watch            [/]", "[dim]The Sentinel: Autonomous real-time asset watchdog[/]")
     prod_table.add_row("[bold cyan]ace-arsenal      [/]", "[dim]Automated grouping for ACE Extended Arsenal[/]")
     console.print(ws_table); console.print(intel_table); console.print(audit_table); console.print(prod_table)
-    console.print("\n[bold]Tip:[/bold] Run [cyan]./tools/workspace_manager.py <command> --help[/cyan] for detailed options and examples.\n")
+    console.print("\n[bold]Context Awareness:[/bold] Running in a project directory will only affect that project.\n")
 
 def cmd_dashboard(args):
     console = Console(force_terminal=True); print_banner(console); auditor = Path(__file__).parent / "platinum_score.py"
@@ -236,12 +249,12 @@ def cmd_self_update(args):
     console = Console(force_terminal=True); print_banner(console); subprocess.run(["git", "pull", "origin", "main"], cwd=Path(__file__).parent.parent)
 
 def cmd_audit_full(args):
-    console = Console(force_terminal=True); print_banner(console); console.print(Panel("[bold yellow]🚀 STARTING GLOBAL UNIT AUDIT[/bold yellow]", border_style="yellow"))
+    console = Console(force_terminal=True); print_banner(console); console.print(Panel("[bold yellow]🚀 STARTING CONTEXT AUDIT[/bold yellow]", border_style="yellow"))
     cmd_audit_updates(args); cmd_audit_deps(args); cmd_audit_assets(args); cmd_audit_strings(args); cmd_audit_security(args); cmd_audit_signatures(args); cmd_audit_keys(args)
 
 def cmd_lint(args):
     console = Console(force_terminal=True); print_banner(console)
-    console.print(Panel("[bold cyan]🚀 STARTING GLOBAL QUALITY LINT[/bold cyan]", border_style="cyan"))
+    console.print(Panel("[bold cyan]🚀 STARTING CONTEXT QUALITY LINT[/bold cyan]", border_style="cyan"))
     cmd_md = ["npx", "--yes", "markdownlint-cli2", "**/*.md", "--config", ".github/linters/.markdownlint.json"]
     if args.fix: cmd_md.append("--fix")
     subprocess.run(cmd_md)
@@ -328,14 +341,15 @@ def cmd_cache(args):
     for p in get_projects():
         target = p / ".hemttout"
         if target.exists(): sz = get_dir_size(target); total += sz; print(f"  {p.name:<20} : {format_bytes(sz)}")
-    print(f"\n[bold]Total Unit Cache:[/] {format_bytes(total)}")
+    print(f"\n[bold]Total Cache in Context:[/] {format_bytes(total)}")
 
 def main():
     parser = argparse.ArgumentParser(description="UKSF Taskforce Alpha Manager", add_help=False)
+    parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
     subparsers = parser.add_subparsers(dest="command")
     
     # Generic commands
-    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "audit-keys", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "generate-catalog", "setup-git-hooks", "check-env", "fix-syntax", "update", "self-update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
+    for cmd in ["dashboard", "status", "build", "release", "test", "clean", "cache", "validate", "audit", "audit-updates", "apply-updates", "audit-deps", "audit-assets", "audit-strings", "audit-security", "audit-signatures", "audit-performance", "audit-keys", "generate-docs", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "generate-catalog", "setup-git-hooks", "check-env", "fix-syntax", "clean-strings", "update", "self-update", "workshop-tags", "gh-runs", "workshop-info", "help"]:
         subparsers.add_parser(cmd, help=f"Run {cmd} utility")
     
     p_lint = subparsers.add_parser("lint", help="Full Quality Lint"); p_lint.add_argument("--fix", action="store_true")
