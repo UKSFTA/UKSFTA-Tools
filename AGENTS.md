@@ -26,6 +26,7 @@ Consult the following before suggesting architectural changes:
 ## 🚀 Modernized Toolset Integration (2026-02-14)
 
 ### P3D Debinarizer (v1.2.0)
+
 - **Status:** Integrated into Platinum DevOps Suite.
 - **HEMTT Alignment:** Fully compatible with HEMTT project structures and prefix mapping.
 - **Integrated Commands:**

@@ -1,11 +1,11 @@
 {
-    "production_nodes": {
-        "hosts": {
-            "regxa-vps-primary": {
-                "ansible_host": "91.108.249.27",
-                "ansible_user": "uksfta-admin",
-                "ansible_ssh_private_key_file": "remote/keys/uksfta_vps"
-            }
-        }
+  "production_nodes": {
+    "hosts": {
+      "regxa-vps-primary": {
+        "ansible_host": "91.108.249.27",
+        "ansible_user": "uksfta-admin",
+        "ansible_ssh_private_key_file": "remote/keys/uksfta_vps"
+      }
     }
+  }
 }
