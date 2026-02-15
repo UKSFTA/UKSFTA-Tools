@@ -34,7 +34,7 @@ all_releases/
 __pycache__/
 .pytest_cache/
 .uksf_tools/
-tools/
+/tools/
 !tools/README.md
 
 # System
@@ -43,3 +43,6 @@ Thumbs.db
 
 # DevOps Artifacts
 UNIT_HEALTH_REPORT.md
+health_history.json
+unit_assets.json
+ASSET_CATALOG.md
