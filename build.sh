@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 PROJECT_ROOT=$(pwd)
+PROJECT_NAME=$(basename "$PROJECT_ROOT")
 export SOURCE_DATE_EPOCH=$(date +%s)
 
 # Detect if this is a HEMTT project
@@ -8,94 +9,92 @@ if [ -d ".hemtt" ] && [ -f ".hemtt/project.toml" ]; then
     IS_MOD_PROJECT=true
 fi
 
-# 1. Forensic Audit (UKSFTA Diamond Standard)
-# We run this BEFORE hemtt to ensure the build environment is clean.
+# 1. Professional Production Launch Staging
+if [[ " $* " == *" launch "* ]]; then
+    ARMA3_PATHS=(
+        "/ext/SteamLibrary/steamapps/common/Arma 3"
+        "$HOME/.local/share/Steam/steamapps/common/Arma 3"
+        "$HOME/.steam/steam/steamapps/common/Arma 3"
+    )
+    
+    ACTIVE_ARMA=""
+    for path in "${ARMA3_PATHS[@]}"; do
+        if [ -d "$path" ]; then ACTIVE_ARMA="$path"; break; fi
+    done
+
+    if [ -n "$ACTIVE_ARMA" ]; then
+        # A. Clear VFS (For production launch, we want the PBOs to handle resolution)
+        TARGET_VFS="$ACTIVE_ARMA/z/uksfta"
+        if [ -L "$TARGET_VFS" ] || [ -e "$TARGET_VFS" ]; then
+            echo "🧹 Cleaning VFS dev link: $TARGET_VFS"
+            rm -rf "$TARGET_VFS"
+        fi
+
+        # B. Solid Mod Staging (@Name) in Arma 3 Root
+        MOD_NAME="@${PROJECT_NAME}"
+        EXTERNAL_MOD_PATH="$ACTIVE_ARMA/$MOD_NAME"
+        
+        echo "📦 Physically staging mod in Arma 3: $EXTERNAL_MOD_PATH"
+        rm -rf "$EXTERNAL_MOD_PATH"
+        mkdir -p "$EXTERNAL_MOD_PATH/addons"
+        mkdir -p "$EXTERNAL_MOD_PATH/keys"
+        
+        # Build the project
+        echo "🔨 Building production PBOs..."
+        hemtt build
+        
+        # Copy files physically (No symlinks)
+        echo "  - Copying PBOs and Signatures..."
+        cp .hemttout/build/addons/*.pbo "$EXTERNAL_MOD_PATH/addons/" 2>/dev/null
+        cp .hemttout/build/addons/*.bisign "$EXTERNAL_MOD_PATH/addons/" 2>/dev/null
+        
+        echo "  - Copying Keys..."
+        cp keys/*.bikey "$EXTERNAL_MOD_PATH/keys/" 2>/dev/null
+        
+        echo "  - Copying Metadata..."
+        cp mod.cpp meta.cpp "$EXTERNAL_MOD_PATH/" 2>/dev/null
+        cp addons/main/data/*.paa "$EXTERNAL_MOD_PATH/" 2>/dev/null
+        
+        echo "✨ Solid Staging Complete."
+        
+        # C. Launch Arma 3
+        # We use hemtt launch to trigger the steam/proton interaction,
+        # but we point it EXCLUSIVELY to our physical folder.
+        echo "🚀 Launching Arma 3 with physical mod: $MOD_NAME"
+        hemtt launch -- -mod="$EXTERNAL_MOD_PATH"
+        STATUS=$?
+        exit $STATUS
+    else
+        echo "⚠️  Warning: Arma 3 directory not found. Using HEMTT default."
+        hemtt launch
+        exit $?
+    fi
+fi
+
+# 2. Forensic Audit (UKSFTA Diamond Standard)
 if [ "$IS_MOD_PROJECT" = true ] && [ -f "tools/asset_auditor.py" ]; then
     echo "🛡️  UKSFTA Forensic Audit: Executing deep-scan..."
     python3 tools/asset_auditor.py .
-    AUDIT_STATUS=$?
-    
-    if [ $AUDIT_STATUS -ne 0 ]; then
-        echo "❌ FAIL: Forensic Audit detected critical defects. Building halted."
-        exit 1
-    fi
+    if [ $? -ne 0 ]; then echo "❌ FAIL: Forensic Audit detected defects."; exit 1; fi
     echo "✅ PASS: Asset integrity verified."
 fi
 
-# 2. Build Logic
+# 3. Standard Build Logic (Non-launch)
 if [ "$IS_MOD_PROJECT" = true ]; then
-    if [[ " $* " == *" release "* ]]; then
-        CLEAN_ARGS=$(echo "$@" | sed 's/release//g')
-        echo "HEMTT: Running unsigned release (no-archive) $CLEAN_ARGS..."
-        hemtt release --no-archive --no-sign $CLEAN_ARGS
-        IS_RELEASE=true
-    else
-        echo "HEMTT: Running '$@'..."
-        hemtt "$@"
-        IS_RELEASE=false
-    fi
+    echo "HEMTT: Running '$@'..."
+    hemtt "$@"
     STATUS=$?
 else
     echo "ℹ️  UKSFTA-Tools: Tool-only project detected. Skipping HEMTT."
     STATUS=0
-    if [[ " $* " == *" release "* ]]; then
-        IS_RELEASE=true
-    else
-        IS_RELEASE=false
-    fi
 fi
 
+# 4. Fix timestamps & Release Packaging
 if [ $STATUS -eq 0 ]; then
-    # 3. Fix timestamps (Mod only)
     if [ "$IS_MOD_PROJECT" = true ] && [ -f "tools/fix_timestamps.py" ]; then
-        PROJECT_NAME=$(grep 'name =' mod.cpp | head -n 1 | cut -d'"' -f2)
+        P_NAME=$(grep 'name =' mod.cpp | head -n 1 | cut -d'"' -f2)
         WORKSHOP_ID=$(grep "workshop_id =" .hemtt/project.toml | head -n 1 | sed -E 's/workshop_id = "(.*)"/\1/' | xargs)
-        python3 tools/fix_timestamps.py .hemttout "$PROJECT_NAME" "$WORKSHOP_ID"
-    fi
-
-    # 4. Manual Packaging for releases
-    if [ "$IS_RELEASE" = true ]; then
-        echo "📦 Packaging Release ZIP..."
-        mkdir -p releases
-        
-        VERSION="0.0.0"
-        if [ -f "VERSION" ]; then
-            VERSION=$(cat VERSION | tr -d '\n\r ')
-        fi
-        
-        PROJECT_ID=$(basename "$PROJECT_ROOT")
-        ZIP_NAME="uksf task force alpha - ${PROJECT_ID,,}_${VERSION}.zip"
-        STAGING_DIR=".hemttout/zip_staging"
-        rm -rf "$STAGING_DIR"
-        
-        if [ "$IS_MOD_PROJECT" = true ]; then
-            # Mod Packaging
-            MOD_FOLDER_NAME="@${PROJECT_ID}"
-            mkdir -p "$STAGING_DIR/$MOD_FOLDER_NAME"
-            cp -rp .hemttout/release/* "$STAGING_DIR/$MOD_FOLDER_NAME/"
-            (cd "$STAGING_DIR" && zip -q -1 -r "$PROJECT_ROOT/releases/$ZIP_NAME" "$MOD_FOLDER_NAME")
-        else
-            # Tool Packaging (Exclude git and build artifacts)
-            mkdir -p "$STAGING_DIR/$PROJECT_ID"
-            rsync -aq --exclude=".git" --exclude=".hemttout" --exclude="releases" --exclude="all_releases" ./ "$STAGING_DIR/$PROJECT_ID/"
-            (cd "$STAGING_DIR" && zip -q -1 -r "$PROJECT_ROOT/releases/$ZIP_NAME" "$PROJECT_ID")
-        fi
-        
-        # Consolidate to Unit Hub
-        CENTRAL_HUB=""
-        if [ -d "../UKSFTA-Tools/all_releases" ]; then
-            CENTRAL_HUB="../UKSFTA-Tools/all_releases"
-        fi
-
-        if [ -n "$CENTRAL_HUB" ] && [ "$PROJECT_ID" != "UKSFTA-Tools" ]; then
-            echo "  - Consolidating release to Unit Hub..."
-            mv "$PROJECT_ROOT/releases/$ZIP_NAME" "$CENTRAL_HUB/"
-            echo "✨ Release consolidated to: $CENTRAL_HUB/$ZIP_NAME"
-        else
-            echo "✨ Release packaged: releases/$ZIP_NAME"
-        fi
-        
-        rm -rf "$STAGING_DIR"
+        python3 tools/fix_timestamps.py .hemttout "$P_NAME" "$WORKSHOP_ID"
     fi
 fi
 exit $STATUS

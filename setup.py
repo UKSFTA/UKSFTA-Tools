@@ -29,14 +29,16 @@ def setup_project():
         print("  ✅ Copied: tools/ directory (Symlink failed)")
 
     # 2. Refresh HEMTT Hooks & Scripts (Force Overwrite)
-    project_root.joinpath(".hemtt").mkdir(exist_ok=True)
-    for folder in [".hemtt/hooks", ".hemtt/scripts"]:
-        src = tools_src / folder
-        dest = project_root / folder
+    # Source is 'hemtt/', Destination is '.hemtt/'
+    for folder in ["hooks", "scripts"]:
+        src = tools_src / "hemtt" / folder
+        dest = project_root / ".hemtt" / folder
         if src.exists():
             if dest.exists(): shutil.rmtree(dest)
+            # Ensure parent exists
+            dest.parent.mkdir(exist_ok=True)
             shutil.copytree(src, dest)
-            print(f"  ✅ Refreshed: {folder}")
+            print(f"  ✅ Refreshed: .hemtt/{folder}")
 
     # 3. Refresh GitHub Workflows
     github_src = tools_src / ".github" / "workflows"
@@ -52,7 +54,6 @@ def setup_project():
         src = tools_src / script
         dest = project_root / script
         if src.exists():
-            # Force overwrite to ensure forensic audit logic is present
             if dest.exists(): os.remove(dest)
             shutil.copy2(src, dest)
             os.chmod(dest, 0o755)

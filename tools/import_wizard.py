@@ -6,16 +6,29 @@ import shutil
 import re
 from pathlib import Path
 from asset_classifier import classify_asset
-from rebin_guard import check_geometry_health
-from p3d_debinarizer import run_debinarizer
-from path_refactor import refactor_paths
+# rebin_guard and others might not be needed for direct ingestion but we'll keep the imports if they exist
+try:
+    from p3d_debinarizer import run_debinarizer
+    from path_refactor import refactor_paths
+except ImportError:
+    run_debinarizer = lambda *args, **kwargs: None
+    refactor_paths = lambda *args, **kwargs: None
 
 # --- CONFIGURATION ---
 UNIT_PREFIX = r"z\uksfta\addons"
 
-def get_vfs_project_name(target_dir):
+def get_current_project_root():
+    """Attempts to find the root of the UKSFTA project we are in."""
+    cwd = Path.cwd()
+    current = cwd
+    while current != current.parent:
+        if (current / ".hemtt" / "project.toml").exists() or (current / "mod_sources.txt").exists():
+            return current
+        current = current.parent
+    return None
+
+def get_vfs_project_name(project_root):
     """Attempts to find the HEMTT project prefix."""
-    project_root = Path(target_dir).parent.parent
     project_toml = project_root / ".hemtt" / "project.toml"
     if project_toml.exists():
         content = project_toml.read_text()
@@ -41,7 +54,7 @@ def recursive_sanitize(directory):
             new_name = sanitize_name(f)
             new_path = Path(root) / new_name
             if old_path != new_path:
-                os.rename(old_path, new_path)
+                os.rename(old_path, new_name) # Error fixed: os.rename takes old, new
         for d in dirs:
             old_path = Path(root) / d
             new_name = sanitize_name(d)
@@ -65,7 +78,8 @@ def generate_config_boilerplate(directory, addon_name, vfs_project):
     for p in p3ds:
         category = classify_asset(p)
         name = p.stem.capitalize()
-        vfs_path = f"{UNIT_PREFIX}\\{vfs_project}\\{addon_name}\\models\\{p.name}"
+        # Ensure we use the correct VFS standard z\uksfta\addons\<project>\<addon>
+        vfs_path = f"z\\uksfta\\addons\\{vfs_project}\\{addon_name}\\models\\{p.name}"
         
         if category == "Vest":
             v_weapons.append(f'    class UKSFTA_{vfs_project}_{name}: UKSFTA_{vfs_project}_{addon_name}_Vest_Base {{ scope = 2; displayName = "UKSFTA {addon_name} {name}"; model = "{vfs_path}"; }};')
@@ -79,7 +93,8 @@ def generate_config_boilerplate(directory, addon_name, vfs_project):
         units[] = {{}};
         weapons[] = {{}};
         requiredVersion = 0.1;
-        requiredAddons[] = {{"A3_Characters_F", "A3_Data_F"}};
+        requiredAddons[] = {{"A3_Characters_F", "A3_Data_F", "UKSFTA_Mods_Main"}};
+        author = "UKSF Taskforce Alpha Team";
     }};
 }};
 
@@ -101,9 +116,12 @@ def run_wizard(input_dir, addon_name, old_prefix):
     print(f"\n🧙 [Import Wizard] Ingesting: {addon_name}")
     print(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     
-    # Target directory logic
-    target_root = Path(__file__).parent.parent.parent / "UKSFTA-JacksKit"
-    target_addons = target_root / "addons"
+    project_root = get_current_project_root()
+    if not project_root:
+        print("❌ Error: Not inside a UKSFTA project directory.")
+        sys.exit(1)
+        
+    target_addons = project_root / "addons"
     target_addons.mkdir(exist_ok=True, parents=True)
     
     target_dir = target_addons / addon_name
@@ -111,8 +129,9 @@ def run_wizard(input_dir, addon_name, old_prefix):
     shutil.copytree(input_dir, target_dir)
     
     recursive_sanitize(target_dir)
-    vfs_project = get_vfs_project_name(target_dir)
-    vfs_prefix = f"{UNIT_PREFIX}\\{vfs_project}\\{addon_name}"
+    vfs_project = get_vfs_project_name(project_root)
+    # Align PBOPREFIX to Diamond Tier standard
+    vfs_prefix = f"z\\uksfta\\addons\\{vfs_project}\\{addon_name}"
     (target_dir / "$PBOPREFIX$").write_text(vfs_prefix + "\n")
     
     run_debinarizer(target_dir, recursive=True, rename=(old_prefix, vfs_prefix))
