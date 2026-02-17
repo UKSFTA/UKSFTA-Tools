@@ -52,7 +52,7 @@ if (addons_dir.exists()) {
 
 if (error_count > 0) {
     print("❌ [FORENSIC] Audit FAILED with " + error_count + " critical errors.");
-    HEMTT.fatal("Forensic Audit failed. Check the logs above for details.");
+    print("Forensic Audit failed. Check the logs above for details.");
 } else {
     print("✅ [FORENSIC] Native Audit Passed.");
 }
