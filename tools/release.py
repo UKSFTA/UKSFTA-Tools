@@ -180,6 +180,7 @@ def main():
     parser.add_argument("-n", "--none", action="store_true", help="No bump")
     parser.add_argument("-y", "--yes", action="store_true", help="Auto-yes")
     parser.add_argument("-t", "--threads", type=int, help="Number of threads for HEMTT (default: cpu_count - 2)")
+    parser.add_argument("--skip-build", action="store_true", help="Skip the build process and use existing artifacts in .hemttout/release")
     parser.add_argument("--dry-run", action="store_true", help="Simulate release")
     parser.add_argument("--offline", action="store_true", help="Offline mode")
     args = parser.parse_args()
@@ -203,24 +204,32 @@ def main():
             subprocess.run(["git", "add", VERSION_FILE], check=True)
             subprocess.run(["git", "commit", "-S", "-m", f"chore: bump version to {new_v}"], check=True)
 
-    print(f"Running Build (v{new_v})...")
-    # Set HEMTT_TEMP_DIR and standard TEMP variables to a project-local directory for build stability
-    build_env = os.environ.copy()
-    build_temp_dir = os.path.join(HEMTT_OUT, "tmp")
-    os.makedirs(build_temp_dir, exist_ok=True)
-    build_env["HEMTT_TEMP_DIR"] = build_temp_dir
-    build_env["TMPDIR"] = build_temp_dir
-    build_env["TEMP"] = build_temp_dir
-    build_env["TMP"] = build_temp_dir
-    
-    # Calculate threads: use provided count or default (cpu_count - 2)
-    if args.threads:
-        num_threads = str(args.threads)
+    if args.skip_build:
+        print("⏩ Skipping build as requested. Using existing artifacts in .hemttout/release...")
+        if not os.path.exists(STAGING_DIR) or not os.listdir(STAGING_DIR):
+            print(f"❌ Error: Release directory {STAGING_DIR} is empty or does not exist. Cannot skip build.")
+            sys.exit(1)
+        if choice in ['p', 'm', 'major']:
+            print("⚠️  Warning: Version was bumped, but build was skipped. Uploaded PBOs will still have the old version!")
     else:
-        cpu_count = multiprocessing.cpu_count()
-        num_threads = str(max(1, cpu_count - 2))
+        print(f"Running Build (v{new_v})...")
+        # Set HEMTT_TEMP_DIR and standard TEMP variables to a project-local directory for build stability
+        build_env = os.environ.copy()
+        build_temp_dir = os.path.join(HEMTT_OUT, "tmp")
+        os.makedirs(build_temp_dir, exist_ok=True)
+        build_env["HEMTT_TEMP_DIR"] = build_temp_dir
+        build_env["TMPDIR"] = build_temp_dir
+        build_env["TEMP"] = build_temp_dir
+        build_env["TMP"] = build_temp_dir
         
-    subprocess.run(["bash", "build.sh", "release", "--threads", num_threads], check=True, env=build_env)
+        # Calculate threads: use provided count or default (cpu_count - 2)
+        if args.threads:
+            num_threads = str(args.threads)
+        else:
+            cpu_count = multiprocessing.cpu_count()
+            num_threads = str(max(1, cpu_count - 2))
+            
+        subprocess.run(["bash", "build.sh", "release", "--threads", num_threads], check=True, env=build_env)
 
     ws_config = get_workshop_config()
     workshop_id = ws_config["id"]
