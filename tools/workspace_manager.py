@@ -145,7 +145,11 @@ def main():
     cmds = {
         "gh-runs": cmd_gh_runs,
         "lint": cmd_lint,
-        "update": lambda a: [subprocess.run([sys.executable, str(p/".uksf_tools/setup.py")], cwd=p) for p in get_projects()],
+        "update": lambda a: [
+            (subprocess.run(["git", "submodule", "update", "--remote", "--merge", ".uksf_tools"], cwd=p),
+             subprocess.run([sys.executable, str(p/".uksf_tools/setup.py")], cwd=p))
+            for p in get_projects()
+        ],
         "status": lambda a: [print(f"Project: {p.name}") for p in get_projects()],
         "build": lambda a: [subprocess.run(["bash", "build.sh", "build"], cwd=p) for p in get_projects()],
         "audit-security": lambda a: subprocess.run([sys.executable, "tools/security_auditor.py", "."]),
