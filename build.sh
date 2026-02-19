@@ -176,7 +176,8 @@ fi
 # Create symlink if it doesn't exist or was removed
 if [ ! -L "${BASE_SYMLINK_PATH}" ]; then
   log "Creating new VFS symlink: ${BASE_SYMLINK_PATH} -> ${PROJECT_ROOT}/z/uksfta"
-  mkdir -p "${PROJECT_ROOT}/z/uksfta" # Ensure the target directory for symlink exists
+  mkdir -p "${PROJECT_ROOT}/z/uksfta" # Ensure the source directory exists
+  mkdir -p "$(dirname "${BASE_SYMLINK_PATH}")" # Ensure the parent of the symlink exists
   ln -sfn "${PROJECT_ROOT}/z/uksfta" "${BASE_SYMLINK_PATH}" || error_exit "Failed to create VFS symlink."
 fi
 
