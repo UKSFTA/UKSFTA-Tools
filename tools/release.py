@@ -179,6 +179,7 @@ def main():
     parser.add_argument("-M", "--major", action="store_true", help="Bump major")
     parser.add_argument("-n", "--none", action="store_true", help="No bump")
     parser.add_argument("-y", "--yes", action="store_true", help="Auto-yes")
+    parser.add_argument("-t", "--threads", type=int, help="Number of threads for HEMTT (default: cpu_count - 2)")
     parser.add_argument("--dry-run", action="store_true", help="Simulate release")
     parser.add_argument("--offline", action="store_true", help="Offline mode")
     args = parser.parse_args()
@@ -211,7 +212,15 @@ def main():
     build_env["TMPDIR"] = build_temp_dir
     build_env["TEMP"] = build_temp_dir
     build_env["TMP"] = build_temp_dir
-    subprocess.run(["bash", "build.sh", "release"], check=True, env=build_env)
+    
+    # Calculate threads: use provided count or default (cpu_count - 2)
+    if args.threads:
+        num_threads = str(args.threads)
+    else:
+        cpu_count = multiprocessing.cpu_count()
+        num_threads = str(max(1, cpu_count - 2))
+        
+    subprocess.run(["bash", "build.sh", "release", "--threads", num_threads], check=True, env=build_env)
 
     ws_config = get_workshop_config()
     workshop_id = ws_config["id"]

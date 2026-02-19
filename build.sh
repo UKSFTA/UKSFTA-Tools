@@ -53,18 +53,35 @@ rm -rf "${HEMTT_OUT}/build" "${HEMTT_OUT}/release" || true # '|| true' to preven
 
 # Handle build types
 BUILD_TYPE=${1:-dev} # Default to 'dev' if no argument is provided
+SHIFT_ARGS="${@:2}" # Capture any extra arguments (like --just addon_name)
+
+# Calculate default threads (total - 2) if not explicitly provided in arguments
+THREADS_FLAG=""
+if [[ ! "$*" =~ "--threads" ]] && [[ ! "$*" =~ " -t " ]]; then
+    TOTAL_THREADS=$(nproc)
+    THREADS=$((TOTAL_THREADS > 2 ? TOTAL_THREADS - 2 : 1))
+    THREADS_FLAG="--threads $THREADS"
+fi
 
 case "$BUILD_TYPE" in
   dev)
-    log "Performing Development Build..."
-    run_hemtt build
+    log "Performing Development VFS Build (Fastest)..."
+    run_hemtt dev $THREADS_FLAG $SHIFT_ARGS
+    ;;
+  fast)
+    log "Performing Fast Solid Build (No Binarization)..."
+    run_hemtt build --no-bin $THREADS_FLAG $SHIFT_ARGS
     ;;
   release)
-    log "Performing Release Build..."
-    run_hemtt release
+    log "Performing Production Release Build (Binarized)..."
+    run_hemtt release $THREADS_FLAG $SHIFT_ARGS
+    ;;
+  build)
+    log "Performing Standard Build (Binarized)..."
+    run_hemtt build $THREADS_FLAG $SHIFT_ARGS
     ;;
   *)
-    error_exit "Invalid build type: $BUILD_TYPE. Use 'dev' or 'release'."
+    error_exit "Invalid build type: $BUILD_TYPE. Use 'dev', 'fast', 'build', or 'release'."
     ;;
 esac
 
