@@ -14,7 +14,7 @@ TOOLS_DIR=$(pwd)
 PROJECT_DIR="../$PROJECT_NAME"
 
 if [[ "$TEMPLATE" != "standard" && "$TEMPLATE" != "cba" && "$TEMPLATE" != "mission" && "$TEMPLATE" != "ui" ]]; then
-    echo "Error: Template must be 'standard' or 'cba'."
+    echo "Error: Template must be 'standard', 'cba', 'mission', or 'ui'."
     exit 1
 fi
 
@@ -27,7 +27,7 @@ if [ -d "$PROJECT_DIR" ]; then
 fi
 
 mkdir -p "$PROJECT_DIR"
-cp -r templates/"$TEMPLATE"/* "$PROJECT_DIR/"
+cp -r templates/"$TEMPLATE"/. "$PROJECT_DIR/"
 cd "$PROJECT_DIR"
 
 # 2. Initialize Git

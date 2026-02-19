@@ -1,4 +1,4 @@
-name = "UKSF Task Force Alpha - Project (CBA)"
+name = "UKSF Task Force Alpha - Project"
 author = "UKSF Taskforce Alpha Team"
 prefix = "uksfta"
 mainprefix = "z"
@@ -25,7 +25,3 @@ workshop_tags = ["Mod", "Addon"]
 
 [hemtt.signing]
 authority = "UKSFTA"
-
-[hemtt.include]
-"include" = ""
-"include/x/cba/addons/main" = "x/cba/addons/main"

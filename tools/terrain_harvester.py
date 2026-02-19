@@ -5,6 +5,7 @@ import sys
 import subprocess
 import shutil
 import re
+import math
 from pathlib import Path
 from PIL import Image
 
