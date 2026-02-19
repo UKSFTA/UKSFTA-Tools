@@ -203,11 +203,14 @@ def main():
             subprocess.run(["git", "commit", "-S", "-m", f"chore: bump version to {new_v}"], check=True)
 
     print(f"Running Build (v{new_v})...")
-    # Set HEMTT_TEMP_DIR to a project-local directory for build stability
+    # Set HEMTT_TEMP_DIR and standard TEMP variables to a project-local directory for build stability
     build_env = os.environ.copy()
     build_temp_dir = os.path.join(HEMTT_OUT, "tmp")
     os.makedirs(build_temp_dir, exist_ok=True)
     build_env["HEMTT_TEMP_DIR"] = build_temp_dir
+    build_env["TMPDIR"] = build_temp_dir
+    build_env["TEMP"] = build_temp_dir
+    build_env["TMP"] = build_temp_dir
     subprocess.run(["bash", "build.sh", "release"], check=True, env=build_env)
 
     ws_config = get_workshop_config()
@@ -229,19 +232,25 @@ def main():
     if not username and not args.dry_run and not args.offline:
         username = input("Steam Username: ").strip()
 
-    print("\n--- Steam Workshop Upload ---")
+    print("\n--- Steam Workshop Upload (with validation) ---")
     login_args = [username]
     if password: login_args.append(password)
     
+    # Using 'validate' flag to ensure file integrity after upload
+    # We also explicitly use 'quit' to ensure the process terminates correctly.
     cmd = ["steamcmd", "+login"] + login_args + ["+workshop_build_item", vdf_p, "validate", "+quit"]
     
     try:
-        subprocess.run(cmd, check=True)
-        print("\n✅ Mod updated on Workshop.")
+        # Running steamcmd with a timeout of 15 minutes to prevent hung processes, but allowing enough time for large uploads
+        result = subprocess.run(cmd, check=True, timeout=900)
+        print("\n✅ Mod updated and validated on Workshop.")
         tag_name = f"v{new_v}"
         subprocess.run(["git", "tag", "-s", tag_name, "-m", f"Release {new_v}"], check=True)
         subprocess.run(["git", "push", "origin", "main", "--tags", "-f"], check=False)
+    except subprocess.TimeoutExpired:
+        print("\n❌ Error: SteamCMD timed out after 15 minutes. The upload might still be processing, please check the Workshop.")
+        sys.exit(1)
     except Exception as e:
-        print(f"Error: {e}"); sys.exit(1)
+        print(f"\n❌ Error: {e}"); sys.exit(1)
 
 if __name__ == "__main__": main()
