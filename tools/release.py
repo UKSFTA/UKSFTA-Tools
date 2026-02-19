@@ -203,7 +203,12 @@ def main():
             subprocess.run(["git", "commit", "-S", "-m", f"chore: bump version to {new_v}"], check=True)
 
     print(f"Running Build (v{new_v})...")
-    subprocess.run(["bash", "build.sh", "release"], check=True)
+    # Set HEMTT_TEMP_DIR to a project-local directory for build stability
+    build_env = os.environ.copy()
+    build_temp_dir = os.path.join(HEMTT_OUT, "tmp")
+    os.makedirs(build_temp_dir, exist_ok=True)
+    build_env["HEMTT_TEMP_DIR"] = build_temp_dir
+    subprocess.run(["bash", "build.sh", "release"], check=True, env=build_env)
 
     ws_config = get_workshop_config()
     workshop_id = ws_config["id"]
@@ -234,7 +239,7 @@ def main():
         subprocess.run(cmd, check=True)
         print("\n✅ Mod updated on Workshop.")
         tag_name = f"v{new_v}"
-        subprocess.run(["git", "tag", "-s", tag_name, "-m", f"Release {new_v}", "-f"], check=True)
+        subprocess.run(["git", "tag", "-s", tag_name, "-m", f"Release {new_v}"], check=True)
         subprocess.run(["git", "push", "origin", "main", "--tags", "-f"], check=False)
     except Exception as e:
         print(f"Error: {e}"); sys.exit(1)
