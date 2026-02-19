@@ -10,10 +10,38 @@ set -e # Exit immediately if a command exits with a non-zero status
 PROJECT_ROOT=$(pwd)
 # HEMTT_OUT is where HEMTT places its build artifacts (e.g., .hemttout/build, .hemttout/release)
 HEMTT_OUT="${PROJECT_ROOT}/.hemttout"
-# ARMA_MOD_ROOT is the root directory where Arma 3 expects mods to be (e.g., ../../../@UKSFTA-Dev)
-# This is typically an absolute path or relative to a known point.
-ARMA_MOD_ROOT=$(realpath "${PROJECT_ROOT}/../../../@UKSFTA-Dev")
-RELEASE_MOD_ROOT=$(realpath "${PROJECT_ROOT}/../../../@UKSFTA-Release")
+
+# Attempt to find the best mod staging directory
+find_mod_root() {
+    local target_name="$1"
+    # Try 1: Sibling directory (most common in UKSFTA dev env)
+    local sibling
+    sibling=$(realpath "${PROJECT_ROOT}/../${target_name}" 2>/dev/null || true)
+    if [ -n "$sibling" ] && [ -d "$sibling" ]; then
+        echo "$sibling"
+        return
+    fi
+    # Try 2: Nested 2 levels deep (e.g. workspace/mods/project)
+    local parent2
+    parent2=$(realpath "${PROJECT_ROOT}/../../${target_name}" 2>/dev/null || true)
+    if [ -n "$parent2" ] && [ -d "$parent2" ]; then
+        echo "$parent2"
+        return
+    fi
+    # Try 3: Nested 3 levels deep (e.g. workspace/arma3/mods/project)
+    local parent3
+    parent3=$(realpath "${PROJECT_ROOT}/../../../${target_name}" 2>/dev/null || true)
+    if [ -n "$parent3" ] && [ -d "$parent3" ]; then
+        echo "$parent3"
+        return
+    fi
+    # Default: Sibling relative (even if not exists yet)
+    realpath "${PROJECT_ROOT}/../${target_name}"
+}
+
+# ARMA_MOD_ROOT is the root directory where Arma 3 expects mods to be
+ARMA_MOD_ROOT=$(find_mod_root "@UKSFTA-Dev")
+RELEASE_MOD_ROOT=$(find_mod_root "@UKSFTA-Release")
 
 # Ensure HEMTT_TEMP_DIR and standard TEMP variables are set to a project-local directory for build stability
 export HEMTT_TEMP_DIR="${HEMTT_OUT}/tmp"
@@ -122,7 +150,19 @@ fi
 
 # Create or Update Base Symlink (for VFS Resolution)
 log "Creating/Updating base VFS symlink..."
-BASE_SYMLINK_PATH="${PROJECT_ROOT}/../../../z/uksfta"
+
+# Attempt to find the best VFS root (where 'z' should live)
+find_vfs_root() {
+    # Check parent directory (for UKSFTA standard: /ext/Development/)
+    if [ -d "$(realpath "${PROJECT_ROOT}/.." 2>/dev/null || true)" ]; then
+        echo "$(realpath "${PROJECT_ROOT}/.." 2>/dev/null)/z/uksfta"
+        return
+    fi
+    # Fallback: Nested 3 levels
+    echo "$(realpath "${PROJECT_ROOT}/../../.." 2>/dev/null)/z/uksfta"
+}
+
+BASE_SYMLINK_PATH=$(find_vfs_root)
 
 # Resolve existing symlink if it points to a different project
 if [ -L "${BASE_SYMLINK_PATH}" ]; then
