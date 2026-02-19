@@ -146,7 +146,7 @@ def main():
         "gh-runs": cmd_gh_runs,
         "lint": cmd_lint,
         "update": lambda a: [
-            (subprocess.run(["git", "submodule", "update", "--remote", "--merge", ".uksf_tools"], cwd=p),
+            (subprocess.run(["git", "submodule", "update", "--init", "--recursive", "--remote", "--force", ".uksf_tools"], cwd=p),
              subprocess.run([sys.executable, str(p/".uksf_tools/setup.py")], cwd=p))
             for p in get_projects()
         ],
