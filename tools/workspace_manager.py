@@ -151,7 +151,7 @@ def main():
     subparsers = parser.add_subparsers(dest="command")
     
     # Core registered commands
-    for cmd in ["status", "update", "gh-runs", "generate-catalog", "build", "release", "audit-security", "audit-performance", "audit-assets", "audit-signatures", "audit-keys", "audit-deps", "audit-strings", "audit-mission", "audit-updates", "apply-updates", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "fix-syntax", "check-env", "self-update"]:
+    for cmd in ["status", "update", "gh-runs", "generate-catalog", "build", "release", "audit-security", "audit-performance", "audit-assets", "audit-signatures", "audit-keys", "audit-deps", "audit-strings", "audit-mission", "audit-updates", "apply-updates", "generate-manifest", "generate-preset", "generate-report", "generate-vscode", "generate-changelog", "fix-syntax", "check-env", "self-update", "help"]:
         subparsers.add_parser(cmd)
     
     p_lint = subparsers.add_parser("lint")
