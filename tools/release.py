@@ -236,10 +236,27 @@ def main():
     if (not workshop_id or workshop_id == "0") and not args.dry_run and not args.offline:
         workshop_id = input("Enter Workshop ID: ").strip()
 
-    vdf_p, desc_p = create_vdf("107410", workshop_id, STAGING_DIR, "Release v" + new_v)
+    # Prepare the correct content path for Steam
+    # We want to upload the folder structure: @ModName/addons/*.pbo
+    # build.sh creates this in .hemttout/zip_staging/@PROJECT_ID
+    project_id = os.path.basename(PROJECT_ROOT)
+    content_staging = os.path.join(HEMTT_OUT, "zip_staging")
+    
+    # If the staged @folder exists, we point Steam to the staging root
+    # so that the @folder is included in the upload.
+    if os.path.exists(os.path.join(content_staging, f"@{project_id}")):
+        vdf_content_path = content_staging
+    else:
+        vdf_content_path = STAGING_DIR
+
+    vdf_p, desc_p = create_vdf("107410", workshop_id, vdf_content_path, "Release v" + new_v)
     
     if args.offline:
-        print(f"\n[OFFLINE] Description: {desc_p}\n[OFFLINE] VDF: {vdf_p}")
+        print(f"\n[OFFLINE] Diamond Tier Staging Complete.")
+        print(f"[OFFLINE] Description: {desc_p}")
+        print(f"[OFFLINE] VDF: {vdf_p} (Points to: {vdf_content_path})")
+        if workshop_id == "0":
+            print("⚠️  Warning: Workshop ID is '0'. This VDF will create a NEW item if used.")
         return
     if args.dry_run:
         print(f"\n[DRY-RUN] VDF: {vdf_p}")
