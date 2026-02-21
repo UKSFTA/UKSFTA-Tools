@@ -221,12 +221,18 @@ def main():
     project_id = os.path.basename(PROJECT_ROOT)
     content_staging = os.path.join(HEMTT_OUT, "zip_staging")
     
-    # If the staged @folder exists, we point Steam to the staging root
-    # so that the @folder is included in the upload.
-    if os.path.exists(os.path.join(content_staging, f"@{project_id}")):
-        vdf_content_path = content_staging
-    else:
+    # UKSFTA DIAMOND TIER: Flat Structure Enforcement
+    # Standard Arma 3 Workshop structure requires the 'addons' folder to be in the root of the upload.
+    # We point directly to the folder containing 'addons', NOT the parent @folder.
+    potential_root = os.path.join(content_staging, f"@{project_id}")
+    if os.path.exists(os.path.join(potential_root, "addons")):
+        vdf_content_path = potential_root
+    elif os.path.exists(os.path.join(STAGING_DIR, "addons")):
         vdf_content_path = STAGING_DIR
+    else:
+        print("❌ CRITICAL ERROR: 'addons' folder not found in any staging directory.")
+        print(f"Searched: {potential_root} and {STAGING_DIR}")
+        sys.exit(1)
 
     vdf_p, desc_p = create_vdf("107410", workshop_id, vdf_content_path, "Release v" + new_v)
     
