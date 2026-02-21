@@ -38,6 +38,7 @@ class TestReleaseTool(unittest.TestCase):
         mock_exists.return_value = True
         mock_cats.return_value = (
             [{"id": "123", "name": "Included Mod"}],
+            {"456"},
             {"123", "456"}
         )
         mock_resolve.return_value = {

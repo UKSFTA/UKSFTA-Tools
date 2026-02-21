@@ -9,6 +9,7 @@ import json
 import glob
 import urllib.request
 import urllib.parse
+from manage_mods import get_mod_categories
 import html
 import argparse
 import multiprocessing
@@ -79,28 +80,6 @@ def bump_version(part="patch"):
     content = re.sub(r"#define\s+PATCHLVL\s+\d+", f"#define PATCHLVL {pa}", content)
     with open(VERSION_FILE, "w") as f: f.write(content)
     return new_v
-
-def get_mod_categories():
-    included = []; ignored = set(); all_ack = set()
-    if not os.path.exists(MOD_SOURCES_FILE): return included, ignored, all_ack
-    is_ignore = False
-    with open(MOD_SOURCES_FILE, "r") as f:
-        f_content = f.read(); all_ack.update(re.findall(r"(\d{8,})", f_content))
-        f.seek(0)
-        for line in f:
-            cl = line.strip()
-            if not cl or cl.startswith("#"): continue
-            if "[ignore]" in cl.lower(): is_ignore = True; continue
-            m = re.search(r"(\d{8,})", cl)
-            if m:
-                mid = m.group(1)
-                if is_ignore: ignored.add(mid)
-                else:
-                    name = f"Mod {mid}"
-                    if "#" in cl: name = cl.split("#", 1)[1].strip()
-                    if "|" in name: parts = name.split("|"); name = f"{parts[1].strip()} ({parts[0].strip()})"
-                    included.append({"id": mid, "name": name})
-    return included, ignored, all_ack
 
 def get_automatic_tags():
     tags = set(["Mod", "Addon", "Multiplayer", "Coop", "Realism", "Modern"])

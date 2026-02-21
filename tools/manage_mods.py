@@ -32,8 +32,8 @@ def get_mod_ids_from_file():
     with open(MOD_SOURCES_FILE, "r") as f:
         for line in f:
             clean_line = line.strip()
-            if not clean_line or clean_line.startswith("#") or "[ignore]" in clean_line.lower():
-                if "[ignore]" in clean_line.lower(): break
+            if not clean_line or clean_line.startswith("#") or "[ignore]" in clean_line.lower() or "@ignore" in clean_line.lower():
+                if "[ignore]" in clean_line.lower() or "@ignore" in clean_line.lower(): break
                 continue
             m = re.search(r"(?:id=)?(\d{8,})", clean_line)
             if m:
@@ -226,3 +226,9 @@ if __name__ == "__main__":
         print("\nSuccess: Workspace synced.")
     except Exception as e:
         print(f"\nError: {e}"); sys.exit(1)
+
+def get_mod_categories():
+    initial = get_mod_ids_from_file()
+    ignored = get_ignored_ids_from_file()
+    all_ack = set(initial.keys()) | ignored
+    return initial, ignored, all_ack
