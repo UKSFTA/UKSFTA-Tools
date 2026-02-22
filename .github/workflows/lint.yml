@@ -17,9 +17,9 @@ jobs:
         uses: DavidAnson/markdownlint-cli2-action@v16
         with:
           config: .github/linters/.markdownlint.json
-          # Explicitly ignore node_modules and other artifacts
+          # Use ROBUST recursive exclusion patterns
           globs: |
             **/*.md
-            !node_modules/**
-            !.hemttout/**
-            !.uksf_tools/**
+            !**/node_modules/**
+            !**/.hemttout/**
+            !**/.uksf_tools/**
