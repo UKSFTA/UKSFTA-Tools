@@ -14,17 +14,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Generate Token (GitHub App)
-        id: generate_token
-        uses: tibdex/github-app-token@v2
-        with:
-          app_id: ${{ secrets.UKSFTA_BOT_APP_ID }}
-          private_key: ${{ secrets.UKSFTA_BOT_PRIVATE_KEY }}
-
       - name: Sync to Wiki
         env:
-          WIKI_TOKEN: ${{ steps.generate_token.outputs.token }}
+          WIKI_TOKEN: ${{ secrets.ORG_WIKI_TOKEN }}
         run: |
+          if [ -z "$WIKI_TOKEN" ]; then
+            echo "❌ ERROR: ORG_WIKI_TOKEN is not set in Organization Secrets."
+            exit 1
+          fi
+          
           mkdir -p wiki_sync
           git clone "https://x-access-token:${WIKI_TOKEN}@github.com/${{ github.repository }}.wiki.git" wiki_sync
           
