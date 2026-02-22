@@ -4,9 +4,8 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'docs/**'
-      - 'addons/**'
       - 'README.md'
+      - 'docs/**'
 
 jobs:
   sync-wiki:
@@ -14,28 +13,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Generate Living API Manual
-        run: |
-          GEN=".uksf_tools/tools/doc_generator.py"
-          if [ ! -f "$GEN" ]; then GEN="tools/doc_generator.py"; fi
-          python3 "$GEN" .
 
       - name: Sync to Wiki
+        env:
+          WIKI_TOKEN: ${{ secrets.WIKI_SYNC_TOKEN }}
         run: |
           mkdir -p wiki_sync
-          git clone "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki_sync
-          cp README.md wiki_sync/Home.md
+          # Use the token for cloning and pushing
+          git clone "https://x-access-token:${WIKI_TOKEN}@github.com/${{ github.repository }}.wiki.git" wiki_sync
           
-          # Copy all static docs
-          find docs/ -name "*.md" -exec cp {} wiki_sync/ \;
+          cp README.md wiki_sync/Home.md
+          if [ -d "docs" ]; then
+            find docs/ -name "*.md" -exec cp {} wiki_sync/ \;
+          fi
           
           cd wiki_sync
           git config user.name "github-actions[bot]"
