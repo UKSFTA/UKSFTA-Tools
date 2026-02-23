@@ -15,18 +15,14 @@ def setup_project():
 
     print(f"Setting up UKSFTA Tools in: {project_root.resolve()}")
 
-    # 1. Symlink tools/
-    tools_link = project_root / "tools"
-    if tools_link.exists():
-        if tools_link.is_symlink(): os.unlink(tools_link)
-        else: shutil.rmtree(tools_link)
+    # 1. Copy tools/ (Mandatory for CI/CodeQL)
+    tools_dest = project_root / "tools"
+    if tools_dest.exists():
+        if tools_dest.is_symlink(): os.unlink(tools_dest)
+        else: shutil.rmtree(tools_dest)
     
-    try:
-        os.symlink(".uksf_tools/tools", tools_link)
-        print("  ✅ Symlinked: tools/ directory -> .uksf_tools/tools")
-    except:
-        shutil.copytree(tools_src / "tools", tools_link)
-        print("  ✅ Copied: tools/ directory (Symlink failed)")
+    shutil.copytree(tools_src / "tools", tools_dest)
+    print("  ✅ Copied: tools/ directory (Real files for CI)")
 
     # 2. Refresh HEMTT Hooks & Scripts (Force Overwrite)
     # Source is 'hemtt/', Destination is '.hemtt/'
