@@ -106,7 +106,7 @@ def audit_project_assets(project_path):
     
     all_files = []
     for root, _, files in os.walk(project_path):
-        if ".git" in root or ".hemttout" in root: continue
+        if ".git" in root or ".hemttout" in root or ".uksf_tools" in root: continue
         for f in files:
             all_files.append(Path(root) / f)
 
@@ -115,12 +115,13 @@ def audit_project_assets(project_path):
     
     if not assets:
         print("  ℹ️  No binary assets found.")
-        return
+        return True # Pass
 
     # 1. REFERENCE AUDIT (ORPHAN DETECTION)
     code_refs = set()
     # Path regex: capture anything that looks like a path or filename with extension
-    path_regex = re.compile(r'([a-zA-Z0-9_\\./-]+\.(paa|rvmat|p3d|ogg|wss|rtm|wrp))', re.IGNORECASE)
+    # Added '%' to support Arma format strings
+    path_regex = re.compile(r'([a-zA-Z0-9_%\\./-]+\.(paa|rvmat|p3d|ogg|wss|rtm|wrp))', re.IGNORECASE)
     
     for c in code_files:
         try:
@@ -164,12 +165,14 @@ def audit_project_assets(project_path):
     # 3. SUMMARY REPORT
     print("\n[Summary Report]")
     
+    success = True
     if orphans:
         print(f"  ❌ {len(orphans)} Orphaned Assets (Unused in code)")
         # Show sample of orphans
         for o in sorted(orphans)[:5]:
             print(f"     - {o}")
         if len(orphans) > 5: print(f"     ... and {len(orphans)-5} more.")
+        success = False
     else:
         print("  ✅ Reference Integrity: PASS")
 
@@ -186,11 +189,15 @@ def audit_project_assets(project_path):
         print(f"  ❌ {len(unique_missing)} Missing Internal Links (Dead VFS paths):")
         for source, miss in unique_missing[:10]:
             print(f"     - {source} -> {miss}")
+        success = False
     else:
         print("  ✅ VFS Link Integrity: PASS")
+        
+    return success
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: asset_auditor.py <project_path>")
         sys.exit(1)
-    audit_project_assets(sys.argv[1])
+    if not audit_project_assets(sys.argv[1]):
+        sys.exit(1)
