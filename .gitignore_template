@@ -3,6 +3,7 @@
 
 # HEMTT Artifacts
 .hemttout/
+.hemtt_temp/
 .hemtt/
 .hemttprivatekey
 !.hemtt/project.toml
