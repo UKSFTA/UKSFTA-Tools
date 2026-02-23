@@ -192,11 +192,11 @@ def main():
             print("⚠️  Warning: Version was bumped, but build was skipped. Uploaded PBOs will still have the old version!")
     else:
         print(f"Running Build (v{new_v})...")
-        # Set HEMTT_TEMP_DIR and standard TEMP variables to a project-local directory for build stability
+        # Set HEMTT_TEMP and standard TEMP variables to a project-local directory for build stability
         build_env = os.environ.copy()
-        build_temp_dir = os.path.join(HEMTT_OUT, "tmp")
+        build_temp_dir = os.path.join(PROJECT_ROOT, ".hemtt_temp")
         os.makedirs(build_temp_dir, exist_ok=True)
-        build_env["HEMTT_TEMP_DIR"] = build_temp_dir
+        build_env["HEMTT_TEMP"] = build_temp_dir
         build_env["TMPDIR"] = build_temp_dir
         build_env["TEMP"] = build_temp_dir
         build_env["TMP"] = build_temp_dir
