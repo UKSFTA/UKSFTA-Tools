@@ -2,6 +2,9 @@
 PROJECT_ROOT=$(pwd)
 export SOURCE_DATE_EPOCH=$(date +%s)
 export HEMTT_TEMP="$PROJECT_ROOT/.hemtt_temp"
+export TMPDIR="$HEMTT_TEMP"
+export TEMP="$HEMTT_TEMP"
+export TMP="$HEMTT_TEMP"
 mkdir -p "$HEMTT_TEMP"
 
 # Detect if this is a HEMTT project
