@@ -1,8 +1,8 @@
-# ⚔️ UKSFTA Platinum DevOps Suite v1.4.0
+# UKSFTA DevOps Suite
 
-The **UKSFTA Platinum DevOps Suite** is a high-fidelity unit management and automation toolkit designed for professional Arma 3 development. It provides a "Zero Trust" infrastructure that ensures project stability, security, and performance across the entire unit workspace.
+The UKSFTA DevOps Suite is a automation toolkit designed for Arma 3 development. It provides a automated pipeline that ensures project stability, security, and performance across the entire unit workspace.
 
-## 🚀 Key Features
+## Key Features
 
 ### 🌐 Workspace Operations
 
@@ -18,7 +18,7 @@ The **UKSFTA Platinum DevOps Suite** is a high-fidelity unit management and auto
 - **`workshop-info`**: Query live versions, sizes, and timestamps directly from Steam.
 - **`modlist-size`**: Calculate the total data footprint of any Arma 3 modlist.
 
-### 🛡️ Assurance & Quality (Phase 1 & 4)
+### Assurance and Quality (Phase 1 & 4)
 
 - **`audit`**: Master command running the full suite of health and security checks.
 - **`audit-lods`**: Deep-scan P3Ds for missing Shadow Volume or Geometry LODs.
@@ -26,7 +26,7 @@ The **UKSFTA Platinum DevOps Suite** is a high-fidelity unit management and auto
 - **`rebin-guard`**: Pre-binarization safety check to ensure assets are stable for production builds.
 - **HEMTT Hook**: Automated forensic audit that halts the build cycle if asset defects are detected.
 
-### 🏗️ Asset Ingestion & Porting (Phase 2 & 5)
+### Asset Ingestion and Porting (Phase 2 & 5)
 
 - **`import-wizard`**: One-click ingestion of external assets with automated sanitization and refactoring.
 - **`remap-advanced`**: Bulk-replace texture and material paths inside binarized P3D files.
