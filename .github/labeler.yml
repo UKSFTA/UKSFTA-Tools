@@ -1,0 +1,59 @@
+# Label configuration for auto-labeler
+# Documentation
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '*.md'
+          - docs/**
+          - '**/*.md'
+
+# CI/CD changes
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/**
+          - '**/*.yml'
+          - '**/*.yaml'
+
+# Python
+python:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.py'
+          - requirements*.txt
+          - pyproject.toml
+          - setup.py
+
+# JavaScript/Node.js
+javascript:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.js'
+          - '**/*.ts'
+          - package.json
+          - package-lock.json
+
+# C#/.NET
+dotnet:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.cs'
+          - '**/*.csproj'
+          - '**/*.sln'
+
+# Bash/Shell
+shell:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.sh'
+          - '**/*.bash'
+
+# Arma config
+arma:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.hpp'
+          - '**/*.cpp'
+          - '**/*.sqf'
+          - '**/*.ext'
+          - cfg/**
