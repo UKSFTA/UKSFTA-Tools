@@ -1,60 +1,69 @@
 # UKSFTA DevOps Suite
 
-The UKSFTA DevOps Suite is a automation toolkit designed for Arma 3 development. It provides a automated pipeline that ensures project stability, security, and performance across the entire unit workspace.
+Automation toolkit for Arma 3 mod development. Provides a pipeline for
+project stability, security, and performance across the unit workspace.
 
-## Key Features
+## Workspace Operations
 
-### 🌐 Workspace Operations
+- **`status`**: Git status summary for every unit repository.
+- **`sync`**: Workshop dependency synchronisation and lockfile management.
+- **`update`**: Propagate latest DevOps tools to all unit projects.
+- **`self-update`**: Synchronise local toolkit with the master repository.
 
-- **`status`**: Instant git status summary for every unit repository.
-- **`sync`**: Automated Workshop dependency synchronization and lockfile management.
-- **`update`**: One-click propagation of latest DevOps tools to all unit projects.
-- **`self-update`**: Keep your local toolkit synchronized with the master repository.
+## Forensic Intelligence
 
-### 🧠 Forensic Intelligence (Phase 3)
-
-- **`classify-asset`**: Heuristic engine that identifies P3D categories (Uniform, Vest, Weapon) via internal metadata.
-- **`diff-models`**: Binary-level comparison of P3D assets, reporting changes in Mass, LODs, and VFS Links.
-- **`workshop-info`**: Query live versions, sizes, and timestamps directly from Steam.
+- **`classify-asset`**: Heuristic engine that identifies P3D categories
+  (Uniform, Vest, Weapon) via internal metadata.
+- **`diff-models`**: Binary-level comparison of P3D assets, reporting changes
+  in Mass, LODs, and VFS Links.
+- **`workshop-info`**: Query live versions, sizes, and timestamps from Steam.
 - **`modlist-size`**: Calculate the total data footprint of any Arma 3 modlist.
 
-### Assurance and Quality (Phase 1 & 4)
+## Assurance and Quality
 
-- **`audit`**: Master command running the full suite of health and security checks.
+- **`audit`**: Full suite of health and security checks.
 - **`audit-lods`**: Deep-scan P3Ds for missing Shadow Volume or Geometry LODs.
-- **`audit-vfs-links`**: Detect "external leakage" and dead texture/material paths in assets.
-- **`rebin-guard`**: Pre-binarization safety check to ensure assets are stable for production builds.
-- **HEMTT Hook**: Automated forensic audit that halts the build cycle if asset defects are detected.
+- **`audit-vfs-links`**: Detect external leakage and dead texture/material
+  paths in assets.
+- **`rebin-guard`**: Pre-binarisation safety check to ensure assets are stable
+  for production builds.
+- **HEMTT Hook**: Automated forensic audit that halts the build cycle if
+  asset defects are detected.
 
-### Asset Ingestion and Porting (Phase 2 & 5)
+## Asset Ingestion and Porting
 
-- **`import-wizard`**: One-click ingestion of external assets with automated sanitization and refactoring.
-- **`remap-advanced`**: Bulk-replace texture and material paths inside binarized P3D files.
-- **RVMAT Refactoring**: Automated path normalization inside material files.
-- **Config Generation**: Auto-generate `config.cpp` boilerplates based on forensic classification.
+- **`import-wizard`**: One-click ingestion of external assets with automated
+  sanitisation and refactoring.
+- **`remap-advanced`**: Bulk-replace texture and material paths inside
+  binarised P3D files.
+- **RVMAT Refactoring**: Automated path normalisation inside material files.
+- **Config Generation**: Auto-generate `config.cpp` boilerplates based on
+  forensic classification.
 
-### 🛰️ Distributed DevOps (Remote Node Management)
+## Distributed DevOps
 
-- **`remote setup`**: Automated onboarding of a new VPS node.
-- **`remote run`**: High-speed task delegation to the unit's remote gigabit backbone.
-- **`remote monitor`**: High-fidelity resource reporting for all distributed nodes.
+- **`remote setup`**: Onboarding of a new VPS node.
+- **`remote run`**: Task delegation to the unit's remote infrastructure.
+- **`remote monitor`**: Resource reporting for all distributed nodes.
 
-## 💻 Developer Experience (DX)
+## Developer Experience
 
-- **Git Hooks**: Local pre-commit guards to block security leaks and syntax errors.
-- **VS Code Integration**: One-click task menu for all common dev actions.
-- **Rich CLI**: Beautiful, high-performance terminal interface using the `rich` library.
+- **Git Hooks**: Pre-commit guards to block security leaks and syntax errors.
+- **VS Code Integration**: Task menu for all common dev actions.
+- **Rich CLI**: Terminal interface using the `rich` library.
+
+## Getting Started
+
+1. **Prerequisites**: `python3`, `git`, `hemtt`, `steamcmd`, `ansible`.
+2. **Setup**: Run `./tools/workspace_manager.py check-env` to verify your
+   local environment.
+3. **Usage**: Run `./tools/workspace_manager.py help` to see the full command
+   suite.
+
+## Licence
+
+This project is licensed under the MIT Licence. See the `LICENSE` file.
 
 ---
 
-## 🛠 Getting Started
-
-1. **Prerequisites**: Ensure you have `python3`, `git`, `hemtt`, `steamcmd`, and `ansible` installed.
-2. **Setup**: Run `./tools/workspace_manager.py check-env` to verify your local environment.
-3. **Usage**: Run `./tools/workspace_manager.py help` to see the full command suite.
-
----
-
-### Maintained by the UKSF Taskforce Alpha Development Team
-
-**Operational Status**: 🛡️  Real-time Sync Active
+Maintained by the UKSFTA Development Team.
