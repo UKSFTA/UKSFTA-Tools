@@ -16,7 +16,7 @@ jobs:
 
       - name: Generate Token (UKSFTA-Bot)
         id: get_token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.UKSFTA_BOT_APP_ID }}
           private-key: ${{ secrets.UKSFTA_BOT_PRIVATE_KEY }}
