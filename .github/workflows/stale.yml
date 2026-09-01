@@ -1,0 +1,33 @@
+# Close stale issues and PRs after 30 days of inactivity
+name: Stale Issues and PRs
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'  # Weekly on Monday at 09:00 UTC
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          days-before-stale: 30
+          days-before-close: 7
+          stale-issue-label: 'stale'
+          stale-pr-label: 'stale'
+          stale-issue-message: >
+            This issue has been inactive for 30 days. It will be closed in 7 days
+            unless there is further activity. Comment to keep it open.
+          stale-pr-message: >
+            This pull request has been inactive for 30 days. It will be closed in
+            7 days unless there is further activity. Comment to keep it open.
+          close-issue-message: 'Closed due to inactivity. Reopen if still relevant.'
+          close-pr-message: 'Closed due to inactivity. Reopen if still relevant.'
+          exempt-issue-labels: 'pinned,security,bug-confirmed'
+          exempt-pr-labels: 'pinned,work-in-progress'
+          exempt-all-milestones: true
