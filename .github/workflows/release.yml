@@ -46,7 +46,7 @@ jobs:
           echo "BODY_PATH=changelog.txt" >> $GITHUB_ENV
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: releases/*.zip
           body_path: ${{ env.BODY_PATH }}
