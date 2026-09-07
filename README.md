@@ -84,7 +84,7 @@ chmod +x uksfta-linux
 sudo mv uksfta-linux /usr/local/bin/uksfta
 
 # Windows
-# rename uksfta-windows.exe to uksft.exe and add to PATH
+# rename uksfta-windows.exe to uksfta.exe and add to PATH
 ```
 
 Or build from source: `cargo build --release` (Linux, macOS) /
