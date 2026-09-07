@@ -214,6 +214,12 @@ enum Commands {
     Identify,
     /// Verify all PBOs are present
     Verify,
+    /// Audit each mod's PBOs against addons/ (present or missing)
+    Audit {
+        /// Show only missing PBOs and per-mod counts
+        #[arg(long)]
+        missing_only: bool,
+    },
     /// Check for updates available in Workshop cache
     Updates,
 }
@@ -229,7 +235,14 @@ struct ModEntry {
 }
 
 fn parse_mod_sources(path: &Path) -> (Vec<ModEntry>, Vec<String>) {
-    let content = fs::read_to_string(path).expect("Failed to read mod_sources.txt");
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("Error: no mod_sources.txt found in this directory");
+            eprintln!("Run from a mod repo root containing mod_sources.txt");
+            std::process::exit(1);
+        }
+    };
     let mut mods = Vec::new();
     let mut ignored = Vec::new();
     let mut in_ignore = false;
@@ -728,6 +741,166 @@ fn verify() {
     }
 }
 
+fn audit(missing_only: bool) {
+    let (mods, _ignored) = parse_mod_sources(Path::new("mod_sources.txt"));
+    if mods.is_empty() {
+        eprintln!("No mods found in mod_sources.txt");
+        return;
+    }
+
+    let mod_count = mods.len();
+
+    let caches = find_all_workshop_caches();
+    if caches.is_empty() {
+        eprintln!("Workshop cache not found. Is Steam installed?");
+        return;
+    }
+
+    let addons_dir = Path::new("addons");
+
+    // Build a set of every PBO filename currently in addons/ (recursive)
+    let mut present_pbos: HashMap<String, ()> = HashMap::new();
+    for pbo in find_pbos(addons_dir) {
+        if let Some(name) = pbo.file_name().map(|n| n.to_string_lossy().to_string()) {
+            present_pbos.insert(name, ());
+        }
+    }
+
+    // Collect every expected PBO name across all mods, for orphan detection
+    let mut all_expected: HashMap<String, String> = HashMap::new(); // pbo name -> mod name
+    let mut not_in_cache = 0;
+    let mut total_missing = 0;
+    let mut total_expected = 0;
+    let mut missing_list: Vec<String> = Vec::new();
+
+    println!("--- Mod audit ---");
+
+    for entry in &mods {
+        // Find this mod in any cache
+        let mut mod_path = None;
+        for cache in &caches {
+            let path = cache.join(&entry.id);
+            if path.exists() {
+                mod_path = Some(path);
+                break;
+            }
+        }
+
+        let mod_path = match mod_path {
+            Some(p) => p,
+            None => {
+                println!(
+                    "  [NOT IN CACHE] {} ({}) — cannot enumerate PBOs",
+                    entry.name, entry.id
+                );
+                not_in_cache += 1;
+                continue;
+            }
+        };
+
+        // Expected PBOs from the cache, by filename
+        let expected = find_pbos(&mod_path);
+        if expected.is_empty() {
+            println!(
+                "  [EMPTY]   {} ({}) — no PBOs in cache",
+                entry.name, entry.id
+            );
+            continue;
+        }
+
+        let expected_names: Vec<String> = expected
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        total_expected += expected_names.len();
+
+        let present_count = expected_names
+            .iter()
+            .filter(|n| present_pbos.contains_key(*n))
+            .count();
+        let missing: Vec<&String> = expected_names
+            .iter()
+            .filter(|n| !present_pbos.contains_key(*n))
+            .collect();
+
+        for name in &expected_names {
+            all_expected
+                .entry(name.clone())
+                .or_insert_with(|| entry.name.clone());
+        }
+
+        let status = if missing.is_empty() {
+            "OK"
+        } else {
+            "INCOMPLETE"
+        };
+        if !missing_only || !missing.is_empty() {
+            println!(
+                "  [{}] {} ({}) — {}/{} PBOs",
+                status,
+                entry.name,
+                entry.id,
+                present_count,
+                expected_names.len()
+            );
+        }
+
+        if !missing_only {
+            for name in &expected_names {
+                if present_pbos.contains_key(name) {
+                    println!("      present: {}", name);
+                } else {
+                    println!("      MISSING: {}", name);
+                }
+            }
+        } else {
+            for name in &missing {
+                println!("      MISSING: {}", name);
+            }
+        }
+
+        for name in &missing {
+            missing_list.push(format!("{} -> {}", name, entry.name));
+        }
+        total_missing += missing.len();
+    }
+
+    // Orphan detection: PBOs in addons/ that belong to no expected mod
+    let orphans: Vec<&String> = present_pbos
+        .keys()
+        .filter(|name| !all_expected.contains_key(*name))
+        .collect();
+    if !orphans.is_empty() {
+        println!("\n  [ORPHANS] PBOs in addons/ not from any listed mod:");
+        for name in &orphans {
+            println!("      orphan: {}", name);
+        }
+    }
+
+    let pct = if total_expected > 0 {
+        ((total_expected - total_missing) * 100) / total_expected
+    } else {
+        100
+    };
+
+    println!(
+        "\nSummary: {}/{} PBOs present ({}%) across {} mods; {} not in cache",
+        total_expected - total_missing,
+        total_expected,
+        pct,
+        mod_count,
+        not_in_cache
+    );
+
+    if !missing_list.is_empty() {
+        println!("\nMissing PBOs:");
+        for m in &missing_list {
+            println!("  {}", m);
+        }
+        std::process::exit(1);
+    }
+}
+
 fn check_updates() {
     let lock_path = Path::new("mods.lock");
     if !lock_path.exists() {
@@ -795,6 +968,7 @@ fn main() {
         }
         Commands::Identify => identify(),
         Commands::Verify => verify(),
+        Commands::Audit { missing_only } => audit(missing_only),
         Commands::Updates => check_updates(),
     }
 }
