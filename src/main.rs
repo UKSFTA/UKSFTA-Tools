@@ -307,38 +307,98 @@ fn extract_tag(line: &str) -> Option<String> {
 }
 
 // --- Steam library discovery ---
+//
+// We do not guess where Steam libraries live. Steam tells us:
+//   - Windows/WSL: HKCU\Software\Valve\Steam -> SteamPath (what Steam itself reads)
+//   - Linux:       ~/.steam/steam (a symlink Steam maintains to its real root)
+// From that root, libraryfolders.vdf lists every library Steam owns.
 
-fn find_steam_library_folders() -> Vec<PathBuf> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let mut folders = Vec::new();
+fn steam_registry_path() -> Option<PathBuf> {
+    // `reg.exe` works on native Windows and inside WSL (Windows interop),
+    // so one code path covers both.
+    let out = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Software\Valve\Steam", "/v", "SteamPath"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines().find_map(|line| {
+        // Registry output: "    SteamPath    REG_SZ    C:\Program Files (x86)\Steam"
+        let rest = line.split_once("REG_SZ")?.1.trim();
+        if rest.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(rest))
+        }
+    })
+}
 
-    // Parse libraryfolders.vdf for all Steam libraries
-    // Note: VDF is in config/ directory, not steamapps/
-    let vdf_paths = [
-        home.join(".steam/steam/config/libraryfolders.vdf"),
-        home.join(".local/share/Steam/config/libraryfolders.vdf"),
-        home.join("Steam/config/libraryfolders.vdf"),
-        home.join(".steam/steam/steamapps/libraryfolders.vdf"), // fallback
-        home.join(".local/share/Steam/steamapps/libraryfolders.vdf"), // fallback
-    ];
-
-    for vdf_path in &vdf_paths {
-        if let Ok(content) = fs::read_to_string(vdf_path) {
-            parse_libraryfolders_vdf(&content, &mut folders);
+fn steam_root() -> Option<PathBuf> {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        // Windows registry path (also reachable from WSL via interop).
+        if let Some(p) = steam_registry_path() {
+            // In WSL, a Windows path like C:\... maps to /mnt/c/...
+            #[cfg(target_os = "linux")]
+            if let Some(mapped) = wsl_map_windows_path(&p) {
+                return Some(mapped);
+            }
+            #[cfg(target_os = "windows")]
+            return Some(p);
         }
     }
 
-    // Also check common locations
-    let common = [
-        home.join(".steam/steam/steamapps"),
-        home.join(".local/share/Steam/steamapps"),
-        home.join("Steam/steamapps"),
-        PathBuf::from("/ext/SteamLibrary/steamapps"),
-        home.join(".steam/steamcmd/steamapps"),
-    ];
-    for path in &common {
-        if path.exists() && !folders.contains(path) {
-            folders.push(path.clone());
+    #[cfg(target_os = "linux")]
+    {
+        let home = dirs::home_dir()?;
+        // Steam maintains ~/.steam/steam as a symlink to its real root.
+        let candidates = [home.join(".steam/steam"), home.join(".local/share/Steam")];
+        for c in candidates {
+            if c.join("steamapps").exists() {
+                return Some(c);
+            }
+        }
+    }
+
+    None
+}
+
+/// Maps a Windows path (C:\foo) to its WSL mount (/mnt/c/foo).
+#[cfg(target_os = "linux")]
+fn wsl_map_windows_path(win: &Path) -> Option<PathBuf> {
+    let s = win.to_str()?;
+    // Expect "<drive>:\\<rest>"
+    let drive = s.as_bytes().first()?.to_ascii_lowercase() as char;
+    if !drive.is_ascii_alphabetic() {
+        return None;
+    }
+    let rest = s.get(2..)?.trim_start_matches('\\');
+    let mut mapped = PathBuf::from("/mnt");
+    mapped.push(drive.to_string());
+    mapped.push(rest.replace('\\', "/"));
+    Some(mapped)
+}
+
+fn find_steam_library_folders() -> Vec<PathBuf> {
+    let mut folders = Vec::new();
+
+    if let Some(root) = steam_root() {
+        // Steam's authoritative library list.
+        for vdf_path in [
+            root.join("config/libraryfolders.vdf"),
+            root.join("steamapps/libraryfolders.vdf"), // fallback
+        ] {
+            if let Ok(content) = fs::read_to_string(&vdf_path) {
+                parse_libraryfolders_vdf(&content, &mut folders);
+            }
+        }
+
+        // The root's own steamapps dir.
+        let steamapps = root.join("steamapps");
+        if steamapps.exists() && !folders.contains(&steamapps) {
+            folders.push(steamapps);
         }
     }
 
@@ -348,16 +408,12 @@ fn find_steam_library_folders() -> Vec<PathBuf> {
 fn parse_libraryfolders_vdf(content: &str, folders: &mut Vec<PathBuf>) {
     for line in content.lines() {
         let line = line.trim();
-        if line.contains("\"path\"") {
-            if let Some(start) = line.find('"') {
-                let rest = &line[start + 1..];
-                if let Some(end) = rest.find('"') {
-                    let path_str = &rest[..end];
-                    let steamapps = PathBuf::from(path_str).join("steamapps");
-                    if !folders.contains(&steamapps) {
-                        folders.push(steamapps);
-                    }
-                }
+        // VDF lines: "path" "C:\SteamLibrary"  -> value is the SECOND quoted token
+        let tokens = extract_quoted_tokens(line);
+        if tokens.len() >= 2 && tokens[0] == "path" {
+            let steamapps = PathBuf::from(&tokens[1]).join("steamapps");
+            if !folders.contains(&steamapps) {
+                folders.push(steamapps);
             }
         }
     }
@@ -877,11 +933,11 @@ fn audit(missing_only: bool) {
         }
     }
 
-    let pct = if total_expected > 0 {
-        ((total_expected - total_missing) * 100) / total_expected
-    } else {
-        100
-    };
+    let pct = total_expected
+        .checked_sub(total_missing)
+        .and_then(|n| n.checked_mul(100))
+        .and_then(|n| n.checked_div(total_expected))
+        .unwrap_or(100);
 
     println!(
         "\nSummary: {}/{} PBOs present ({}%) across {} mods; {} not in cache",
