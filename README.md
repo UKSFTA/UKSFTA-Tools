@@ -19,6 +19,12 @@ uksft identify
 # Confirm all locked PBOs are present
 uksft verify
 
+# Audit each mod's PBOs against addons/ (present/missing per PBO)
+uksft audit
+
+# Show only missing PBOs and per-mod counts
+uksft audit --missing-only
+
 # Compare mods.lock timestamps against the Workshop cache
 uksft updates
 ```
@@ -44,6 +50,11 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=887302721 # Boat Mod
 
 The tool reads the Workshop cache and its `appworkshop_107410.acf` metadata
 directly from your Steam libraries. It performs no Steam API calls.
+
+The `audit` command also flags orphan PBOs: files in `addons/` that belong
+to no mod listed in `mod_sources.txt`. These are leftovers from removed
+mods and can be cleaned up. It exits with a non-zero status when any
+expected PBO is missing, so it can gate a build in CI.
 
 ## Licence
 
