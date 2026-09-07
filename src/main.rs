@@ -193,7 +193,7 @@ fn get_mod_metadata(mod_dir: &Path) -> ModCpp {
 }
 
 #[derive(Parser)]
-#[command(name = "uksft", about = "UKSFTA modpack manager")]
+#[command(name = "uksfta", about = "UKSFTA modpack manager")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -1005,7 +1005,7 @@ fn check_updates() {
         println!("  All mods up to date");
     } else {
         println!("\n{} mods have updates available", updatable);
-        println!("Run 'uksft sync' to apply updates");
+        println!("Run 'uksfta sync' to apply updates");
     }
 }
 

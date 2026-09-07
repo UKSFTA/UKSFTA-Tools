@@ -15,11 +15,11 @@ jobs:
           - name: linux
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: uksft-tools-linux
+            artifact: uksfta-linux
           - name: windows
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: uksft-tools-windows.exe
+            artifact: uksfta-windows.exe
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -39,7 +39,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: target/${{ matrix.target }}/release/uksft-tools*${{ runner.os == 'Windows' && '.exe' || '' }}
+          path: target/${{ matrix.target }}/release/uksfta*${{ runner.os == 'Windows' && '.exe' || '' }}
           if-no-files-found: error
 
   release:
