@@ -29,7 +29,7 @@ uksft updates
 optional tag after `#`. Mods under `[ignore]` are excluded (for example the
 base dependency set that is not repacked).
 
-```
+```text
 https://steamcommunity.com/sharedfiles/filedetails/?id=887302721 # Boat Mod
 450814997 # CBA_A3
 
