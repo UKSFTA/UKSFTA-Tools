@@ -1,3 +1,6 @@
+# Rust
+/target
+
 # HEMTT
 .hemttout/
 .hemtt_temp/
@@ -12,14 +15,9 @@
 *.rpt
 *.bidry
 
-# Runtime (manage_mods.py)
+# Runtime (uksft mods)
 mods.lock
 mod_sources.txt
-
-# Python
-__pycache__/
-.pytest_cache/
-*.pyc
 
 # Environment
 .env
