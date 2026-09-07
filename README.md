@@ -8,25 +8,25 @@ Run from a mod repository root (a directory containing `mod_sources.txt` and `ad
 
 ```bash
 # Preview what a sync would change
-uksft sync --dry-run
+uksfta sync --dry-run
 
 # Copy PBOs from the local Steam Workshop cache into addons/, write mods.lock
-uksft sync
+uksfta sync
 
 # Show which PBOs came from which Workshop mod
-uksft identify
+uksfta identify
 
 # Confirm all locked PBOs are present
-uksft verify
+uksfta verify
 
 # Audit each mod's PBOs against addons/ (present/missing per PBO)
-uksft audit
+uksfta audit
 
 # Show only missing PBOs and per-mod counts
-uksft audit --missing-only
+uksfta audit --missing-only
 
 # Compare mods.lock timestamps against the Workshop cache
-uksft updates
+uksfta updates
 ```
 
 ## Input Format
@@ -80,11 +80,11 @@ page](https://github.com/UKSFTA/UKSFTA-Tools/releases) and put it on your
 
 ```bash
 # Linux
-chmod +x uksft-tools-linux
-sudo mv uksft-tools-linux /usr/local/bin/uksft
+chmod +x uksfta-linux
+sudo mv uksfta-linux /usr/local/bin/uksfta
 
 # Windows
-# rename uksft-tools-windows.exe to uksft.exe and add to PATH
+# rename uksfta-windows.exe to uksft.exe and add to PATH
 ```
 
 Or build from source: `cargo build --release` (Linux, macOS) /
