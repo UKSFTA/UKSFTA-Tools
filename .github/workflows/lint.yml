@@ -22,4 +22,3 @@ jobs:
             **/*.md
             !**/node_modules/**
             !**/.hemttout/**
-            !**/.uksf_tools/**

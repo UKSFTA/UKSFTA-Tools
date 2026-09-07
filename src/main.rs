@@ -87,11 +87,11 @@ fn parse_acf(content: &str) -> HashMap<String, WorkshopItem> {
 }
 
 fn extract_quoted(line: &str) -> Option<String> {
-    let mut chars = line.chars();
+    let chars = line.chars();
     let mut in_quote = false;
     let mut value = String::new();
 
-    while let Some(c) = chars.next() {
+    for c in chars {
         if c == '"' {
             if in_quote {
                 return Some(value);
@@ -106,11 +106,11 @@ fn extract_quoted(line: &str) -> Option<String> {
 
 fn extract_quoted_tokens(line: &str) -> Vec<String> {
     let mut tokens = Vec::new();
-    let mut chars = line.chars();
+    let chars = line.chars();
     let mut in_quote = false;
     let mut value = String::new();
 
-    while let Some(c) = chars.next() {
+    for c in chars {
         if c == '"' {
             if in_quote {
                 tokens.push(std::mem::take(&mut value));
@@ -666,15 +666,13 @@ fn identify() {
     let mut pbo_map: HashMap<String, String> = HashMap::new();
     for cache in &caches {
         if let Ok(entries) = fs::read_dir(cache) {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let mod_path = entry.path();
-                    if mod_path.is_dir() {
-                        let id = mod_path.file_name().unwrap().to_string_lossy().to_string();
-                        for pbo in find_pbos(&mod_path) {
-                            if let Some(name) = pbo.file_name() {
-                                pbo_map.insert(name.to_string_lossy().to_string(), id.clone());
-                            }
+            for entry in entries.flatten() {
+                let mod_path = entry.path();
+                if mod_path.is_dir() {
+                    let id = mod_path.file_name().unwrap().to_string_lossy().to_string();
+                    for pbo in find_pbos(&mod_path) {
+                        if let Some(name) = pbo.file_name() {
+                            pbo_map.insert(name.to_string_lossy().to_string(), id.clone());
                         }
                     }
                 }
@@ -684,18 +682,16 @@ fn identify() {
 
     println!("PBO Origins:");
     if let Ok(entries) = fs::read_dir(addons_dir) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                if entry
-                    .path()
-                    .extension()
-                    .map(|e| e == "pbo")
-                    .unwrap_or(false)
-                {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    let origin = pbo_map.get(&name).map(|s| s.as_str()).unwrap_or("Unknown");
-                    println!("  {} -> Workshop {}", name, origin);
-                }
+        for entry in entries.flatten() {
+            if entry
+                .path()
+                .extension()
+                .map(|e| e == "pbo")
+                .unwrap_or(false)
+            {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let origin = pbo_map.get(&name).map(|s| s.as_str()).unwrap_or("Unknown");
+                println!("  {} -> Workshop {}", name, origin);
             }
         }
     }
