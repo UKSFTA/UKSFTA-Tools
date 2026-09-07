@@ -56,6 +56,14 @@ to no mod listed in `mod_sources.txt`. These are leftovers from removed
 mods and can be cleaned up. It exits with a non-zero status when any
 expected PBO is missing, so it can gate a build in CI.
 
+## Missing mods
+
+When a mod in `mod_sources.txt` is not present in any local Workshop
+cache, `sync` reports it with its name and a direct link to the Steam
+Workshop page, then lists a set of `steam://url/CommunityFilePage/...`
+deep links so each mod can be subscribed to in Steam. Once subscribed
+and downloaded, re-run `uksfta sync` to pull the PBOs into `addons/`.
+
 ## Platforms
 
 Steam library discovery is dynamic — the tool reads what Steam records,
