@@ -1,2 +1,0 @@
-# List required workshop IDs for this mission below
-# Format: ID # Name
