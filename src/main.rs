@@ -433,12 +433,12 @@ fn find_all_workshop_caches() -> Vec<PathBuf> {
 
 // --- Lock file ---
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct LockFile {
     mods: HashMap<String, ModLockEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 struct ModLockEntry {
     files: Vec<String>,
     name: String,
@@ -446,7 +446,7 @@ struct ModLockEntry {
     updated: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 struct Dependency {
     id: String,
     name: String,
@@ -707,7 +707,22 @@ fn sync_mods(mods: &[ModEntry], ignored: &[String], dry_run: bool, _offline: boo
         println!("Removed: {} ({})", name, id);
     }
 
-    save_lock(lock_path, &new_lock);
+    // Preserve lock entries for mods still in the list but missing from
+    // the Workshop cache. They are wanted but not currently syncable, so
+    // their previous file records must not be dropped.
+    for (id, _) in &missing_from_cache {
+        if let Some(entry) = lock.mods.get(id) {
+            new_lock.mods.insert(id.clone(), entry.clone());
+        }
+    }
+
+    // Only write the lock when its content actually changed. This avoids
+    // touching the file (and dirtying the working tree) when nothing was
+    // synced or removed.
+    let changed = new_lock.mods != lock.mods;
+    if changed {
+        save_lock(lock_path, &new_lock);
+    }
 
     for (id, name) in &missing_from_cache {
         eprintln!("Warning: {} ({}) not found in Workshop cache", name, id);
