@@ -518,7 +518,7 @@ fn sync_mods(mods: &[ModEntry], ignored: &[String], dry_run: bool, _offline: boo
 
     // Classify each requested mod: added / updated / unchanged / missing from cache
     let mut planned: Vec<(ModLockEntry, String, String, Vec<PathBuf>)> = Vec::new(); // (entry, id, status, source PBO paths)
-    let mut missing_from_cache = Vec::new();
+    let mut missing_from_cache = Vec::new(); // (id, name)
 
     for entry in mods {
         // Find the mod in any cache
@@ -534,7 +534,7 @@ fn sync_mods(mods: &[ModEntry], ignored: &[String], dry_run: bool, _offline: boo
         let mod_path = match mod_path {
             Some(p) => p,
             None => {
-                missing_from_cache.push(entry.id.clone());
+                missing_from_cache.push((entry.id.clone(), entry.name.clone()));
                 continue;
             }
         };
@@ -549,7 +549,7 @@ fn sync_mods(mods: &[ModEntry], ignored: &[String], dry_run: bool, _offline: boo
 
         let pbos = find_pbos(&mod_path);
         if pbos.is_empty() {
-            missing_from_cache.push(entry.id.clone());
+            missing_from_cache.push((entry.id.clone(), entry.name.clone()));
             continue;
         }
 
@@ -650,8 +650,12 @@ fn sync_mods(mods: &[ModEntry], ignored: &[String], dry_run: bool, _offline: boo
                 );
             }
         }
-        for id in &missing_from_cache {
-            println!("  [MISSING] Mod {} not found in Workshop cache", id);
+        for (id, name) in &missing_from_cache {
+            println!("  [MISSING] {} ({}) not found in Workshop cache", name, id);
+            println!(
+                "            https://steamcommunity.com/sharedfiles/filedetails/?id={}",
+                id
+            );
         }
         println!(
             "\nSummary: {} added, {} updated, {} unchanged, {} removed",
@@ -705,8 +709,22 @@ fn sync_mods(mods: &[ModEntry], ignored: &[String], dry_run: bool, _offline: boo
 
     save_lock(lock_path, &new_lock);
 
-    for id in &missing_from_cache {
-        eprintln!("Warning: Mod {} not found in Workshop cache", id);
+    for (id, name) in &missing_from_cache {
+        eprintln!("Warning: {} ({}) not found in Workshop cache", name, id);
+        eprintln!(
+            "         https://steamcommunity.com/sharedfiles/filedetails/?id={}",
+            id
+        );
+    }
+
+    if !missing_from_cache.is_empty() {
+        println!(
+            "\nSubscribe to the {} missing mods in Steam:",
+            missing_from_cache.len()
+        );
+        for (id, _) in &missing_from_cache {
+            println!("steam://url/CommunityFilePage/{}", id);
+        }
     }
 
     println!(
