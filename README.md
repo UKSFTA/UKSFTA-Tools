@@ -56,6 +56,40 @@ to no mod listed in `mod_sources.txt`. These are leftovers from removed
 mods and can be cleaned up. It exits with a non-zero status when any
 expected PBO is missing, so it can gate a build in CI.
 
+## Platforms
+
+Steam library discovery is dynamic — the tool reads what Steam records,
+it does not guess paths:
+
+- **Windows**: Steam's install path from the registry
+  (`HKCU\Software\Valve\Steam`), then `libraryfolders.vdf` for all
+  libraries.
+- **Linux**: Steam's own `~/.steam/steam` symlink, then
+  `libraryfolders.vdf`.
+- **WSL**: the Windows Steam install via the registry (WSL interop),
+  mapped to its `/mnt/<drive>` mount.
+
+All library folders come from `libraryfolders.vdf`, so extra libraries
+(on any drive or mount) are found automatically.
+
+## Installation
+
+Download the binary for your platform from the [Releases
+page](https://github.com/UKSFTA/UKSFTA-Tools/releases) and put it on your
+`PATH`:
+
+```bash
+# Linux
+chmod +x uksft-tools-linux
+sudo mv uksft-tools-linux /usr/local/bin/uksft
+
+# Windows
+# rename uksft-tools-windows.exe to uksft.exe and add to PATH
+```
+
+Or build from source: `cargo build --release` (Linux, macOS) /
+`cargo build --release --target x86_64-pc-windows-gnu` (Windows).
+
 ## Licence
 
 This project is licensed under the MIT Licence. See the `LICENSE` file.
