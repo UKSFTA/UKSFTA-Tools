@@ -1,42 +1,33 @@
-# UKSFTA Diamond Grade GitIgnore
-# Blocks all production artifacts and local environment files
-
-# HEMTT Artifacts
+# HEMTT
 .hemttout/
-.hemtt/
-!.hemtt/project.toml
-!.hemtt/launch.toml
-!.hemtt/lint.toml
-!.hemtt/scripts/
-!.hemtt/hooks/
-
-# Build Artifacts
+.hemtt_temp/
 *.pbo
 *.bisign
 *.bikey
+*.biprivatekey
+
+# Build
 *.zip
 *.log
 *.rpt
 *.bidry
 
-# Releases
-releases/
-all_releases/
+# Runtime (manage_mods.py)
+mods.lock
+mod_sources.txt
 
-# Local Environment
+# Python
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Environment
 .env
 .vscode/
 .idea/
 *.swp
 *.bak
-__pycache__/
-.pytest_cache/
 
 # System
 .DS_Store
 Thumbs.db
-all_releases/*.zip
-all_releases/*.zip
-
-# DevOps Artifacts
-UNIT_HEALTH_REPORT.md
