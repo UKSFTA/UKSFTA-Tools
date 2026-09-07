@@ -26,7 +26,7 @@ jobs:
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v4
       with:
-        languages: python
+        languages: rust
         build-mode: none
         # Exclude large binary/production folders to prevent timeout/memory failures
         config: |
