@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-09-08
+
+### Added
+
+- Search the Workshop online for PBO origins that are unknown or
+  pack-only. Search terms are derived from the PBO content in order of
+  reliability: a non-vanilla `requiredAddons[]` root from the plain-text
+  config, a mod-family string-table token, a short author handle, then
+  the header prefix.
+- Cache Workshop search results in `.uksfta/identities.json`
+  (gitignored, never pushed) so repeat investigations are instant and
+  fully offline.
+- Cache confirmed (id, title) pairs, not just candidate IDs, so cached
+  runs need no network.
+
+### Changed
+
+- `investigate` origin matching now uses the PBO header prefix (which
+  survives re-packing) instead of byte hashing, so repacked pack copies
+  resolve to their original mod.
+- Origin arbitration prefers standalone mods (fewest distinct prefix
+  roots) over aggregate packs; a folder being investigated is excluded
+  from its own candidates.
+- PBO folder statistics are precomputed once; lazy hashing only runs
+  when the prefix path fails. The 198-PBO pack scan dropped from 62s to
+  0.015s.
+- `sync` copy loop shows a progress bar.
+
 ## [0.3.0] - 2026-09-08
 
 ### Added
