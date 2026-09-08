@@ -54,7 +54,7 @@ per mod and is written automatically when a legacy file is first read (a
 version = 2
 
 [[mods]]
-id = "887302721"
+id = "https://steamcommunity.com/sharedfiles/filedetails/?id=887302721"
 name = "Boat Mod"
 tags = ["vehicles"]
 
@@ -63,14 +63,16 @@ id = "450814997"
 name = "CBA_A3"
 
 [[mods]]
-id = "463939057"
+id = "https://steamcommunity.com/sharedfiles/filedetails/?id=463939057"
 role = "ignore"
 enabled = false
 ```
 
 Fields per mod:
 
-- `id` — Steam Workshop item ID (required)
+- `id` — Steam Workshop item ID, or the full Workshop page URL. URLs are
+  easier to verify at a glance; both forms are accepted. When a legacy
+  file is migrated, ids are written as URLs so entries stay clickable.
 - `name` — display name, shown in sync output
 - `tags` — optional array of tags
 - `role` — `mod` (default) or `ignore`
