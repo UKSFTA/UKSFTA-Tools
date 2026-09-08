@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -685,10 +685,9 @@ fn resolve_transitive_deps(
         result.push((id.clone(), name));
 
         let deps = fetch_workshop_dependencies(&id);
-        // Record direct deps for original missing mods (for warning display)
-        if missing.iter().any(|(m_id, _)| m_id == &id) {
-            deps_by_mod.insert(id.clone(), deps.clone());
-        }
+        // Record direct deps for every fetched mod so the warning can
+        // render the full dependency tree transitively.
+        deps_by_mod.insert(id.clone(), deps.clone());
         for (dep_id, dep_name) in deps {
             // Skip deps already listed in mod_sources.txt (already handled)
             if !fetched.contains(&dep_id) && !known_ids.contains(&dep_id) {
@@ -699,6 +698,35 @@ fn resolve_transitive_deps(
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
     (result, deps_by_mod)
+}
+
+/// Print a mod's missing dependency tree with tree-style indentation.
+/// Only shows deps that were themselves fetched (i.e. also missing).
+fn print_dep_tree(
+    id: &str,
+    deps_by_mod: &HashMap<String, Vec<(String, String)>>,
+    prefix: &str,
+    visited: &mut HashSet<String>,
+) {
+    let Some(deps) = deps_by_mod.get(id) else {
+        return;
+    };
+    let missing: Vec<&(String, String)> = deps
+        .iter()
+        .filter(|(dep_id, _)| deps_by_mod.contains_key(dep_id) && !visited.contains(dep_id))
+        .collect();
+    for (i, (dep_id, dep_name)) in missing.iter().enumerate() {
+        let is_last = i == missing.len() - 1;
+        let connector = if is_last { "└─ " } else { "├─ " };
+        eprintln!("{}{}{} ({})", prefix, connector, dep_name, dep_id);
+        visited.insert(dep_id.clone());
+        let child_prefix = if is_last {
+            format!("{}   ", prefix)
+        } else {
+            format!("{}│  ", prefix)
+        };
+        print_dep_tree(dep_id, deps_by_mod, &child_prefix, visited);
+    }
 }
 
 fn generate_modlist(missing: &[(String, String)], path: &Path) {
@@ -989,10 +1017,10 @@ fn sync_mods(
 
     for (id, name) in &missing_from_cache {
         eprintln!("Warning: {} ({}) not found in Workshop cache", name, id);
-        if let Some(deps) = deps_by_mod.get(id) {
-            for (dep_id, dep_name) in deps {
-                eprintln!("         Missing dependency: {} ({})", dep_name, dep_id);
-            }
+        if resolve_deps {
+            let mut visited = HashSet::new();
+            visited.insert(id.clone());
+            print_dep_tree(id, &deps_by_mod, "         ", &mut visited);
         }
         eprintln!(
             "         https://steamcommunity.com/sharedfiles/filedetails/?id={}",
