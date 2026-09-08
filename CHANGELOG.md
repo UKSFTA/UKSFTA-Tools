@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-09-08
+
+### Fixed
+
+- `install.sh` no longer fails with `TMPDIR: unbound variable` on systems
+  without `TMPDIR` set; it now defaults to `/tmp`.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added
