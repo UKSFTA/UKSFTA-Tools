@@ -247,6 +247,10 @@ enum Commands {
         /// Check each origin against the Steam Workshop API (network)
         #[arg(long)]
         online: bool,
+        /// Print the resolved identity inventory from the local cache
+        /// (no network)
+        #[arg(long)]
+        report: bool,
     },
     /// Show the installed version and check for updates
     Version,
@@ -1596,6 +1600,135 @@ fn resolve_pbo_from_index(
     })
 }
 
+/// Print the resolved identity inventory from the local cache.
+/// For each untracked PBO in addons/, derive its search term (same logic
+/// as the online search) and show the cached candidate mods, if any.
+/// No network: this reads only .uksfta/identities.json.
+fn investigate_report() {
+    let addons_dir = Path::new("addons");
+    if !addons_dir.exists() {
+        eprintln!("No addons/ directory");
+        return;
+    }
+
+    let cache = load_identity_cache();
+    if cache.is_empty() {
+        println!("No cached identities found. Run 'uksfta investigate --online' first.");
+        return;
+    }
+
+    println!("Resolved identity inventory (from local cache):");
+    let mut shown = 0;
+    if let Ok(entries) = fs::read_dir(addons_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "pbo").unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let term = pbo_config_identity(&path)
+                    .or_else(|| pbo_identity(&path))
+                    .or_else(|| pbo_prefix(&path))
+                    .unwrap_or_else(|| name.clone());
+                let term = search_term_from_prefix(&term);
+                if let Some(hits) = cache.get(&term) {
+                    if !hits.is_empty() {
+                        let best = &hits[0];
+                        println!(
+                            "  {:<45} -> {} ({}) [term \"{}\"]",
+                            name, best.1, best.0, term
+                        );
+                        shown += 1;
+                    }
+                }
+            }
+        }
+    }
+    if shown == 0 {
+        println!("  (no cached identities match the PBOs in addons/)");
+    } else {
+        println!("\n{} PBO(s) have cached identity candidates.", shown);
+    }
+}
+
+/// The local identity cache: maps a PBO search term to the confirmed
+/// (id, title) pairs found for it. Persisted to .uksfta/identities.json
+/// so repeat investigations reuse prior searches entirely offline. This
+/// file is gitignored and never leaves the machine.
+fn identity_cache_path() -> PathBuf {
+    Path::new(".uksfta").join("identities.json")
+}
+
+fn load_identity_cache() -> IdentityCache {
+    let path = identity_cache_path();
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn save_identity_cache(cache: &IdentityCache) {
+    let path = identity_cache_path();
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(cache) {
+        let _ = fs::write(&path, json);
+    }
+}
+
+/// Batch-confirm a list of Workshop item IDs via the keyless
+/// GetPublishedFileDetails API. Returns (id, title) pairs for the items
+/// that exist. Empty on network or parse failure.
+fn batch_workshop_titles(
+    ids: &[String],
+    client: &reqwest::blocking::Client,
+) -> Vec<(String, String)> {
+    let mut form = String::from("itemcount=");
+    form.push_str(&ids.len().to_string());
+    for (i, id) in ids.iter().enumerate() {
+        form.push_str(&format!("&publishedfileids[{}]={}", i, id));
+    }
+    let body = match client
+        .post("https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form)
+        .send()
+        .ok()
+        .and_then(|r| r.text().ok())
+    {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct ApiResponse {
+        response: ResponseInner,
+    }
+    #[derive(serde::Deserialize)]
+    struct ResponseInner {
+        publishedfiledetails: Vec<FileDetail>,
+    }
+    #[derive(serde::Deserialize)]
+    struct FileDetail {
+        publishedfileid: String,
+        result: u32,
+        #[serde(default)]
+        title: String,
+    }
+
+    let parsed: ApiResponse = match serde_json::from_str(&body) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    parsed
+        .response
+        .publishedfiledetails
+        .into_iter()
+        .filter(|d| d.result == 1)
+        .map(|d| (d.publishedfileid, d.title))
+        .collect()
+}
+
 /// Trace the Workshop origin of untracked PBOs in addons/.
 fn investigate(all: bool, online: bool) {
     let caches = find_all_workshop_caches();
@@ -1797,86 +1930,6 @@ fn investigate(all: bool, online: bool) {
                 }
             }
         }
-    }
-
-    /// The local identity cache: maps a PBO search term to the confirmed
-    /// (id, title) pairs found for it. Persisted to .uksfta/identities.json
-    /// so repeat investigations reuse prior searches entirely offline. This
-    /// file is gitignored and never leaves the machine.
-    fn identity_cache_path() -> PathBuf {
-        Path::new(".uksfta").join("identities.json")
-    }
-
-    fn load_identity_cache() -> IdentityCache {
-        let path = identity_cache_path();
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => return HashMap::new(),
-        };
-        serde_json::from_str(&content).unwrap_or_default()
-    }
-
-    fn save_identity_cache(cache: &IdentityCache) {
-        let path = identity_cache_path();
-        if let Some(dir) = path.parent() {
-            let _ = fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(cache) {
-            let _ = fs::write(&path, json);
-        }
-    }
-
-    /// Batch-confirm a list of Workshop item IDs via the keyless
-    /// GetPublishedFileDetails API. Returns (id, title) pairs for the items
-    /// that exist. Empty on network or parse failure.
-    fn batch_workshop_titles(
-        ids: &[String],
-        client: &reqwest::blocking::Client,
-    ) -> Vec<(String, String)> {
-        let mut form = String::from("itemcount=");
-        form.push_str(&ids.len().to_string());
-        for (i, id) in ids.iter().enumerate() {
-            form.push_str(&format!("&publishedfileids[{}]={}", i, id));
-        }
-        let body = match client
-            .post("https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/")
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(form)
-            .send()
-            .ok()
-            .and_then(|r| r.text().ok())
-        {
-            Some(b) => b,
-            None => return Vec::new(),
-        };
-
-        #[derive(serde::Deserialize)]
-        struct ApiResponse {
-            response: ResponseInner,
-        }
-        #[derive(serde::Deserialize)]
-        struct ResponseInner {
-            publishedfiledetails: Vec<FileDetail>,
-        }
-        #[derive(serde::Deserialize)]
-        struct FileDetail {
-            publishedfileid: String,
-            result: u32,
-            #[serde(default)]
-            title: String,
-        }
-
-        let parsed: ApiResponse = match serde_json::from_str(&body) {
-            Ok(p) => p,
-            Err(_) => return Vec::new(),
-        };
-        parsed
-            .response
-            .publishedfiledetails
-            .into_iter()
-            .filter(|d| d.result == 1)
-            .map(|d| (d.publishedfileid, d.title))
-            .collect()
     }
 }
 
@@ -2595,7 +2648,17 @@ fn main() {
             modlist_file,
             dry_run,
         } => import_modlist(&modlist_file, dry_run),
-        Commands::Investigate { all, online } => investigate(all, online),
+        Commands::Investigate {
+            all,
+            online,
+            report,
+        } => {
+            if report {
+                investigate_report();
+            } else {
+                investigate(all, online);
+            }
+        }
         Commands::Version => version(),
     }
 }

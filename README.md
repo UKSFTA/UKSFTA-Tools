@@ -200,6 +200,11 @@ Search results are cached locally in `.uksfta/identities.json`
 (gitignored, never pushed) so repeat investigations reuse prior
 searches instead of re-hitting the Workshop.
 
+```bash
+# Print the resolved identity inventory from the cache (no network)
+uksfta investigate --report
+```
+
 The `identify` command uses the same byte-hash matching, so its origin
 reports are now deterministic too.
 
