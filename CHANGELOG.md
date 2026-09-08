@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-09-08
+
+### Added
+
+- `investigate --online` uses Steam's official `QueryFiles` API when the
+  `STEAM_API_KEY` environment variable is set. The keyed search ranks
+  results properly and surfaces mods the browse-page scrape buries (for
+  example `Zulu Custom`). Falls back to the keyless scrape without a
+  key. The key is read from the environment only, never embedded in the
+  binary.
+
+### Changed
+
+- Split the single `src/main.rs` (3480 lines) into focused modules:
+  `util`, `steam`, `pbo`, `lock`, `modlist`, `origin`, `investigate`,
+  `sync`. Pure structural refactor — no behaviour change.
+
 ## [0.4.1] - 2026-09-08
 
 ### Fixed
