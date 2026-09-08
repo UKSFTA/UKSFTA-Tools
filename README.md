@@ -187,15 +187,18 @@ or set private — the API cannot tell the two apart without the owner
 authenticating. For PBOs with no local origin (or a pack-only origin),
 `--online` also searches the Workshop and lists the top candidate mods
 with their titles, so you can trace where a repacked or deleted mod's
-content came from. The search term is extracted from the PBO's packed
-config: a mod-family string-table token (`$STR_RHSUSF_...` → `RHSUSF`)
-or a short author handle (`DANZ`, `TFB`), falling back to the header
-prefix. These distinctive tokens match mod titles far better than PBO
-filenames. This is a best-effort search — Workshop text search is
-imprecise, so candidates are shown for verification rather than
-asserted.
-or set private — the API cannot tell the two apart without the owner
-authenticating.
+content came from. The search term is extracted from the PBO's content
+in order of reliability: a non-vanilla `requiredAddons[]` root from the
+plain-text config (`rhsusf_c_weapons` → `rhsusf`), a mod-family
+string-table token (`$STR_RHSUSF_...` → `RHSUSF`), a short author
+handle (`DANZ`, `TFB`), then the header prefix. These distinctive
+tokens match mod titles far better than PBO filenames. This is a
+best-effort search — Workshop text search is imprecise, so candidates
+are shown for verification rather than asserted.
+
+Search results are cached locally in `.uksfta/identities.json`
+(gitignored, never pushed) so repeat investigations reuse prior
+searches instead of re-hitting the Workshop.
 
 The `identify` command uses the same byte-hash matching, so its origin
 reports are now deterministic too.

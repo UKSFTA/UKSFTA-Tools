@@ -32,3 +32,6 @@ Thumbs.db
 # Agent tool state
 .omo/
 .opencode/
+
+# Local identity cache (never pushed)
+.uksfta/

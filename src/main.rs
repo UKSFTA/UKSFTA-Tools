@@ -1724,9 +1724,15 @@ fn investigate(all: bool, online: bool) {
             })
             .map(|(name, _)| {
                 let pbo_path = addons_dir.join(name);
-                // Prefer a richer identity (author/token) from the packed
-                // config; fall back to the header prefix.
-                let term = pbo_identity(&pbo_path)
+                // Prefer the richest identity in order:
+                // 1. requiredAddons root from plain-text config (certified
+                //    mod family: rhsusf, MRHMilsimTools)
+                // 2. string-table token from config ($STR_RHSUSF_... ->
+                //    RHSUSF)
+                // 3. short author handle from config (DANZ, TFB)
+                // 4. header prefix (last resort)
+                let term = pbo_config_identity(&pbo_path)
+                    .or_else(|| pbo_identity(&pbo_path))
                     .or_else(|| pbo_prefix(&pbo_path))
                     .unwrap_or_else(|| name.clone());
                 (name.clone(), term)
@@ -1739,6 +1745,7 @@ fn investigate(all: bool, online: bool) {
                 searchable.len()
             );
             let mut searched = HashSet::new();
+            let mut cache = load_identity_cache();
             let api_client = reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
@@ -1749,7 +1756,19 @@ fn investigate(all: bool, online: bool) {
                     continue;
                 }
                 searched.insert(term.clone());
-                let candidates = search_workshop(&term);
+
+                // Check the local cache first; only hit the Workshop for
+                // terms we have not already searched.
+                let candidates: Vec<String> = if let Some(cached) = cache.get(&term) {
+                    println!("  {} (search \"{}\"): from cache", name, term);
+                    cached.clone()
+                } else {
+                    let found = search_workshop(&term);
+                    cache.insert(term.clone(), found.clone());
+                    save_identity_cache(&cache);
+                    found
+                };
+
                 if candidates.is_empty() {
                     println!("  {}: no candidates for \"{}\"", name, term);
                 } else {
@@ -1784,6 +1803,33 @@ fn investigate(all: bool, online: bool) {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1100));
             }
+        }
+    }
+
+    /// The local identity cache: maps a PBO search term to the candidate
+    /// Workshop IDs found for it. Persisted to .uksfta/identities.json so
+    /// repeat investigations reuse prior searches instead of re-hitting the
+    /// Workshop. This file is gitignored and never leaves the machine.
+    fn identity_cache_path() -> PathBuf {
+        Path::new(".uksfta").join("identities.json")
+    }
+
+    fn load_identity_cache() -> HashMap<String, Vec<String>> {
+        let path = identity_cache_path();
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return HashMap::new(),
+        };
+        serde_json::from_str(&content).unwrap_or_default()
+    }
+
+    fn save_identity_cache(cache: &HashMap<String, Vec<String>>) {
+        let path = identity_cache_path();
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(cache) {
+            let _ = fs::write(&path, json);
         }
     }
 
@@ -1929,14 +1975,86 @@ fn pbo_identity(path: &Path) -> Option<String> {
                 if let Some(after) = after.strip_prefix('"') {
                     if let Some(end) = after.find('"') {
                         let name = after[..end].trim();
+                        // Author handles must be distinctive enough to
+                        // appear in the mod's Workshop title. Require 3+
+                        // chars so generic 2-letter handles (KM) do not
+                        // mask a better prefix search.
                         if !name.starts_with('$')
-                            && name.len() >= 2
+                            && name.len() >= 3
                             && name.len() <= 12
                             && !name.contains([' ', '&', '.', '\''])
                             && !["AUTHOR", "SITREP", "UNKNOWN"].contains(&name)
                         {
                             return Some(name.to_string());
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract identity from a PBO's plain-text config.cpp content.
+/// Most pack PBOs store config.cpp unpacked (131 of 198 verified), so the
+/// full CfgPatches block is readable: `requiredAddons[]` names the exact
+/// addons the mod depends on (e.g. "rhsusf_c_weapons" -> the RHS USF mod
+/// family) and `author`/`name` give the mod's own identity.
+///
+/// Returns the most distinctive identity: a non-vanilla required addon
+/// root (MRHMilsimTools, rhsusf, ace), then the CfgPatches author if it
+/// is a short single-word handle. None if the config is not readable.
+fn pbo_config_identity(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let file = fs::File::open(path).ok()?;
+    let mut data = Vec::new();
+    file.take(4_000_000).read_to_end(&mut data).ok()?;
+
+    // Readable strings, preserving config.cpp structure
+    let strings: Vec<String> = data
+        .split(|&b| !(0x20..=0x7e).contains(&b))
+        .filter(|s| s.len() >= 4)
+        .map(|s| String::from_utf8_lossy(s).to_string())
+        .collect();
+    let text = strings.join("\n");
+
+    // 1. requiredAddons[] = { "A3_Weapons_F", "rhsusf_c_weapons", ... }
+    //    The non-vanilla entries name the mod families this addon needs.
+    //    Match the exact field (not a loose "requiredAddons" + brace that
+    //    could hit an unrelated class body).
+    if let Some(start) = text.find("requiredAddons[]") {
+        let after = &text[start + "requiredAddons[]".len()..];
+        let after = after.trim_start();
+        if let Some(after) = after.strip_prefix('=') {
+            let after = after.trim_start();
+            if let Some(after) = after.strip_prefix('{') {
+                let after = after.trim_start();
+                if let Some(close) = after.find('}') {
+                    let body = &after[..close];
+                    for addon in body.split(',') {
+                        // Normalise: the string extraction may split an addon
+                        // across a newline ("A\n3_Weapons"), so strip all
+                        // whitespace before comparing.
+                        let addon: String = addon
+                            .chars()
+                            .filter(|c| !c.is_whitespace() && *c != '"')
+                            .collect();
+                        // Take the root before the first underscore: the mod
+                        // family (rhsusf_c_weapons -> rhsusf).
+                        let root = addon.split('_').next().unwrap_or(&addon);
+                        // Skip vanilla (A3_*) and common base addons
+                        // (cba_main -> cba) — they are not the mod's
+                        // identity.
+                        if root.starts_with("A3")
+                            || root == "cba"
+                            || root == "CuratorOnly"
+                            || root == "ace"
+                            || root.len() < 3
+                        {
+                            continue;
+                        }
+                        return Some(root.to_string());
                     }
                 }
             }
@@ -3163,6 +3281,63 @@ name = "CBA_A3"
         // Long multi-word author names don't match mod titles -> ignored
         write_pbo_with_config(&f, r#"author = "UnderSiege Productionz";"#);
         assert_eq!(pbo_identity(&f), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_identity_rejects_two_char_author_handles() {
+        // Two-letter handles (KM) are too generic to search by; the
+        // prefix should win instead.
+        let dir = std::env::temp_dir().join("uksfta-identity-km");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        write_pbo_with_config(&f, r#"author = "KM";"#);
+        assert_eq!(pbo_identity(&f), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_config_identity_extracts_required_addon_root() {
+        let dir = std::env::temp_dir().join("uksfta-config-identity");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        // A config with requiredAddons naming a mod family
+        write_pbo_with_config(
+            &f,
+            r#"class CfgPatches { requiredAddons[] = { "A3_Weapons_F", "rhsusf_c_weapons" }; };"#,
+        );
+        assert_eq!(pbo_config_identity(&f).unwrap(), "rhsusf");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_config_identity_skips_vanilla_and_cba() {
+        let dir = std::env::temp_dir().join("uksfta-config-vanilla");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        // Only vanilla + cba deps: not a usable identity
+        write_pbo_with_config(
+            &f,
+            r#"class CfgPatches { requiredAddons[] = { "A3_Weapons_F", "cba_main" }; };"#,
+        );
+        assert_eq!(pbo_config_identity(&f), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn identity_cache_round_trips() {
+        let dir = std::env::temp_dir().join("uksfta-idcache-test");
+        fs::create_dir_all(&dir).unwrap();
+        // Point the cache at the test dir so we do not touch .uksfta in
+        // the workspace; run the round-trip via direct file IO.
+        let path = dir.join("identities.json");
+        let mut cache: HashMap<String, Vec<String>> = HashMap::new();
+        cache.insert("TFL".to_string(), vec!["3797815099".to_string()]);
+        let json = serde_json::to_string_pretty(&cache).unwrap();
+        fs::write(&path, json).unwrap();
+        let loaded: HashMap<String, Vec<String>> =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.get("TFL").unwrap(), &vec!["3797815099".to_string()]);
         fs::remove_dir_all(&dir).unwrap();
     }
 
