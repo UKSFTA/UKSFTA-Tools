@@ -1222,12 +1222,22 @@ fn sync_mods(
         mods: HashMap::new(),
     };
 
-    for (entry, id, status, sources) in &planned {
-        if status == "unchanged" {
-            // Keep the existing lock entry as-is
-            new_lock.mods.insert(id.clone(), lock.mods[id].clone());
-            continue;
-        }
+    let work_items: Vec<&(ModLockEntry, String, String, Vec<PathBuf>)> = planned
+        .iter()
+        .filter(|(_, _, status, _)| status != "unchanged")
+        .collect();
+
+    let bar = indicatif::ProgressBar::new(work_items.len() as u64);
+    bar.set_style(
+        indicatif::ProgressStyle::with_template(
+            "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} mods {msg}",
+        )
+        .unwrap()
+        .progress_chars("##-"),
+    );
+
+    for (entry, id, _status, sources) in work_items {
+        bar.set_message(format!("{} ({})", entry.name, id));
 
         fs::create_dir_all(addons_dir).expect("Failed to create addons directory");
         // files[i] is the dest path, sources[i] is the real source path
@@ -1235,17 +1245,25 @@ fn sync_mods(
             fs::copy(src, dest).expect("Failed to copy PBO");
         }
         new_lock.mods.insert(id.clone(), entry.clone());
-        println!(
-            "{}: {} ({})",
-            if status == "added" {
-                "Added"
-            } else {
-                "Updated"
-            },
-            entry.name,
-            id
-        );
+        bar.inc(1);
     }
+    bar.finish_and_clear();
+
+    for (_entry, id, status, _) in &planned {
+        if status == "unchanged" {
+            // Keep the existing lock entry as-is
+            new_lock.mods.insert(id.clone(), lock.mods[id].clone());
+        }
+    }
+
+    // Print the applied changes summary
+    println!(
+        "\nSynced: {} added, {} updated, {} unchanged, {} removed",
+        added,
+        updated,
+        unchanged,
+        removed.len()
+    );
 
     // Remove PBOs for mods no longer in the list
     for (id, name, files) in &removed {
@@ -1347,9 +1365,15 @@ fn identify() {
         return;
     }
 
-    let mod_dirs = cached_mod_dirs(&caches);
+    let mut mod_dirs = build_mod_dirs(&caches);
+
+    // If the current directory is itself a Workshop mod folder, exclude it.
+    if let Some(self_id) = self_workshop_id(&caches) {
+        mod_dirs.retain(|d| d.id != self_id);
+    }
 
     println!("PBO Origins:");
+    let index = build_pbo_index(&mod_dirs);
     if let Ok(entries) = fs::read_dir(addons_dir) {
         for entry in entries.flatten() {
             if entry
@@ -1359,8 +1383,15 @@ fn identify() {
                 .unwrap_or(false)
             {
                 let name = entry.file_name().to_string_lossy().to_string();
-                let origin = resolve_pbo_origin(&entry.path(), &mod_dirs)
-                    .unwrap_or_else(|| "Unknown".to_string());
+                let target_prefix = pbo_prefix(&entry.path());
+                let candidates = index
+                    .get(name.as_str())
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let origin =
+                    resolve_pbo_from_index(&entry.path(), candidates, target_prefix.as_deref())
+                        .map(|r| r.id)
+                        .unwrap_or_else(|| "Unknown".to_string());
                 println!("  {} -> Workshop {}", name, origin);
             }
         }
@@ -1376,8 +1407,17 @@ fn file_sha256(path: &Path) -> Option<String> {
     Some(format!("{:x}", hasher.finalize()))
 }
 
-/// All Workshop cache folders: (id, path).
-fn cached_mod_dirs(caches: &[PathBuf]) -> Vec<(String, PathBuf)> {
+/// A Workshop mod folder plus precomputed statistics used to arbitrate
+/// origin: how many PBOs it holds and how many distinct prefix roots
+/// (a standalone mod has few roots; an aggregate pack spans many).
+struct ModDir {
+    id: String,
+    path: PathBuf,
+    pbos: Vec<PathBuf>,
+    root_count: usize,
+}
+
+fn build_mod_dirs(caches: &[PathBuf]) -> Vec<ModDir> {
     let mut dirs = Vec::new();
     for cache in caches {
         if let Ok(entries) = fs::read_dir(cache) {
@@ -1385,7 +1425,22 @@ fn cached_mod_dirs(caches: &[PathBuf]) -> Vec<(String, PathBuf)> {
                 let path = entry.path();
                 if path.is_dir() {
                     if let Some(id) = path.file_name().and_then(|n| n.to_str()) {
-                        dirs.push((id.to_string(), path));
+                        let pbos = find_pbos(&path);
+                        let root_count = {
+                            let mut roots = std::collections::HashSet::new();
+                            for pbo in &pbos {
+                                if let Some(prefix) = pbo_prefix(pbo) {
+                                    roots.insert(prefix_root(&prefix).to_lowercase());
+                                }
+                            }
+                            roots.len()
+                        };
+                        dirs.push(ModDir {
+                            id: id.to_string(),
+                            path,
+                            pbos,
+                            root_count,
+                        });
                     }
                 }
             }
@@ -1394,46 +1449,147 @@ fn cached_mod_dirs(caches: &[PathBuf]) -> Vec<(String, PathBuf)> {
     dirs
 }
 
-/// Byte-hash match a PBO against the Workshop cache and arbitrate the origin.
-/// Returns the best-matching Workshop ID, preferring standalone mods (fewer
-/// PBOs) over aggregate packs. None if no byte-identical copy exists.
-fn resolve_pbo_origin(pbo_path: &Path, mod_dirs: &[(String, PathBuf)]) -> Option<String> {
-    let pbo_name = pbo_path.file_name()?.to_string_lossy().to_string();
-    let pbo_hash = file_sha256(pbo_path)?;
+/// The root of an addon prefix: the first path component before a
+/// backslash (e.g. "z\ace\addons\grenades" -> "z"). A standalone mod's
+/// PBOs share few roots; an aggregate pack spans many.
+fn prefix_root(prefix: &str) -> &str {
+    prefix.split('\\').next().unwrap_or(prefix)
+}
 
-    // Collect same-named candidate PBOs across all mod folders
-    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
-    for (id, mod_dir) in mod_dirs {
-        for cached_pbo in find_pbos(mod_dir) {
-            if cached_pbo
-                .file_name()
-                .map(|n| n == pbo_name.as_str())
-                .unwrap_or(false)
-            {
-                candidates.push((id.clone(), cached_pbo));
-                break; // one same-named file per mod is enough for the hash check
+/// The Workshop ID of the current directory, if the current directory is
+/// itself a mod folder inside a Workshop cache (e.g. investigating a pack's
+/// own contents). Such a folder must not be a candidate for its own PBOs.
+fn self_workshop_id(caches: &[PathBuf]) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let cwd = fs::canonicalize(&cwd).ok()?;
+    for cache in caches {
+        let cache = fs::canonicalize(cache).ok()?;
+        if cwd.starts_with(&cache) {
+            // The mod folder is cwd relative to cache
+            if let Ok(rel) = cwd.strip_prefix(&cache) {
+                let components: Vec<_> = rel.components().collect();
+                if components.len() == 1 {
+                    return components[0].as_os_str().to_str().map(|s| s.to_string());
+                }
             }
         }
     }
+    None
+}
 
-    // Keep only byte-identical copies
-    let mut matches: Vec<(String, usize)> = Vec::new();
-    for (id, cached_path) in candidates {
-        if file_sha256(&cached_path) == Some(pbo_hash.clone()) {
-            let size = mod_dirs
-                .iter()
-                .find(|(mid, _)| mid == &id)
-                .map(|(_, d)| find_pbos(d).len())
-                .unwrap_or(usize::MAX);
-            matches.push((id, size));
+/// Extract the addon prefix from a PBO header.
+/// The prefix is the canonical virtual path (e.g. "z\ace\addons\grenades")
+/// and is preserved when a pack re-packs a mod's PBO, so it identifies
+/// the original addon even when the bytes differ.
+fn pbo_prefix(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = fs::File::open(path).ok()?;
+    let mut data = [0u8; 512];
+    let n = file.read(&mut data).ok()?;
+    let data = &data[..n];
+
+    // Header entries are null-separated key\0value\0 pairs. Find "prefix".
+    let key = b"prefix\x00";
+    let idx = data.windows(key.len()).position(|w| w == key)?;
+    let start = idx + key.len();
+    let end = data[start..].iter().position(|&b| b == 0)? + start;
+    let prefix = data[start..end].to_vec();
+    String::from_utf8(prefix).ok()
+}
+
+/// The resolved origin of a PBO: the Workshop ID plus the prefix that
+/// identified it, and whether the match was itself an aggregate pack.
+#[derive(Debug, PartialEq)]
+struct ResolvedOrigin {
+    id: String,
+    prefix: Option<String>,
+    is_pack: bool,
+}
+
+/// Build a single-pass index of every PBO name to the mod folders that
+/// contain it. This is the expensive cache walk; resolving then becomes
+/// in-memory lookups instead of re-scanning folders per PBO.
+fn build_pbo_index(mod_dirs: &[ModDir]) -> HashMap<String, Vec<&ModDir>> {
+    let mut index: HashMap<String, Vec<&ModDir>> = HashMap::new();
+    for dir in mod_dirs {
+        for pbo in &dir.pbos {
+            if let Some(name) = pbo.file_name().and_then(|n| n.to_str()) {
+                index.entry(name.to_string()).or_default().push(dir);
+            }
+        }
+    }
+    index
+}
+
+/// Match a PBO against the Workshop cache and arbitrate its origin.
+/// Primary signal: the PBO header prefix, which identifies the original
+/// addon and survives re-packing. Byte-hash is a fallback for PBOs
+/// without a readable prefix.
+///
+/// Among folders carrying the same prefix, prefer the one with the fewest
+/// distinct prefix roots: a standalone mod (e.g. ACE) has one root, while
+/// an aggregate pack spans many. This steers the result to the original
+/// owner mod over any pack that bundled a copy.
+///
+/// `candidates` is the prebuilt per-name folder list from the index.
+fn resolve_pbo_from_index(
+    pbo_path: &Path,
+    candidates: &[&ModDir],
+    target_prefix: Option<&str>,
+) -> Option<ResolvedOrigin> {
+    let pbo_name = pbo_path.file_name()?.to_string_lossy().to_string();
+
+    // Score each candidate. Prefix match is the primary signal and is
+    // cheap (512-byte header read). Byte-hash is a fallback used only
+    // when the prefix path fails, since hashing reads the whole PBO.
+    let mut scored: Vec<(&ModDir, u8)> = Vec::new();
+    for dir in candidates {
+        let cached_path = dir.pbos.iter().find(|pbo| {
+            pbo.file_name()
+                .map(|n| n == pbo_name.as_str())
+                .unwrap_or(false)
+        })?;
+        let mut score = 0u8;
+        if let Some(target) = target_prefix {
+            if pbo_prefix(cached_path).as_deref() == Some(target) {
+                score += 2; // same canonical addon prefix
+            }
+        } else {
+            // No prefix available: fall back to byte identity.
+            let target_hash = file_sha256(pbo_path)?;
+            if file_sha256(cached_path) == Some(target_hash) {
+                score += 1;
+            }
+        }
+        if score > 0 {
+            scored.push((dir, score));
         }
     }
 
-    // Arbitrate: prefer the folder with the fewest PBOs (standalone over pack)
-    matches
+    if scored.is_empty() {
+        return None;
+    }
+    let best_score = scored.iter().map(|(_, s)| *s).max().unwrap_or(0);
+
+    // Among the highest-scoring folders, pick the one with the fewest
+    // distinct prefix roots (standalone mod over aggregate pack).
+    let best = scored
         .into_iter()
-        .min_by_key(|(_, size)| *size)
-        .map(|(id, _)| id)
+        .filter(|(_, s)| *s == best_score)
+        .min_by_key(|(dir, _)| dir.root_count)?
+        .0;
+
+    // A folder is an aggregate pack when it spans a very large number of
+    // distinct prefix roots. Large standalone mods (e.g. FZA AH-64 with 28
+    // roots) stay below the threshold; the known aggregate packs here span
+    // 61 and 159 roots. This flag is a warning to verify, not a guarantee.
+    let is_pack = best.root_count > 50;
+
+    Some(ResolvedOrigin {
+        id: best.id.clone(),
+        prefix: target_prefix.map(|s| s.to_string()),
+        is_pack,
+    })
 }
 
 /// Trace the Workshop origin of untracked PBOs in addons/.
@@ -1449,7 +1605,18 @@ fn investigate(all: bool, online: bool) {
         return;
     }
 
-    let mod_dirs = cached_mod_dirs(&caches);
+    let mut mod_dirs = build_mod_dirs(&caches);
+
+    // If the current directory is itself a Workshop mod folder (e.g. we are
+    // investigating a pack's own contents), exclude it from candidates.
+    // A folder cannot be the origin of its own PBOs.
+    if let Some(self_id) = self_workshop_id(&caches) {
+        println!(
+            "Investigating Workshop mod {} — excluding it as a candidate.",
+            self_id
+        );
+        mod_dirs.retain(|d| d.id != self_id);
+    }
 
     // Tracked PBO filenames: from mods.lock if present, else all are untracked
     let lock_path = Path::new("mods.lock");
@@ -1465,7 +1632,7 @@ fn investigate(all: bool, online: bool) {
         })
         .collect();
 
-    let mut results: Vec<(String, Vec<String>, bool)> = Vec::new(); // (pbo, origins, unknown)
+    let mut results: Vec<(String, Option<ResolvedOrigin>)> = Vec::new(); // (pbo, origin)
 
     if let Ok(entries) = fs::read_dir(addons_dir) {
         for entry in entries.flatten() {
@@ -1475,7 +1642,7 @@ fn investigate(all: bool, online: bool) {
                 if !all && tracked.contains(&name) {
                     continue;
                 }
-                results.push((name, Vec::new(), true));
+                results.push((name, None));
             }
         }
     }
@@ -1485,37 +1652,53 @@ fn investigate(all: bool, online: bool) {
         return;
     }
 
-    // Match each untracked PBO against the cache by byte hash and arbitrate
-    for (pbo_name, origins, unknown) in &mut results {
+    // Build a single-pass index of every cached PBO name to its folders
+    let index = build_pbo_index(&mod_dirs);
+
+    // Match each untracked PBO against the index and arbitrate the origin
+    for (pbo_name, origin) in &mut results {
         let pbo_path = addons_dir.join(pbo_name.as_str());
-        if let Some(id) = resolve_pbo_origin(&pbo_path, &mod_dirs) {
-            origins.push(id);
-            *unknown = false;
-        }
+        let target_prefix = pbo_prefix(&pbo_path);
+        let candidates = index
+            .get(pbo_name.as_str())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        *origin = resolve_pbo_from_index(&pbo_path, candidates, target_prefix.as_deref());
     }
 
     // Report
     println!("Untracked PBO Investigation:");
     println!("  {} PBO(s) examined", results.len());
     let mut unknown_count = 0;
-    for (pbo, origins, unknown) in &results {
-        if *unknown {
+    for (pbo, origin) in &results {
+        let Some(origin) = origin else {
             unknown_count += 1;
             println!("  [UNKNOWN] {}", pbo);
             continue;
-        }
-        let id = &origins[0];
+        };
+        let id = &origin.id;
         let meta = mod_dirs
             .iter()
-            .find(|(mid, _)| mid == id)
-            .map(|(_, d)| get_mod_metadata(d))
+            .find(|d| &d.id == id)
+            .map(|d| get_mod_metadata(&d.path))
             .unwrap_or_default();
         let name = if meta.name.is_empty() {
             format!("Mod {}", id)
         } else {
             meta.name
         };
-        println!("  {} -> {} ({}) {}", pbo, name, id, workshop_url(id));
+        if origin.is_pack {
+            println!(
+                "  {} -> {} ({}) {} [pack: prefix {} — verify source]",
+                pbo,
+                name,
+                id,
+                workshop_url(id),
+                origin.prefix.as_deref().unwrap_or("unknown")
+            );
+        } else {
+            println!("  {} -> {} ({}) {}", pbo, name, id, workshop_url(id));
+        }
     }
     if unknown_count > 0 {
         println!(
@@ -1532,12 +1715,11 @@ fn investigate(all: bool, online: bool) {
 
 /// Query the Steam Workshop API for each investigated mod's visibility.
 /// Keyless: ISteamRemoteStorage/GetPublishedFileDetails needs no API key.
-fn check_workshop_visibility(results: Vec<(String, Vec<String>, bool)>) {
+fn check_workshop_visibility(results: Vec<(String, Option<ResolvedOrigin>)>) {
     // Collect unique origin IDs
     let mut ids: Vec<String> = results
         .iter()
-        .filter(|(_, _, unknown)| !*unknown)
-        .filter_map(|(_, origins, _)| origins.first().cloned())
+        .filter_map(|(_, origin)| origin.as_ref().map(|o| o.id.clone()))
         .collect();
     ids.sort();
     ids.dedup();
@@ -2498,16 +2680,30 @@ name = "CBA_A3"
         }
 
         let mod_dirs = vec![
-            ("222".to_string(), dir.join("222")),
-            ("111".to_string(), dir.join("111")),
+            ModDir {
+                id: "222".to_string(),
+                path: dir.join("222"),
+                pbos: find_pbos(&dir.join("222")),
+                root_count: 50,
+            },
+            ModDir {
+                id: "111".to_string(),
+                path: dir.join("111"),
+                pbos: find_pbos(&dir.join("111")),
+                root_count: 1,
+            },
         ];
+        let index = build_pbo_index(&mod_dirs);
 
         let target = dir.join("common.pbo");
         fs::write(&target, content).unwrap();
 
-        // Arbitration must pick the standalone mod (111) with fewer PBOs
+        // Arbitration must pick the standalone mod (111) with fewer roots
+        let candidates = index.get("common.pbo").map(|v| v.as_slice()).unwrap_or(&[]);
         assert_eq!(
-            resolve_pbo_origin(&target, &mod_dirs).unwrap(),
+            resolve_pbo_from_index(&target, candidates, pbo_prefix(&target).as_deref())
+                .unwrap()
+                .id,
             "111".to_string()
         );
 
@@ -2525,8 +2721,104 @@ name = "CBA_A3"
         let target = dir.join("target.pbo");
         fs::write(&target, b"no match anywhere").unwrap();
 
-        let mod_dirs = vec![("111".to_string(), dir.join("111"))];
-        assert_eq!(resolve_pbo_origin(&target, &mod_dirs), None);
+        let mod_dirs = vec![ModDir {
+            id: "111".to_string(),
+            path: dir.join("111"),
+            pbos: find_pbos(&dir.join("111")),
+            root_count: 1,
+        }];
+        let index = build_pbo_index(&mod_dirs);
+        let candidates = index.get("target.pbo").map(|v| v.as_slice()).unwrap_or(&[]);
+        assert_eq!(
+            resolve_pbo_from_index(&target, candidates, pbo_prefix(&target).as_deref()),
+            None
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // --- PBO prefix and prefix-based origin resolution ---
+
+    /// Write a fake PBO with a header carrying the given prefix.
+    fn write_pbo(path: &Path, prefix: &str, payload: &[u8]) {
+        // Mimic the real PBO header: b"\x00sreV" then "prefix\0{prefix}\0".
+        let mut data = b"\x00sreV\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        data.extend_from_slice(b"prefix\x00");
+        data.extend_from_slice(prefix.as_bytes());
+        data.push(0);
+        data.extend_from_slice(payload);
+        fs::write(path, data).unwrap();
+    }
+
+    #[test]
+    fn pbo_prefix_extracts_canonical_path() {
+        let dir = std::env::temp_dir().join("uksfta-prefix-test");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        write_pbo(&f, "z\\ace\\addons\\grenades", b"data");
+        assert_eq!(
+            pbo_prefix(&f).unwrap(),
+            "z\\ace\\addons\\grenades".to_string()
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_prefix_no_prefix_returns_none() {
+        let dir = std::env::temp_dir().join("uksfta-prefix-none");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        fs::write(&f, b"\x00sreVno prefix here").unwrap();
+        assert_eq!(pbo_prefix(&f), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_pbo_origin_matches_by_prefix_over_differing_bytes() {
+        // Two folders hold same-named PBOs with the same prefix but
+        // different bytes (a pack repacked the mod's copy). The origin
+        // must be the folder with fewer roots (the standalone mod).
+        let dir = std::env::temp_dir().join("uksfta-prefix-origin");
+        fs::create_dir_all(&dir).unwrap();
+        let standalone = dir.join("111").join("addons");
+        let pack = dir.join("222").join("addons");
+        fs::create_dir_all(&standalone).unwrap();
+        fs::create_dir_all(&pack).unwrap();
+        write_pbo(
+            &standalone.join("common.pbo"),
+            "z\\ace\\addons\\common",
+            b"version-a",
+        );
+        write_pbo(
+            &pack.join("common.pbo"),
+            "z\\ace\\addons\\common",
+            b"version-b",
+        );
+
+        let mod_dirs = vec![
+            ModDir {
+                id: "222".to_string(),
+                path: dir.join("222"),
+                pbos: find_pbos(&dir.join("222")),
+                root_count: 50,
+            },
+            ModDir {
+                id: "111".to_string(),
+                path: dir.join("111"),
+                pbos: find_pbos(&dir.join("111")),
+                root_count: 1,
+            },
+        ];
+        let index = build_pbo_index(&mod_dirs);
+
+        let target = dir.join("common.pbo");
+        write_pbo(&target, "z\\ace\\addons\\common", b"version-a");
+
+        let candidates = index.get("common.pbo").map(|v| v.as_slice()).unwrap_or(&[]);
+        let origin =
+            resolve_pbo_from_index(&target, candidates, pbo_prefix(&target).as_deref()).unwrap();
+        assert_eq!(origin.id, "111".to_string());
+        assert!(!origin.is_pack);
 
         fs::remove_dir_all(&dir).unwrap();
     }
