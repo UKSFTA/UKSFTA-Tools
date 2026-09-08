@@ -60,26 +60,18 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
       - name: Generate Changelog
         id: changelog
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -z "$PREV_TAG" ]; then
-            RANGE="HEAD"
-          else
-            RANGE="${PREV_TAG}..HEAD"
-          fi
-          # Group conventional commits by type for a readable changelog
-          {
-            echo "## Features"
-            git log ${RANGE} --oneline --no-merges --grep="^feat" --pretty='- %s' | head -30
-            echo ""
-            echo "## Fixes"
-            git log ${RANGE} --oneline --no-merges --grep="^fix" --pretty='- %s' | head -30
-            echo ""
-            echo "## Other"
-            git log ${RANGE} --oneline --no-merges --grep="^feat\|^fix" --invert-grep --pretty='- %s' | head -20
-          } > changelog.txt
+          # Release notes for this tag, from the previous tag to HEAD.
+          # git-cliff reads conventional commits and groups them.
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "v0.1.0")
+          git-cliff --config .cliff.toml "${PREV_TAG}..HEAD" > changelog.txt
           echo "BODY_PATH=changelog.txt" >> $GITHUB_ENV
 
       - name: Generate Checksums
@@ -97,3 +89,18 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Committed Changelog
+        run: |
+          # Regenerate the committed CHANGELOG.md from the new release
+          # forward and push it back so the file stays in sync with tags.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git-cliff --config .cliff.toml "${PREV_TAG}..HEAD" -o CHANGELOG.md
+          git add CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo "Changelog unchanged."
+          else
+            git commit -m "docs: update changelog for ${GITHUB_REF_NAME}"
+            git push
+          fi
