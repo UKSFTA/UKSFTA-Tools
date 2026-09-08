@@ -209,6 +209,12 @@ enum Commands {
         /// Skip dependency resolution (offline mode)
         #[arg(long)]
         offline: bool,
+        /// Generate an Arma 3 launcher modlist for missing mods
+        #[arg(long)]
+        modlist: bool,
+        /// Output path for the modlist HTML (default: missing-mods.html)
+        #[arg(long, default_value = "missing-mods.html")]
+        modlist_path: PathBuf,
     },
     /// Show which PBOs came from which Workshop mod
     Identify,
@@ -490,7 +496,147 @@ fn find_pbos(dir: &Path) -> Vec<PathBuf> {
     pbos
 }
 
-fn sync_mods(mods: &[ModEntry], ignored: &[String], dry_run: bool, _offline: bool) {
+const MODLIST_TEMPLATE_HEADER: &str = "\
+<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+<html>\n\
+<!--Exported with uksfta: https://github.com/UKSFTA/UKSFTA-Tools-->\n\
+  <head>\n\
+    <meta name=\"arma:Type\" content=\"preset\" />\n\
+    <meta name=\"arma:PresetName\" content=\"UKSFTA Missing Mods\" />\n\
+    <meta name=\"generator\" content=\"uksfta\" />\n\
+    <title>Arma 3</title>\n\
+    <link href=\"https://fonts.googleapis.com/css?family=Roboto\" rel=\"stylesheet\" type=\"text/css\" />\n\
+    <style>\n\
+body {\n\
+\tmargin: 0;\n\
+\tpadding: 0;\n\
+\tcolor: #fff;\n\
+\tbackground: #000;\n\
+}\n\
+\n\
+body, th, td {\n\
+\tfont: 95%/1.3 Roboto, Segoe UI, Tahoma, Arial, Helvetica, sans-serif;\n\
+}\n\
+\n\
+td {\n\
+    padding: 3px 30px 3px 0;\n\
+}\n\
+\n\
+h1 {\n\
+    padding: 20px 20px 0 20px;\n\
+    color: white;\n\
+    font-weight: 200;\n\
+    font-family: segoe ui;\n\
+    font-size: 3em;\n\
+    margin: 0;\n\
+}\n\
+\n\
+em {\n\
+    font-variant: italic;\n\
+    color:silver;\n\
+}\n\
+\n\
+.before-list {\n\
+    padding: 5px 20px 10px 20px;\n\
+}\n\
+\n\
+.mod-list {\n\
+    background: #222222;\n\
+    padding: 20px;\n\
+}\n\
+\n\
+.dlc-list {\n\
+    background: #222222;\n\
+    padding: 20px;\n\
+}\n\
+\n\
+.footer {\n\
+    padding: 20px;\n\
+    color:gray;\n\
+}\n\
+\n\
+.whups {\n\
+    color:gray;\n\
+}\n\
+\n\
+a {\n\
+    color: #D18F21;\n\
+    text-decoration: underline;\n\
+}\n\
+\n\
+a:hover {\n\
+    color:#F1AF41;\n\
+    text-decoration: none;\n\
+}\n\
+\n\
+.from-steam {\n\
+    color: #449EBD;\n\
+}\n\
+.from-local {\n\
+    color: gray;\n\
+}\n\
+\n\
+</style>\n\
+  </head>\n\
+  <body>\n\
+    <h1>Arma 3  - Preset <strong>UKSFTA Missing Mods</strong></h1>\n\
+    <p class=\"before-list\">\n\
+      <em>To import this preset, drag this file onto the Launcher window. Or click the MODS tab, then PRESET in the top right, then IMPORT at the bottom, and finally select this file.</em>\n\
+    </p>\n\
+    <div class=\"mod-list\">\n\
+      <table>\n";
+
+const MODLIST_TEMPLATE_FOOTER: &str = "\
+      </table>\n\
+    </div>\n\
+    <div class=\"dlc-list\">\n\
+      <table />\n\
+    </div>\n\
+    <div class=\"footer\">\n\
+      <span>Created by uksfta.</span>\n\
+    </div>\n\
+  </body>\n\
+</html>\n";
+
+fn generate_modlist(missing: &[(String, String)], path: &Path) {
+    if missing.is_empty() {
+        return;
+    }
+
+    let mut html = String::from(MODLIST_TEMPLATE_HEADER);
+    for (id, name) in missing {
+        let url = format!(
+            "https://steamcommunity.com/sharedfiles/filedetails/?id={}",
+            id
+        );
+        let escaped_name = name.replace('&', "&amp;");
+        html.push_str(&format!(
+            "        <tr data-type=\"ModContainer\">\n\
+              <td data-type=\"DisplayName\">{}</td>\n\
+              <td>\n\
+                <span class=\"from-steam\">Steam</span>\n\
+              </td>\n\
+              <td>\n\
+                <a href=\"{}\" data-type=\"Link\">{}</a>\n\
+              </td>\n\
+            </tr>\n",
+            escaped_name, url, url
+        ));
+    }
+    html.push_str(MODLIST_TEMPLATE_FOOTER);
+
+    fs::write(path, &html).expect("Failed to write modlist HTML");
+    println!("Modlist written to {}", path.display());
+}
+
+fn sync_mods(
+    mods: &[ModEntry],
+    ignored: &[String],
+    dry_run: bool,
+    _offline: bool,
+    modlist: bool,
+    modlist_path: &Path,
+) {
     let caches = find_all_workshop_caches();
     if caches.is_empty() {
         eprintln!("Workshop cache not found. Is Steam installed?");
@@ -657,6 +803,9 @@ fn sync_mods(mods: &[ModEntry], ignored: &[String], dry_run: bool, _offline: boo
                 id
             );
         }
+        if modlist && !missing_from_cache.is_empty() {
+            println!("\nModlist would be written to {}", modlist_path.display());
+        }
         println!(
             "\nSummary: {} added, {} updated, {} unchanged, {} removed",
             added,
@@ -740,6 +889,12 @@ fn sync_mods(mods: &[ModEntry], ignored: &[String], dry_run: bool, _offline: boo
         for (id, _) in &missing_from_cache {
             println!("steam://url/CommunityFilePage/{}", id);
         }
+
+        if modlist {
+            generate_modlist(&missing_from_cache, modlist_path);
+        }
+    } else if modlist {
+        println!("No missing mods — modlist not generated.");
     }
 
     println!(
@@ -1046,14 +1201,19 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Sync { dry_run, offline } => {
+        Commands::Sync {
+            dry_run,
+            offline,
+            modlist,
+            modlist_path,
+        } => {
             let (mods, ignored) = parse_mod_sources(Path::new("mod_sources.txt"));
             if mods.is_empty() {
                 eprintln!("No mods found in mod_sources.txt");
                 return;
             }
             println!("Found {} mods, {} ignored", mods.len(), ignored.len());
-            sync_mods(&mods, &ignored, dry_run, offline);
+            sync_mods(&mods, &ignored, dry_run, offline, modlist, &modlist_path);
         }
         Commands::Identify => identify(),
         Commands::Verify => verify(),

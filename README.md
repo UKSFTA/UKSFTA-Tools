@@ -13,6 +13,12 @@ uksfta sync --dry-run
 # Copy PBOs from the local Steam Workshop cache into addons/, write mods.lock
 uksfta sync
 
+# Generate an Arma 3 launcher modlist for missing mods
+uksfta sync --modlist
+
+# Custom output path for the modlist
+uksfta sync --modlist --modlist-path ./my-modlist.html
+
 # Show which PBOs came from which Workshop mod
 uksfta identify
 
@@ -63,6 +69,11 @@ cache, `sync` reports it with its name and a direct link to the Steam
 Workshop page, then lists a set of `steam://url/CommunityFilePage/...`
 deep links so each mod can be subscribed to in Steam. Once subscribed
 and downloaded, re-run `uksfta sync` to pull the PBOs into `addons/`.
+
+Use `--modlist` to generate an Arma 3 launcher preset file (HTML) that
+lists all missing mods. Open the file in the launcher to batch-subscribe
+to every missing mod at once. The output defaults to `missing-mods.html`;
+override with `--modlist-path`.
 
 ## Platforms
 
