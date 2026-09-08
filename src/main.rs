@@ -215,6 +215,9 @@ enum Commands {
         /// Output path for the modlist HTML (default: missing-mods.html)
         #[arg(long, default_value = "missing-mods.html")]
         modlist_path: PathBuf,
+        /// Resolve missing mods' dependencies from Workshop pages
+        #[arg(long)]
+        resolve_deps: bool,
     },
     /// Show which PBOs came from which Workshop mod
     Identify,
@@ -598,6 +601,98 @@ const MODLIST_TEMPLATE_FOOTER: &str = "\
   </body>\n\
 </html>\n";
 
+/// Fetch a Workshop item's page and return its required dependencies as
+/// Vec<(id, name)>. Returns empty on network error or if no deps exist.
+fn fetch_workshop_dependencies(workshop_id: &str) -> Vec<(String, String)> {
+    let url = format!(
+        "https://steamcommunity.com/sharedfiles/filedetails/?id={}",
+        workshop_id
+    );
+    let body = match reqwest::blocking::get(&url) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to fetch Workshop page for {}: {}",
+                workshop_id, e
+            );
+            return Vec::new();
+        }
+    };
+    let html = match body.text() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to read response for {}: {}",
+                workshop_id, e
+            );
+            return Vec::new();
+        }
+    };
+    let document = scraper::Html::parse_document(&html);
+
+    // Steam renders required items in a div with id="RequiredItems"
+    // Each item is a link: <a href="...?id=NNN">Name</a>
+    let Some(required_section) = document
+        .select(&scraper::Selector::parse("#RequiredItems").unwrap())
+        .next()
+    else {
+        return Vec::new();
+    };
+
+    let mut deps = Vec::new();
+    for link in required_section.select(&scraper::Selector::parse("a").unwrap()) {
+        let href = link.value().attr("href").unwrap_or("");
+        // Extract id=NNN from the href
+        let id = href
+            .split("?id=")
+            .nth(1)
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+            .unwrap_or("");
+        if id.is_empty() {
+            continue;
+        }
+        let name = link.text().collect::<String>().trim().to_string();
+        if !name.is_empty() {
+            deps.push((id.to_string(), name));
+        }
+    }
+    deps
+}
+
+/// Resolve transitive dependencies for a list of missing mods.
+/// Returns the expanded list (original + discovered deps not already known).
+fn resolve_transitive_deps(
+    missing: &[(String, String)],
+    known_ids: &std::collections::HashSet<String>,
+) -> Vec<(String, String)> {
+    use std::collections::HashSet;
+    let mut result = Vec::new();
+    let mut visited: HashSet<String> = known_ids.iter().cloned().collect();
+    let mut queue: Vec<(String, String)> = missing.to_vec();
+
+    while let Some((id, name)) = queue.pop() {
+        if visited.contains(&id) {
+            continue;
+        }
+        visited.insert(id.clone());
+
+        // Only fetch if not already in known mods
+        if !known_ids.contains(&id) {
+            result.push((id.clone(), name));
+        }
+
+        let deps = fetch_workshop_dependencies(&id);
+        for (dep_id, dep_name) in deps {
+            if !visited.contains(&dep_id) {
+                queue.push((dep_id, dep_name));
+            }
+        }
+        // Rate limit: 1 request per second
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    result
+}
+
 fn generate_modlist(missing: &[(String, String)], path: &Path) {
     if missing.is_empty() {
         return;
@@ -636,6 +731,7 @@ fn sync_mods(
     _offline: bool,
     modlist: bool,
     modlist_path: &Path,
+    resolve_deps: bool,
 ) {
     let caches = find_all_workshop_caches();
     if caches.is_empty() {
@@ -891,7 +987,14 @@ fn sync_mods(
         }
 
         if modlist {
-            generate_modlist(&missing_from_cache, modlist_path);
+            let mods_for_list = if resolve_deps {
+                let known_ids: std::collections::HashSet<String> =
+                    mods.iter().map(|m| m.id.clone()).collect();
+                resolve_transitive_deps(&missing_from_cache, &known_ids)
+            } else {
+                missing_from_cache.clone()
+            };
+            generate_modlist(&mods_for_list, modlist_path);
         }
     } else if modlist {
         println!("No missing mods — modlist not generated.");
@@ -1206,6 +1309,7 @@ fn main() {
             offline,
             modlist,
             modlist_path,
+            resolve_deps,
         } => {
             let (mods, ignored) = parse_mod_sources(Path::new("mod_sources.txt"));
             if mods.is_empty() {
@@ -1213,7 +1317,15 @@ fn main() {
                 return;
             }
             println!("Found {} mods, {} ignored", mods.len(), ignored.len());
-            sync_mods(&mods, &ignored, dry_run, offline, modlist, &modlist_path);
+            sync_mods(
+                &mods,
+                &ignored,
+                dry_run,
+                offline,
+                modlist,
+                &modlist_path,
+                resolve_deps,
+            );
         }
         Commands::Identify => identify(),
         Commands::Verify => verify(),
