@@ -52,7 +52,7 @@ if [ -z "$expected" ]; then
 	exit 1
 fi
 
-tmp="$TMPDIR/uksfta.$$"
+tmp="${TMPDIR:-/tmp}/uksfta.$$"
 trap 'rm -f "$tmp"' EXIT HUP INT TERM
 
 echo "Downloading $ASSET..."
