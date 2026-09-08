@@ -660,30 +660,29 @@ fn fetch_workshop_dependencies(workshop_id: &str) -> Vec<(String, String)> {
 }
 
 /// Resolve transitive dependencies for a list of missing mods.
-/// Returns the expanded list (original + discovered deps not already known).
+/// Returns the expanded list (missing mods + discovered deps not already known).
 fn resolve_transitive_deps(
     missing: &[(String, String)],
     known_ids: &std::collections::HashSet<String>,
 ) -> Vec<(String, String)> {
     use std::collections::HashSet;
     let mut result = Vec::new();
-    let mut visited: HashSet<String> = known_ids.iter().cloned().collect();
+    let mut fetched: HashSet<String> = HashSet::new();
     let mut queue: Vec<(String, String)> = missing.to_vec();
 
     while let Some((id, name)) = queue.pop() {
-        if visited.contains(&id) {
+        if fetched.contains(&id) {
             continue;
         }
-        visited.insert(id.clone());
+        fetched.insert(id.clone());
 
-        // Only fetch if not already in known mods
-        if !known_ids.contains(&id) {
-            result.push((id.clone(), name));
-        }
+        // Missing mods always go in the result
+        result.push((id.clone(), name));
 
         let deps = fetch_workshop_dependencies(&id);
         for (dep_id, dep_name) in deps {
-            if !visited.contains(&dep_id) {
+            // Skip deps already listed in mod_sources.txt (already handled)
+            if !fetched.contains(&dep_id) && !known_ids.contains(&dep_id) {
                 queue.push((dep_id, dep_name));
             }
         }
