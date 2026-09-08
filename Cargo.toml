@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+html-escape = "0.2"
 reqwest = { version = "0.12", features = ["blocking"] }
 scraper = "0.22"
 serde = { version = "1", features = ["derive"] }

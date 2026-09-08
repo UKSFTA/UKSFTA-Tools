@@ -415,6 +415,25 @@ fn workshop_url(id: &str) -> String {
     )
 }
 
+/// Escape a string for use inside a TOML basic string (double-quoted).
+/// Mod names come from untrusted sources, so quotes, backslashes and
+/// control characters must not corrupt the generated mod_sources.txt.
+fn toml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Serialise legacy data into the TOML v2 format.
 /// Ids are written as full Workshop URLs so entries stay clickable.
 fn toml_from_legacy(mods: &[ModEntry], ignored: &[String]) -> String {
@@ -841,7 +860,12 @@ fn fetch_workshop_dependencies(workshop_id: &str) -> Vec<(String, String)> {
         "https://steamcommunity.com/sharedfiles/filedetails/?id={}",
         workshop_id
     );
-    let body = match reqwest::blocking::get(&url) {
+    // A stalled connection must not hang the CLI indefinitely.
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("Failed to build HTTP client");
+    let body = match client.get(&url).send() {
         Ok(r) => r,
         Err(e) => {
             eprintln!(
@@ -946,7 +970,9 @@ fn modlist_row_html(id: &str, name: &str) -> String {
         "https://steamcommunity.com/sharedfiles/filedetails/?id={}",
         id
     );
-    let escaped_name = name.replace('&', "&amp;");
+    // Mod names come from Steam Workshop pages (attacker-controlled), so
+    // escape all HTML metacharacters, not just ampersands.
+    let escaped_name = html_escape::encode_safe(name);
     format!(
         "        <tr data-type=\"ModContainer\">\n\
               <td data-type=\"DisplayName\">{}</td>\n\
@@ -1745,7 +1771,7 @@ fn import_modlist(modlist_file: &Path, dry_run: bool) {
         for (id, name) in &new_mods {
             additions.push_str(&format!("[[mods]]\nid = \"{}\"\n", workshop_url(id)));
             if !name.is_empty() {
-                additions.push_str(&format!("name = \"{}\"\n", name));
+                additions.push_str(&format!("name = \"{}\"\n", toml_escape(name)));
             }
             additions.push('\n');
         }
@@ -1772,7 +1798,11 @@ fn import_modlist(modlist_file: &Path, dry_run: bool) {
 
         let mut additions = String::new();
         for (id, name) in &new_mods {
-            additions.push_str(&format!("{} # {}\n", id, name));
+            // Newlines would break the line-based legacy format.
+            // A '#' inside the name is safe: the first '#' is always the
+            // separator, so the rest stays part of the name on re-parse.
+            let clean_name = name.replace(['\n', '\r'], " ");
+            additions.push_str(&format!("{} # {}\n", id, clean_name));
         }
 
         match ignore_pos {
@@ -1908,6 +1938,26 @@ mod tests {
         assert!(!row.contains("O&T Warfighters"));
         assert!(row.contains("id=1234567890"));
         assert!(row.contains("data-type=\"ModContainer\""));
+    }
+
+    #[test]
+    fn modlist_row_html_escapes_html_metacharacters() {
+        // A malicious Workshop name must not inject markup into the HTML.
+        let row = modlist_row_html("1234567890", "<script>alert(1)</script>");
+        assert!(!row.contains("<script>"));
+        assert!(row.contains("&lt;script&gt;"));
+        let quoted = modlist_row_html("1234567890", "Mod \"quoted\"");
+        assert!(quoted.contains("Mod &quot;quoted&quot;"));
+        assert!(!quoted.contains("Mod \"quoted\""));
+    }
+
+    #[test]
+    fn toml_escape_handles_quotes_backslashes_and_controls() {
+        assert_eq!(toml_escape("plain"), "plain");
+        assert_eq!(toml_escape("a\"b"), "a\\\"b");
+        assert_eq!(toml_escape("a\\b"), "a\\\\b");
+        assert_eq!(toml_escape("a\nb"), "a\\nb");
+        assert_eq!(toml_escape("a\tb"), "a\\tb");
     }
     // --- resolve_transitive_deps (logic, no network: deps map is empty) ---
     #[test]

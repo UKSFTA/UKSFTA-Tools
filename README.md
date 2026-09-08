@@ -173,7 +173,8 @@ sudo mv uksfta-linux /usr/local/bin/uksfta
 ```
 
 Or build from source: `cargo build --release` (Linux, macOS) /
-`cargo build --release --target x86_64-pc-windows-gnu` (Windows).
+`cargo build --release --target x86_64-pc-windows-msvc` (Windows, matches
+the published release binary).
 
 ## Licence
 
