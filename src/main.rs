@@ -1506,6 +1506,10 @@ struct ResolvedOrigin {
     is_pack: bool,
 }
 
+/// The local identity cache type: search term -> confirmed (id, title)
+/// pairs, persisted to .uksfta/identities.json.
+type IdentityCache = HashMap<String, Vec<(String, String)>>;
+
 /// Build a single-pass index of every PBO name to the mod folders that
 /// contain it. This is the expensive cache walk; resolving then becomes
 /// in-memory lookups instead of re-scanning folders per PBO.
@@ -1759,62 +1763,51 @@ fn investigate(all: bool, online: bool) {
 
                 // Check the local cache first; only hit the Workshop for
                 // terms we have not already searched.
-                let candidates: Vec<String> = if let Some(cached) = cache.get(&term) {
-                    println!("  {} (search \"{}\"): from cache", name, term);
-                    cached.clone()
-                } else {
-                    let found = search_workshop(&term);
-                    cache.insert(term.clone(), found.clone());
-                    save_identity_cache(&cache);
-                    found
-                };
+                let (titles, from_cache): (Vec<(String, String)>, bool) =
+                    if let Some(cached) = cache.get(&term) {
+                        println!("  {} (search \"{}\"): from cache", name, term);
+                        (cached.clone(), true)
+                    } else {
+                        let candidates = search_workshop(&term);
+                        let confirmed = batch_workshop_titles(&candidates, &api_client);
+                        cache.insert(term.clone(), confirmed.clone());
+                        save_identity_cache(&cache);
+                        (confirmed, false)
+                    };
 
-                if candidates.is_empty() {
+                if titles.is_empty() {
                     println!("  {}: no candidates for \"{}\"", name, term);
                 } else {
-                    // Confirm the top candidates' titles via the batch API
-                    // so the user can judge relevance at a glance.
-                    let titles = batch_workshop_titles(&candidates, &api_client);
-                    let shown = if titles.is_empty() {
-                        candidates
-                            .iter()
-                            .take(3)
-                            .map(|c| {
-                                format!(
-                                    "https://steamcommunity.com/sharedfiles/filedetails/?id={}",
-                                    c
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    } else {
-                        titles
-                            .iter()
-                            .take(3)
-                            .map(|(id, title)| format!("{} ({})", title, id))
-                            .collect::<Vec<_>>()
-                    };
+                    let shown = titles
+                        .iter()
+                        .take(3)
+                        .map(|(id, title)| format!("{} ({})", title, id))
+                        .collect::<Vec<_>>();
                     println!(
                         "  {} (search \"{}\"): {} candidate(s) — {}",
                         name,
                         term,
-                        candidates.len(),
+                        titles.len(),
                         shown.join(", ")
                     );
                 }
-                std::thread::sleep(std::time::Duration::from_millis(1100));
+                // Rate-limit only real Workshop page hits, not cache reads.
+                if !from_cache {
+                    std::thread::sleep(std::time::Duration::from_millis(1100));
+                }
             }
         }
     }
 
-    /// The local identity cache: maps a PBO search term to the candidate
-    /// Workshop IDs found for it. Persisted to .uksfta/identities.json so
-    /// repeat investigations reuse prior searches instead of re-hitting the
-    /// Workshop. This file is gitignored and never leaves the machine.
+    /// The local identity cache: maps a PBO search term to the confirmed
+    /// (id, title) pairs found for it. Persisted to .uksfta/identities.json
+    /// so repeat investigations reuse prior searches entirely offline. This
+    /// file is gitignored and never leaves the machine.
     fn identity_cache_path() -> PathBuf {
         Path::new(".uksfta").join("identities.json")
     }
 
-    fn load_identity_cache() -> HashMap<String, Vec<String>> {
+    fn load_identity_cache() -> IdentityCache {
         let path = identity_cache_path();
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
@@ -1823,7 +1816,7 @@ fn investigate(all: bool, online: bool) {
         serde_json::from_str(&content).unwrap_or_default()
     }
 
-    fn save_identity_cache(cache: &HashMap<String, Vec<String>>) {
+    fn save_identity_cache(cache: &IdentityCache) {
         let path = identity_cache_path();
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
@@ -3331,13 +3324,25 @@ name = "CBA_A3"
         // Point the cache at the test dir so we do not touch .uksfta in
         // the workspace; run the round-trip via direct file IO.
         let path = dir.join("identities.json");
-        let mut cache: HashMap<String, Vec<String>> = HashMap::new();
-        cache.insert("TFL".to_string(), vec!["3797815099".to_string()]);
+        let mut cache: IdentityCache = HashMap::new();
+        cache.insert(
+            "TFL".to_string(),
+            vec![(
+                "3797815099".to_string(),
+                "@THE TFL AIO CAG PACK".to_string(),
+            )],
+        );
         let json = serde_json::to_string_pretty(&cache).unwrap();
         fs::write(&path, json).unwrap();
-        let loaded: HashMap<String, Vec<String>> =
+        let loaded: IdentityCache =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(loaded.get("TFL").unwrap(), &vec!["3797815099".to_string()]);
+        assert_eq!(
+            loaded.get("TFL").unwrap(),
+            &vec![(
+                "3797815099".to_string(),
+                "@THE TFL AIO CAG PACK".to_string()
+            )]
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
