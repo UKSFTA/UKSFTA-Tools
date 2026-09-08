@@ -80,8 +80,9 @@ override with `--modlist-path`.
 
 Add `--resolve-deps` to also fetch each missing mod's Workshop page and
 discover dependencies not listed in `mod_sources.txt`. Discovered
-dependencies are included in the generated modlist. This requires a
-network connection and adds a one-second delay per mod for rate limiting.
+dependencies are reported in the missing-mod warning and included in the
+generated modlist. This requires a network connection and adds a
+one-second delay per mod for rate limiting.
 
 ## Platforms
 

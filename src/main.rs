@@ -660,13 +660,18 @@ fn fetch_workshop_dependencies(workshop_id: &str) -> Vec<(String, String)> {
 }
 
 /// Resolve transitive dependencies for a list of missing mods.
-/// Returns the expanded list (missing mods + discovered deps not already known).
+/// Returns (expanded list, direct deps per missing mod).
+/// The expanded list is missing mods + discovered deps not already known.
 fn resolve_transitive_deps(
     missing: &[(String, String)],
     known_ids: &std::collections::HashSet<String>,
-) -> Vec<(String, String)> {
+) -> (
+    Vec<(String, String)>,
+    HashMap<String, Vec<(String, String)>>,
+) {
     use std::collections::HashSet;
     let mut result = Vec::new();
+    let mut deps_by_mod: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut fetched: HashSet<String> = HashSet::new();
     let mut queue: Vec<(String, String)> = missing.to_vec();
 
@@ -680,6 +685,10 @@ fn resolve_transitive_deps(
         result.push((id.clone(), name));
 
         let deps = fetch_workshop_dependencies(&id);
+        // Record direct deps for original missing mods (for warning display)
+        if missing.iter().any(|(m_id, _)| m_id == &id) {
+            deps_by_mod.insert(id.clone(), deps.clone());
+        }
         for (dep_id, dep_name) in deps {
             // Skip deps already listed in mod_sources.txt (already handled)
             if !fetched.contains(&dep_id) && !known_ids.contains(&dep_id) {
@@ -689,7 +698,7 @@ fn resolve_transitive_deps(
         // Rate limit: 1 request per second
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
-    result
+    (result, deps_by_mod)
 }
 
 fn generate_modlist(missing: &[(String, String)], path: &Path) {
@@ -968,8 +977,23 @@ fn sync_mods(
         save_lock(lock_path, &new_lock);
     }
 
+    // Resolve dependencies once (only when requested) so warnings and
+    // modlist both benefit without double-fetching Workshop pages.
+    let (mods_for_list, deps_by_mod) = if resolve_deps {
+        let known_ids: std::collections::HashSet<String> =
+            mods.iter().map(|m| m.id.clone()).collect();
+        resolve_transitive_deps(&missing_from_cache, &known_ids)
+    } else {
+        (missing_from_cache.clone(), HashMap::new())
+    };
+
     for (id, name) in &missing_from_cache {
         eprintln!("Warning: {} ({}) not found in Workshop cache", name, id);
+        if let Some(deps) = deps_by_mod.get(id) {
+            for (dep_id, dep_name) in deps {
+                eprintln!("         Missing dependency: {} ({})", dep_name, dep_id);
+            }
+        }
         eprintln!(
             "         https://steamcommunity.com/sharedfiles/filedetails/?id={}",
             id
@@ -986,13 +1010,6 @@ fn sync_mods(
         }
 
         if modlist {
-            let mods_for_list = if resolve_deps {
-                let known_ids: std::collections::HashSet<String> =
-                    mods.iter().map(|m| m.id.clone()).collect();
-                resolve_transitive_deps(&missing_from_cache, &known_ids)
-            } else {
-                missing_from_cache.clone()
-            };
             generate_modlist(&mods_for_list, modlist_path);
         }
     } else if modlist {
