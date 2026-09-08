@@ -249,8 +249,61 @@ struct ModEntry {
     name: String,
     #[allow(dead_code)]
     tag: Option<String>,
+    #[allow(dead_code)]
+    tags: Vec<String>,
+    role: String,
+    enabled: bool,
+    #[allow(dead_code)]
+    dependencies: Vec<String>,
 }
 
+/// TOML v2 schema for mod_sources.txt
+#[derive(Debug, Serialize, Deserialize)]
+struct TomlModSources {
+    #[serde(default = "default_sources_version")]
+    version: u32,
+    #[serde(default)]
+    mods: Vec<TomlMod>,
+}
+
+fn default_sources_version() -> u32 {
+    2
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TomlMod {
+    id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    #[serde(default = "default_role", skip_serializing_if = "is_default_role")]
+    role: String,
+    #[serde(
+        default = "default_enabled",
+        skip_serializing_if = "is_default_enabled"
+    )]
+    enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    dependencies: Vec<String>,
+}
+
+fn default_role() -> String {
+    "mod".to_string()
+}
+fn default_enabled() -> bool {
+    true
+}
+fn is_default_role(role: &str) -> bool {
+    role == "mod"
+}
+fn is_default_enabled(enabled: &bool) -> bool {
+    *enabled
+}
+
+/// Parse mod_sources.txt in either TOML (v2) or legacy (v1) format.
+/// Returns (mods, ignored ids). Migrates a legacy file to TOML with a .bak
+/// backup once it has been read successfully.
 fn parse_mod_sources(path: &Path) -> (Vec<ModEntry>, Vec<String>) {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
@@ -260,6 +313,63 @@ fn parse_mod_sources(path: &Path) -> (Vec<ModEntry>, Vec<String>) {
             std::process::exit(1);
         }
     };
+
+    let (mods, ignored, is_legacy) = parse_mod_sources_content(&content);
+    if is_legacy && !content.trim().is_empty() {
+        migrate_mod_sources(path, &mods, &ignored);
+    }
+    (mods, ignored)
+}
+
+/// Parse mod_sources.txt content. Third return value is true when the input
+/// was legacy (v1) format, so the caller can migrate it.
+fn parse_mod_sources_content(content: &str) -> (Vec<ModEntry>, Vec<String>, bool) {
+    let looks_toml = content.contains("[[mods]]")
+        || content
+            .lines()
+            .any(|l| l.trim_start().starts_with("version ="));
+    if looks_toml {
+        match toml::from_str::<TomlModSources>(content) {
+            Ok(src) => {
+                let mut mods = Vec::new();
+                let mut ignored = Vec::new();
+                for m in src.mods {
+                    let name = if m.name.is_empty() {
+                        format!("Mod {}", m.id)
+                    } else {
+                        m.name
+                    };
+                    let entry = ModEntry {
+                        id: m.id,
+                        name,
+                        tag: None,
+                        tags: m.tags,
+                        role: m.role,
+                        enabled: m.enabled,
+                        dependencies: m.dependencies,
+                    };
+                    if entry.role == "ignore" || !entry.enabled {
+                        ignored.push(entry.id.clone());
+                    } else {
+                        mods.push(entry);
+                    }
+                }
+                (mods, ignored, false)
+            }
+            Err(e) => {
+                eprintln!("Error: failed to parse TOML mod_sources.txt: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        let (mods, ignored) = parse_legacy_mod_sources(content);
+        (mods, ignored, true)
+    }
+}
+
+/// Legacy v1 parser: one Workshop mod per line, optional `# tag`,
+/// optional `[ignore]` / `@ignore` section at the end.
+fn parse_legacy_mod_sources(content: &str) -> (Vec<ModEntry>, Vec<String>) {
     let mut mods = Vec::new();
     let mut ignored = Vec::new();
     let mut in_ignore = false;
@@ -285,10 +395,74 @@ fn parse_mod_sources(path: &Path) -> (Vec<ModEntry>, Vec<String>) {
         if let Some(id) = extract_id(line) {
             let name = extract_tag(line).unwrap_or_else(|| format!("Mod {}", id));
             let tag = extract_tag(line);
-            mods.push(ModEntry { id, name, tag });
+            mods.push(ModEntry {
+                id,
+                name,
+                tag,
+                tags: Vec::new(),
+                role: "mod".to_string(),
+                enabled: true,
+                dependencies: Vec::new(),
+            });
         }
     }
     (mods, ignored)
+}
+
+/// Serialise legacy data into the TOML v2 format.
+fn toml_from_legacy(mods: &[ModEntry], ignored: &[String]) -> String {
+    let mut out = TomlModSources {
+        version: 2,
+        mods: Vec::new(),
+    };
+    for m in mods {
+        let name = if m.name == format!("Mod {}", m.id) {
+            String::new()
+        } else {
+            m.name.clone()
+        };
+        out.mods.push(TomlMod {
+            id: m.id.clone(),
+            name,
+            tags: Vec::new(),
+            role: "mod".to_string(),
+            enabled: true,
+            dependencies: Vec::new(),
+        });
+    }
+    for id in ignored {
+        out.mods.push(TomlMod {
+            id: id.clone(),
+            name: String::new(),
+            tags: Vec::new(),
+            role: "ignore".to_string(),
+            enabled: false,
+            dependencies: Vec::new(),
+        });
+    }
+    toml::to_string(&out).expect("Failed to serialise TOML mod sources")
+}
+
+/// Rewrite a legacy mod_sources.txt as TOML v2, keeping a .bak backup.
+fn migrate_mod_sources(path: &Path, mods: &[ModEntry], ignored: &[String]) {
+    let bak_path = path.with_extension("txt.bak");
+    if let Err(e) = fs::copy(path, &bak_path) {
+        eprintln!(
+            "Warning: could not back up {} to {}: {}",
+            path.display(),
+            bak_path.display(),
+            e
+        );
+        return;
+    }
+    let toml = toml_from_legacy(mods, ignored);
+    match fs::write(path, toml) {
+        Ok(_) => println!(
+            "Migrated mod_sources.txt to TOML format (backup: {})",
+            bak_path.display()
+        ),
+        Err(e) => eprintln!("Error: could not write migrated {}: {}", path.display(), e),
+    }
 }
 
 fn extract_id(line: &str) -> Option<String> {
@@ -452,7 +626,13 @@ fn find_all_workshop_caches() -> Vec<PathBuf> {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct LockFile {
+    #[serde(default = "default_lock_version")]
+    version: u32,
     mods: HashMap<String, ModLockEntry>,
+}
+
+fn default_lock_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -473,10 +653,12 @@ fn load_lock(path: &Path) -> LockFile {
     if path.exists() {
         let content = fs::read_to_string(path).expect("Failed to read mods.lock");
         serde_json::from_str(&content).unwrap_or(LockFile {
+            version: default_lock_version(),
             mods: HashMap::new(),
         })
     } else {
         LockFile {
+            version: default_lock_version(),
             mods: HashMap::new(),
         }
     }
@@ -975,6 +1157,7 @@ fn sync_mods(
 
     // Apply changes
     let mut new_lock = LockFile {
+        version: default_lock_version(),
         mods: HashMap::new(),
     };
 
@@ -1456,8 +1639,8 @@ fn parse_modlist_html(content: &str) -> (Vec<(String, String)>, Vec<String>) {
 }
 
 /// Import mods from an Arma 3 launcher modlist HTML file into mod_sources.txt.
-/// Appends each Steam mod as "{id} # {name}". Local mods and duplicates
-/// (already present in mod_sources.txt) are skipped with a message.
+/// Appends each Steam mod as "{id} # {name}" (legacy) or a [[mods]] block
+/// (TOML). Local mods and duplicates are skipped with a message.
 fn import_modlist(modlist_file: &Path, dry_run: bool) {
     let content = match fs::read_to_string(modlist_file) {
         Ok(c) => c,
@@ -1478,16 +1661,20 @@ fn import_modlist(modlist_file: &Path, dry_run: bool) {
         return;
     }
 
-    // Load existing IDs to skip duplicates
+    // Load existing IDs to skip duplicates. Handles both legacy and TOML
+    // formats via the shared parser.
     let sources_path = Path::new("mod_sources.txt");
-    let mut existing: HashSet<String> = HashSet::new();
-    if let Ok(content) = fs::read_to_string(sources_path) {
-        for line in content.lines() {
-            if let Some(id) = extract_id(line) {
-                existing.insert(id);
-            }
-        }
-    }
+    let existing_content = fs::read_to_string(sources_path).unwrap_or_default();
+    let is_toml = existing_content.contains("[[mods]]")
+        || existing_content
+            .lines()
+            .any(|l| l.trim_start().starts_with("version ="));
+    let (existing_mods, existing_ignored, _) = parse_mod_sources_content(&existing_content);
+    let existing: HashSet<String> = existing_mods
+        .iter()
+        .map(|m| m.id.clone())
+        .chain(existing_ignored.iter().cloned())
+        .collect();
 
     let mut new_mods: Vec<(String, String)> = Vec::new();
     for (id, name) in found {
@@ -1519,38 +1706,54 @@ fn import_modlist(modlist_file: &Path, dry_run: bool) {
         return;
     }
 
-    // Append to mod_sources.txt, preserving any [ignore] section at the end
-    let mut output = fs::read_to_string(sources_path).unwrap_or_default();
+    let mut output = existing_content;
     if !output.ends_with('\n') {
         output.push('\n');
     }
-    // Insert before [ignore] if present, else append at the end
-    let ignore_pos = output
-        .lines()
-        .position(|l| {
-            let l = l.trim().to_lowercase();
-            l.contains("[ignore]") || l.contains("@ignore")
-        })
-        .map(|line_idx| {
-            // byte offset of that line's start
-            let mut pos = 0usize;
-            for (i, line) in output.lines().enumerate() {
-                if i == line_idx {
-                    break;
-                }
-                pos += line.len() + 1;
+
+    if is_toml {
+        // Append [[mods]] blocks at the end, separated by a blank line
+        if !output.ends_with("\n\n") {
+            output.push('\n');
+        }
+        let mut additions = String::new();
+        for (id, name) in &new_mods {
+            additions.push_str(&format!("[[mods]]\nid = \"{}\"\n", id));
+            if !name.is_empty() {
+                additions.push_str(&format!("name = \"{}\"\n", name));
             }
-            pos
-        });
+            additions.push('\n');
+        }
+        output.push_str(&additions);
+    } else {
+        // Insert before [ignore] if present, else append at the end
+        let ignore_pos = output
+            .lines()
+            .position(|l| {
+                let l = l.trim().to_lowercase();
+                l.contains("[ignore]") || l.contains("@ignore")
+            })
+            .map(|line_idx| {
+                // byte offset of that line's start
+                let mut pos = 0usize;
+                for (i, line) in output.lines().enumerate() {
+                    if i == line_idx {
+                        break;
+                    }
+                    pos += line.len() + 1;
+                }
+                pos
+            });
 
-    let mut additions = String::new();
-    for (id, name) in &new_mods {
-        additions.push_str(&format!("{} # {}\n", id, name));
-    }
+        let mut additions = String::new();
+        for (id, name) in &new_mods {
+            additions.push_str(&format!("{} # {}\n", id, name));
+        }
 
-    match ignore_pos {
-        Some(pos) => output.insert_str(pos, &additions),
-        None => output.push_str(&additions),
+        match ignore_pos {
+            Some(pos) => output.insert_str(pos, &additions),
+            None => output.push_str(&additions),
+        }
     }
 
     match fs::write(sources_path, output) {
@@ -1718,5 +1921,98 @@ mod tests {
         let mut out = sources.to_string();
         out.insert_str(pos, "1234567890 # O&T Warfighters\n");
         assert!(out.starts_with("450814997 # CBA_A3\n\n1234567890 # O&T Warfighters\n[ignore]"));
+    }
+
+    // --- TOML mod_sources (v2) ---
+
+    #[test]
+    fn parse_toml_mod_sources() {
+        let toml = r#"version = 2
+
+[[mods]]
+id = "450814997"
+name = "CBA_A3"
+
+[[mods]]
+id = "887302721"
+name = "Boat Mod"
+tags = ["vehicles"]
+
+[[mods]]
+id = "463939057"
+role = "ignore"
+enabled = false
+"#;
+        let (mods, ignored, is_legacy) = parse_mod_sources_content(toml);
+        assert!(!is_legacy);
+        assert_eq!(mods.len(), 2);
+        assert_eq!(mods[0].id, "450814997");
+        assert_eq!(mods[0].name, "CBA_A3");
+        assert_eq!(mods[1].tags, vec!["vehicles".to_string()]);
+        assert_eq!(ignored, vec!["463939057".to_string()]);
+    }
+
+    #[test]
+    fn parse_toml_without_version_field() {
+        // version defaults to 2 when absent
+        let toml = r#"[[mods]]
+id = "1234567890"
+name = "Some Mod"
+"#;
+        let (mods, ignored, is_legacy) = parse_mod_sources_content(toml);
+        assert!(!is_legacy);
+        assert_eq!(mods.len(), 1);
+        assert!(ignored.is_empty());
+    }
+
+    #[test]
+    fn parse_toml_disabled_mod_is_ignored() {
+        let toml = r#"[[mods]]
+id = "1234567890"
+enabled = false
+"#;
+        let (mods, ignored, _) = parse_mod_sources_content(toml);
+        assert!(mods.is_empty());
+        assert_eq!(ignored, vec!["1234567890".to_string()]);
+    }
+
+    #[test]
+    fn parse_toml_missing_name_defaults_to_mod_id() {
+        let toml = r#"[[mods]]
+id = "1234567890"
+"#;
+        let (mods, _, _) = parse_mod_sources_content(toml);
+        assert_eq!(mods[0].name, "Mod 1234567890");
+    }
+
+    #[test]
+    fn parse_legacy_still_works() {
+        let legacy = "450814997 # CBA_A3\n887302721 # Boat Mod\n\n[ignore]\n463939057 # ACE\n";
+        let (mods, ignored, is_legacy) = parse_mod_sources_content(legacy);
+        assert!(is_legacy);
+        assert_eq!(mods.len(), 2);
+        assert_eq!(mods[0].id, "450814997");
+        assert_eq!(mods[0].name, "CBA_A3");
+        assert_eq!(ignored, vec!["463939057".to_string()]);
+    }
+
+    #[test]
+    fn toml_migration_round_trips() {
+        let legacy = "450814997 # CBA_A3\n887302721 # Boat Mod\n\n[ignore]\n463939057 # ACE\n";
+        let (mods, ignored, is_legacy) = parse_mod_sources_content(legacy);
+        assert!(is_legacy);
+
+        let migrated = toml_from_legacy(&mods, &ignored);
+        assert!(migrated.contains("version = 2"));
+        assert!(migrated.contains("id = \"450814997\""));
+        assert!(migrated.contains("name = \"CBA_A3\""));
+        assert!(migrated.contains("role = \"ignore\""));
+        assert!(migrated.contains("enabled = false"));
+
+        // Migrated output parses back with identical contents
+        let (mods2, ignored2, is_legacy2) = parse_mod_sources_content(&migrated);
+        assert!(!is_legacy2);
+        assert_eq!(mods2.len(), mods.len());
+        assert_eq!(ignored2, ignored);
     }
 }
