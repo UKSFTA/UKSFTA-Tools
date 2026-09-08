@@ -37,6 +37,15 @@ uksfta audit --missing-only
 # Compare mods.lock timestamps against the Workshop cache
 uksfta updates
 
+# Trace untracked PBOs in addons/ back to their Workshop origin
+uksfta investigate
+
+# Check each origin against the Steam Workshop API (network)
+uksfta investigate --online
+
+# Investigate all PBOs, including tracked ones
+uksfta investigate --all
+
 # Import mods from an Arma 3 launcher modlist HTML file
 uksfta import ./my-modlist.html
 
@@ -140,6 +149,39 @@ Each Steam mod is appended as `{id} # {name}`. Mods already present in
 `mod_sources.txt` (including the `[ignore]` section) are skipped. Local
 mods without a Workshop ID are skipped with a warning. New entries are
 inserted before the `[ignore]` section if one exists.
+
+## Investigating PBO origins
+
+Use `investigate` to trace PBOs in `addons/` back to their Workshop
+origin. By default it examines PBOs not tracked in `mods.lock` — leftovers
+from removed mods, merged packs, or manual copies:
+
+```bash
+# Trace untracked PBOs to their source Workshop mod
+uksfta investigate
+
+# Check each origin against the Steam Workshop API (network)
+uksfta investigate --online
+
+# Investigate every PBO, including tracked ones
+uksfta investigate --all
+```
+
+Each PBO is matched by **byte hash** against the local Workshop cache,
+then the winning mod's `meta.cpp` gives its Workshop ID and name. When a
+PBO exists in multiple cache folders (for example a standalone mod and an
+aggregate pack), the standalone mod is preferred. PBOs with no matching
+copy anywhere are reported as unknown — they may come from a deleted or
+private mod, or be manually placed.
+
+With `--online`, the tool calls Steam's `GetPublishedFileDetails` API
+(no key required) to report whether each origin still exists and is
+publicly visible. An item that is not publicly visible is either removed
+or set private — the API cannot tell the two apart without the owner
+authenticating.
+
+The `identify` command uses the same byte-hash matching, so its origin
+reports are now deterministic too.
 
 ## Platforms
 

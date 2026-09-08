@@ -239,6 +239,15 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Trace the Workshop origin of PBOs not tracked in mods.lock
+    Investigate {
+        /// Investigate all PBOs, including tracked ones
+        #[arg(long)]
+        all: bool,
+        /// Check each origin against the Steam Workshop API (network)
+        #[arg(long)]
+        online: bool,
+    },
 }
 
 // --- Mod list parsing ---
@@ -1336,23 +1345,7 @@ fn identify() {
         return;
     }
 
-    // Build map of PBO -> workshop ID from all caches
-    let mut pbo_map: HashMap<String, String> = HashMap::new();
-    for cache in &caches {
-        if let Ok(entries) = fs::read_dir(cache) {
-            for entry in entries.flatten() {
-                let mod_path = entry.path();
-                if mod_path.is_dir() {
-                    let id = mod_path.file_name().unwrap().to_string_lossy().to_string();
-                    for pbo in find_pbos(&mod_path) {
-                        if let Some(name) = pbo.file_name() {
-                            pbo_map.insert(name.to_string_lossy().to_string(), id.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let mod_dirs = cached_mod_dirs(&caches);
 
     println!("PBO Origins:");
     if let Ok(entries) = fs::read_dir(addons_dir) {
@@ -1364,10 +1357,264 @@ fn identify() {
                 .unwrap_or(false)
             {
                 let name = entry.file_name().to_string_lossy().to_string();
-                let origin = pbo_map.get(&name).map(|s| s.as_str()).unwrap_or("Unknown");
+                let origin = resolve_pbo_origin(&entry.path(), &mod_dirs)
+                    .unwrap_or_else(|| "Unknown".to_string());
                 println!("  {} -> Workshop {}", name, origin);
             }
         }
+    }
+}
+
+/// SHA256 of a file's contents, hex-encoded. None on read failure.
+fn file_sha256(path: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).ok()?;
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+/// All Workshop cache folders: (id, path).
+fn cached_mod_dirs(caches: &[PathBuf]) -> Vec<(String, PathBuf)> {
+    let mut dirs = Vec::new();
+    for cache in caches {
+        if let Ok(entries) = fs::read_dir(cache) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(id) = path.file_name().and_then(|n| n.to_str()) {
+                        dirs.push((id.to_string(), path));
+                    }
+                }
+            }
+        }
+    }
+    dirs
+}
+
+/// Byte-hash match a PBO against the Workshop cache and arbitrate the origin.
+/// Returns the best-matching Workshop ID, preferring standalone mods (fewer
+/// PBOs) over aggregate packs. None if no byte-identical copy exists.
+fn resolve_pbo_origin(pbo_path: &Path, mod_dirs: &[(String, PathBuf)]) -> Option<String> {
+    let pbo_name = pbo_path.file_name()?.to_string_lossy().to_string();
+    let pbo_hash = file_sha256(pbo_path)?;
+
+    // Collect same-named candidate PBOs across all mod folders
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
+    for (id, mod_dir) in mod_dirs {
+        for cached_pbo in find_pbos(mod_dir) {
+            if cached_pbo
+                .file_name()
+                .map(|n| n == pbo_name.as_str())
+                .unwrap_or(false)
+            {
+                candidates.push((id.clone(), cached_pbo));
+                break; // one same-named file per mod is enough for the hash check
+            }
+        }
+    }
+
+    // Keep only byte-identical copies
+    let mut matches: Vec<(String, usize)> = Vec::new();
+    for (id, cached_path) in candidates {
+        if file_sha256(&cached_path) == Some(pbo_hash.clone()) {
+            let size = mod_dirs
+                .iter()
+                .find(|(mid, _)| mid == &id)
+                .map(|(_, d)| find_pbos(d).len())
+                .unwrap_or(usize::MAX);
+            matches.push((id, size));
+        }
+    }
+
+    // Arbitrate: prefer the folder with the fewest PBOs (standalone over pack)
+    matches
+        .into_iter()
+        .min_by_key(|(_, size)| *size)
+        .map(|(id, _)| id)
+}
+
+/// Trace the Workshop origin of untracked PBOs in addons/.
+fn investigate(all: bool, online: bool) {
+    let caches = find_all_workshop_caches();
+    if caches.is_empty() {
+        eprintln!("Workshop cache not found");
+        return;
+    }
+    let addons_dir = Path::new("addons");
+    if !addons_dir.exists() {
+        eprintln!("No addons/ directory");
+        return;
+    }
+
+    let mod_dirs = cached_mod_dirs(&caches);
+
+    // Tracked PBO filenames: from mods.lock if present, else all are untracked
+    let lock_path = Path::new("mods.lock");
+    let lock = load_lock(lock_path);
+    let tracked: HashSet<String> = lock
+        .mods
+        .values()
+        .flat_map(|m| m.files.iter())
+        .filter_map(|f| {
+            Path::new(f)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+        })
+        .collect();
+
+    let mut results: Vec<(String, Vec<String>, bool)> = Vec::new(); // (pbo, origins, unknown)
+
+    if let Ok(entries) = fs::read_dir(addons_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "pbo").unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !all && tracked.contains(&name) {
+                    continue;
+                }
+                results.push((name, Vec::new(), true));
+            }
+        }
+    }
+
+    if results.is_empty() {
+        println!("No untracked PBOs in addons/.");
+        return;
+    }
+
+    // Match each untracked PBO against the cache by byte hash and arbitrate
+    for (pbo_name, origins, unknown) in &mut results {
+        let pbo_path = addons_dir.join(pbo_name.as_str());
+        if let Some(id) = resolve_pbo_origin(&pbo_path, &mod_dirs) {
+            origins.push(id);
+            *unknown = false;
+        }
+    }
+
+    // Report
+    println!("Untracked PBO Investigation:");
+    println!("  {} PBO(s) examined", results.len());
+    let mut unknown_count = 0;
+    for (pbo, origins, unknown) in &results {
+        if *unknown {
+            unknown_count += 1;
+            println!("  [UNKNOWN] {}", pbo);
+            continue;
+        }
+        let id = &origins[0];
+        let meta = mod_dirs
+            .iter()
+            .find(|(mid, _)| mid == id)
+            .map(|(_, d)| get_mod_metadata(d))
+            .unwrap_or_default();
+        let name = if meta.name.is_empty() {
+            format!("Mod {}", id)
+        } else {
+            meta.name
+        };
+        println!("  {} -> {} ({}) {}", pbo, name, id, workshop_url(id));
+    }
+    if unknown_count > 0 {
+        println!(
+            "\n{} PBO(s) could not be matched to any Workshop cache entry.",
+            unknown_count
+        );
+        println!("They may come from a deleted or private mod, or be manually placed.");
+    }
+
+    if online {
+        check_workshop_visibility(results);
+    }
+}
+
+/// Query the Steam Workshop API for each investigated mod's visibility.
+/// Keyless: ISteamRemoteStorage/GetPublishedFileDetails needs no API key.
+fn check_workshop_visibility(results: Vec<(String, Vec<String>, bool)>) {
+    // Collect unique origin IDs
+    let mut ids: Vec<String> = results
+        .iter()
+        .filter(|(_, _, unknown)| !*unknown)
+        .filter_map(|(_, origins, _)| origins.first().cloned())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        println!("\nOnline check: no origins to check.");
+        return;
+    }
+
+    println!("\nChecking {} mod(s) against Steam Workshop...", ids.len());
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("Failed to build HTTP client");
+
+    let mut form = String::from("itemcount=");
+    form.push_str(&ids.len().to_string());
+    for (i, id) in ids.iter().enumerate() {
+        form.push_str(&format!("&publishedfileids[{}]={}", i, id));
+    }
+
+    let body = match client
+        .post("https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form)
+        .send()
+    {
+        Ok(r) => match r.text() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Error reading API response: {}", e);
+                return;
+            }
+        },
+        Err(e) => {
+            eprintln!("Error calling Steam API: {}", e);
+            return;
+        }
+    };
+
+    // Parse the response. Result 1 = exists (public or visible), 9 = not
+    // publicly visible (removed or private).
+    #[derive(serde::Deserialize)]
+    struct ApiResponse {
+        response: ResponseInner,
+    }
+    #[derive(serde::Deserialize)]
+    struct ResponseInner {
+        publishedfiledetails: Vec<FileDetail>,
+    }
+    #[derive(serde::Deserialize)]
+    struct FileDetail {
+        publishedfileid: String,
+        result: u32,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        creator: String,
+    }
+
+    let parsed: ApiResponse = match serde_json::from_str(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error parsing API response: {}", e);
+            return;
+        }
+    };
+
+    for detail in parsed.response.publishedfiledetails {
+        let status = if detail.result == 1 {
+            format!("PUBLIC (by {})", detail.creator)
+        } else {
+            "NOT PUBLICLY VISIBLE (removed or private)".to_string()
+        };
+        let title = if detail.title.is_empty() {
+            detail.publishedfileid.clone()
+        } else {
+            detail.title
+        };
+        println!("  {} -> {} [{}]", detail.publishedfileid, title, status);
     }
 }
 
@@ -1649,6 +1896,7 @@ fn main() {
             modlist_file,
             dry_run,
         } => import_modlist(&modlist_file, dry_run),
+        Commands::Investigate { all, online } => investigate(all, online),
     }
 }
 
@@ -2113,5 +2361,81 @@ name = "CBA_A3"
         // checking extract_id directly since parse_mod_sources_content exits.
         assert_eq!(extract_id("not-a-mod"), None);
         assert_eq!(extract_id("123"), None);
+    }
+
+    // --- investigate ---
+
+    #[test]
+    fn file_sha256_matches_known_value() {
+        let dir = std::env::temp_dir().join("uksfta-sha-test");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("data.bin");
+        fs::write(&f, b"hello world").unwrap();
+        // sha256 of "hello world"
+        assert_eq!(
+            file_sha256(&f).unwrap(),
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn file_sha256_missing_file_returns_none() {
+        assert_eq!(
+            file_sha256(&Path::new("/nonexistent/uksfta/test.pbo")),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_pbo_origin_prefers_standalone_over_pack() {
+        let dir = std::env::temp_dir().join("uksfta-origin-test");
+        fs::create_dir_all(&dir).unwrap();
+
+        // mod 111 (standalone, 1 PBO) and mod 222 (pack, 50 PBOs) both
+        // contain an identical copy of common.pbo
+        let standalone = dir.join("111").join("addons");
+        let pack = dir.join("222").join("addons");
+        fs::create_dir_all(&standalone).unwrap();
+        fs::create_dir_all(&pack).unwrap();
+        let content = b"identical pbo bytes";
+        fs::write(standalone.join("common.pbo"), content).unwrap();
+        fs::write(pack.join("common.pbo"), content).unwrap();
+        for i in 0..50 {
+            fs::write(pack.join(format!("pack_{}.pbo", i)), format!("pack{}", i)).unwrap();
+        }
+
+        let mod_dirs = vec![
+            ("222".to_string(), dir.join("222")),
+            ("111".to_string(), dir.join("111")),
+        ];
+
+        let target = dir.join("common.pbo");
+        fs::write(&target, content).unwrap();
+
+        // Arbitration must pick the standalone mod (111) with fewer PBOs
+        assert_eq!(
+            resolve_pbo_origin(&target, &mod_dirs).unwrap(),
+            "111".to_string()
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_pbo_origin_no_match_returns_none() {
+        let dir = std::env::temp_dir().join("uksfta-origin-none");
+        fs::create_dir_all(&dir).unwrap();
+        let mod_dir = dir.join("111").join("addons");
+        fs::create_dir_all(&mod_dir).unwrap();
+        fs::write(mod_dir.join("other.pbo"), b"different").unwrap();
+
+        let target = dir.join("target.pbo");
+        fs::write(&target, b"no match anywhere").unwrap();
+
+        let mod_dirs = vec![("111".to_string(), dir.join("111"))];
+        assert_eq!(resolve_pbo_origin(&target, &mod_dirs), None);
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
