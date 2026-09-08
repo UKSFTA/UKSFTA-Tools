@@ -660,16 +660,17 @@ fn fetch_workshop_dependencies(workshop_id: &str) -> Vec<(String, String)> {
 }
 
 /// Resolve transitive dependencies for a list of missing mods.
-/// Returns (expanded list, direct deps per missing mod).
+/// Returns (expanded list, direct deps per fetched mod).
 /// The expanded list is missing mods + discovered deps not already known.
+/// Deps already present in the workshop cache are skipped entirely.
 fn resolve_transitive_deps(
     missing: &[(String, String)],
-    known_ids: &std::collections::HashSet<String>,
+    known_ids: &HashSet<String>,
+    cached_ids: &HashSet<String>,
 ) -> (
     Vec<(String, String)>,
     HashMap<String, Vec<(String, String)>>,
 ) {
-    use std::collections::HashSet;
     let mut result = Vec::new();
     let mut deps_by_mod: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut fetched: HashSet<String> = HashSet::new();
@@ -685,12 +686,15 @@ fn resolve_transitive_deps(
         result.push((id.clone(), name));
 
         let deps = fetch_workshop_dependencies(&id);
-        // Record direct deps for every fetched mod so the warning can
-        // render the full dependency tree transitively.
-        deps_by_mod.insert(id.clone(), deps.clone());
-        for (dep_id, dep_name) in deps {
-            // Skip deps already listed in mod_sources.txt (already handled)
-            if !fetched.contains(&dep_id) && !known_ids.contains(&dep_id) {
+        // Keep only deps we do not already have: not cached, not known
+        let missing_deps: Vec<(String, String)> = deps
+            .into_iter()
+            .filter(|(dep_id, _)| !cached_ids.contains(dep_id) && !known_ids.contains(dep_id))
+            .collect();
+        // Record for tree display
+        deps_by_mod.insert(id.clone(), missing_deps.clone());
+        for (dep_id, dep_name) in missing_deps {
+            if !fetched.contains(&dep_id) {
                 queue.push((dep_id, dep_name));
             }
         }
@@ -1010,7 +1014,19 @@ fn sync_mods(
     let (mods_for_list, deps_by_mod) = if resolve_deps {
         let known_ids: std::collections::HashSet<String> =
             mods.iter().map(|m| m.id.clone()).collect();
-        resolve_transitive_deps(&missing_from_cache, &known_ids)
+        let cached_ids: std::collections::HashSet<String> = caches
+            .iter()
+            .flat_map(|cache| {
+                fs::read_dir(cache)
+                    .map(|rd| {
+                        rd.filter_map(|e| e.ok())
+                            .filter_map(|e| e.file_name().into_string().ok())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        resolve_transitive_deps(&missing_from_cache, &known_ids, &cached_ids)
     } else {
         (missing_from_cache.clone(), HashMap::new())
     };
