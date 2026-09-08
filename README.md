@@ -185,11 +185,15 @@ With `--online`, the tool calls Steam's `GetPublishedFileDetails` API
 publicly visible. An item that is not publicly visible is either removed
 or set private — the API cannot tell the two apart without the owner
 authenticating. For PBOs with no local origin (or a pack-only origin),
-`--online` also searches the Workshop by the PBO's prefix and lists the
-top candidate mods with their titles, so you can trace where a repacked
-or deleted mod's content came from. This is a best-effort search —
-Workshop text search is imprecise, so candidates are shown for
-verification rather than asserted.
+`--online` also searches the Workshop and lists the top candidate mods
+with their titles, so you can trace where a repacked or deleted mod's
+content came from. The search term is extracted from the PBO's packed
+config: a mod-family string-table token (`$STR_RHSUSF_...` → `RHSUSF`)
+or a short author handle (`DANZ`, `TFB`), falling back to the header
+prefix. These distinctive tokens match mod titles far better than PBO
+filenames. This is a best-effort search — Workshop text search is
+imprecise, so candidates are shown for verification rather than
+asserted.
 or set private — the API cannot tell the two apart without the owner
 authenticating.
 

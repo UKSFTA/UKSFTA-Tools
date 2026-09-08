@@ -1723,8 +1723,13 @@ fn investigate(all: bool, online: bool) {
                 Some(o) => o.is_pack,
             })
             .map(|(name, _)| {
-                let prefix = pbo_prefix(&addons_dir.join(name)).unwrap_or_else(|| name.clone());
-                (name.clone(), prefix)
+                let pbo_path = addons_dir.join(name);
+                // Prefer a richer identity (author/token) from the packed
+                // config; fall back to the header prefix.
+                let term = pbo_identity(&pbo_path)
+                    .or_else(|| pbo_prefix(&pbo_path))
+                    .unwrap_or_else(|| name.clone());
+                (name.clone(), term)
             })
             .collect();
 
@@ -1738,8 +1743,8 @@ fn investigate(all: bool, online: bool) {
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
                 .expect("Failed to build HTTP client");
-            for (name, prefix) in searchable {
-                let term = search_term_from_prefix(&prefix);
+            for (name, term) in searchable {
+                let term = search_term_from_prefix(&term);
                 if searched.contains(&term) {
                     continue;
                 }
@@ -1770,9 +1775,9 @@ fn investigate(all: bool, online: bool) {
                             .collect::<Vec<_>>()
                     };
                     println!(
-                        "  {} (prefix \"{}\"): {} candidate(s) — {}",
+                        "  {} (search \"{}\"): {} candidate(s) — {}",
                         name,
-                        prefix,
+                        term,
                         candidates.len(),
                         shown.join(", ")
                     );
@@ -1866,6 +1871,79 @@ fn search_term_from_prefix(prefix: &str) -> String {
     } else {
         candidate.to_string()
     }
+}
+
+/// Extract a mod identity from a PBO's packed config content.
+/// The config carries richer identity than the header prefix: mod-family
+/// string-table tokens ("$STR_RHSUSF_AUTHOR_FULL" -> "RHSUSF") and short
+/// author handles ("DANZ", "KM", "TFB").
+///
+/// The Workshop search matches mod TITLES, not authors, so the most
+/// effective term is a short distinctive token that appears in the mod's
+/// title. A long author name ("UnderSiege Productionz") is ignored: the
+/// mod is titled "USP Gear", not the author's name.
+/// Returns the best identity token found, or None.
+fn pbo_identity(path: &Path) -> Option<String> {
+    use std::io::Read;
+    // Read up to the first 2 MB of the PBO: the header and config are at
+    // the start, and config content rarely exceeds this.
+    let file = fs::File::open(path).ok()?;
+    let mut data = Vec::new();
+    file.take(2_000_000).read_to_end(&mut data).ok()?;
+
+    // Readable strings >= 6 chars
+    let strings: Vec<String> = data
+        .split(|&b| !(0x20..=0x7e).contains(&b))
+        .filter(|s| s.len() >= 6)
+        .map(|s| String::from_utf8_lossy(s).to_string())
+        .collect();
+
+    // 1. Prefer a mod-family string-table token: $STR_<MODID>_...
+    //    This is the mod's internal identifier (RHSUSF, MRH, ACE) and
+    //    matches mod titles far better than authors.
+    for s in &strings {
+        if let Some(idx) = s.find("$STR_") {
+            let token = &s[idx + 5..];
+            let token: String = token
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            // The mod family is the first underscore segment: from
+            // "RHSUSF_AUTHOR_FULL" take "RHSUSF".
+            let token = token.split('_').next().unwrap_or(&token);
+            if token.len() >= 3 && !["BIS", "AR", "CORE"].contains(&token) {
+                return Some(token.to_string());
+            }
+        }
+    }
+
+    // 2. Fall back to a short author handle: author = "Name" where the
+    //    name is a single short token likely to appear in the mod title
+    //    (DANZ, KM, TFB, MARKO). Skip long names and $STR_ placeholders.
+    for s in &strings {
+        if let Some(idx) = s.find("author") {
+            let after = &s[idx + 6..];
+            let after = after.trim_start();
+            if let Some(after) = after.strip_prefix('=') {
+                let after = after.trim_start();
+                if let Some(after) = after.strip_prefix('"') {
+                    if let Some(end) = after.find('"') {
+                        let name = after[..end].trim();
+                        if !name.starts_with('$')
+                            && name.len() >= 2
+                            && name.len() <= 12
+                            && !name.contains([' ', '&', '.', '\''])
+                            && !["AUTHOR", "SITREP", "UNKNOWN"].contains(&name)
+                        {
+                            return Some(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Search the Steam Workshop browse page for a query and return candidate
@@ -3043,6 +3121,49 @@ name = "CBA_A3"
         assert_eq!(urlencode("TFL Headgear"), "TFL%20Headgear");
         assert_eq!(urlencode("a/b&c"), "a%2Fb%26c");
         assert_eq!(urlencode("ACE"), "ACE");
+    }
+
+    /// Write a fake PBO whose packed config contains the given text.
+    fn write_pbo_with_config(path: &Path, config: &str) {
+        let mut data = b"\x00sreV\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        data.extend_from_slice(b"prefix\x00test\x00");
+        data.extend_from_slice(config.as_bytes());
+        fs::write(path, data).unwrap();
+    }
+
+    #[test]
+    fn pbo_identity_prefers_string_table_token() {
+        let dir = std::env::temp_dir().join("uksfta-identity-token");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        // A $STR_ token (mod family) beats a long author name
+        write_pbo_with_config(
+            &f,
+            r#"author = "Red Hammer Studios"; author = "$STR_RHSUSF_AUTHOR_FULL";"#,
+        );
+        assert_eq!(pbo_identity(&f).unwrap(), "RHSUSF");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_identity_falls_back_to_short_author() {
+        let dir = std::env::temp_dir().join("uksfta-identity-author");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        write_pbo_with_config(&f, r#"author = "DANZ";"#);
+        assert_eq!(pbo_identity(&f).unwrap(), "DANZ");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_identity_rejects_long_author_names() {
+        let dir = std::env::temp_dir().join("uksfta-identity-long");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        // Long multi-word author names don't match mod titles -> ignored
+        write_pbo_with_config(&f, r#"author = "UnderSiege Productionz";"#);
+        assert_eq!(pbo_identity(&f), None);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
