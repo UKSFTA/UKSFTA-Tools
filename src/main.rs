@@ -193,7 +193,7 @@ fn get_mod_metadata(mod_dir: &Path) -> ModCpp {
 }
 
 #[derive(Parser)]
-#[command(name = "uksfta", about = "UKSFTA modpack manager")]
+#[command(name = "uksfta", about = "UKSFTA modpack manager", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -248,6 +248,8 @@ enum Commands {
         #[arg(long)]
         online: bool,
     },
+    /// Show the installed version and check for updates
+    Version,
 }
 
 // --- Mod list parsing ---
@@ -1861,6 +1863,95 @@ fn check_updates() {
     }
 }
 
+/// Show the installed version and check GitHub for a newer release.
+/// Prints update instructions matching the install method in use.
+fn version() {
+    let current = env!("CARGO_PKG_VERSION");
+    println!("uksfta {}", current);
+
+    // Query the latest release tag from GitHub (no key required)
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("Failed to build HTTP client");
+
+    let body = match client
+        .get("https://api.github.com/repos/UKSFTA/UKSFTA-Tools/releases/latest")
+        .header("User-Agent", "uksfta")
+        .send()
+    {
+        Ok(r) => match r.text() {
+            Ok(t) => t,
+            Err(e) => {
+                println!("Could not check for updates: {}", e);
+                return;
+            }
+        },
+        Err(e) => {
+            println!("Could not check for updates: {}", e);
+            println!("Offline or no access to GitHub.");
+            return;
+        }
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Release {
+        tag_name: String,
+    }
+    let release: Release = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("Could not parse update response: {}", e);
+            return;
+        }
+    };
+
+    // Tags are "vX.Y.Z"; strip the leading 'v' for comparison
+    let latest = release.tag_name.trim_start_matches('v');
+    if !is_outdated(current, latest) {
+        println!("You are up to date.");
+        return;
+    }
+
+    println!(
+        "\nA new version is available: v{} (you have v{})",
+        latest, current
+    );
+    println!("Update with:");
+    if cfg!(target_os = "windows") {
+        println!(
+            "  irm https://github.com/UKSFTA/UKSFTA-Tools/releases/latest/download/install.ps1 | iex"
+        );
+    } else {
+        println!(
+            "  curl -fsSL https://github.com/UKSFTA/UKSFTA-Tools/releases/latest/download/install.sh | sh"
+        );
+    }
+}
+
+/// Compare two dotted version strings. Returns true when `installed` is
+/// older than `latest`. Handles the "v" prefix. Non-numeric parts are
+/// ignored for the comparison.
+fn is_outdated(installed: &str, latest: &str) -> bool {
+    let installed: Vec<u32> = installed
+        .trim_start_matches('v')
+        .split('.')
+        .filter_map(|p| p.parse().ok())
+        .collect();
+    let latest: Vec<u32> = latest
+        .trim_start_matches('v')
+        .split('.')
+        .filter_map(|p| p.parse().ok())
+        .collect();
+
+    for (a, b) in installed.iter().zip(latest.iter()) {
+        if a != b {
+            return a < b;
+        }
+    }
+    installed.len() < latest.len()
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -1897,6 +1988,7 @@ fn main() {
             dry_run,
         } => import_modlist(&modlist_file, dry_run),
         Commands::Investigate { all, online } => investigate(all, online),
+        Commands::Version => version(),
     }
 }
 
@@ -2437,5 +2529,29 @@ name = "CBA_A3"
         assert_eq!(resolve_pbo_origin(&target, &mod_dirs), None);
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // --- version comparison ---
+
+    #[test]
+    fn is_outdated_detects_newer_major() {
+        assert!(is_outdated("0.1.0", "0.2.0"));
+        assert!(is_outdated("1.0.0", "2.0.0"));
+    }
+
+    #[test]
+    fn is_outdated_detects_newer_patch() {
+        assert!(is_outdated("0.2.0", "0.2.1"));
+    }
+
+    #[test]
+    fn is_outdated_same_version_is_false() {
+        assert!(!is_outdated("0.2.0", "0.2.0"));
+        assert!(!is_outdated("v0.2.0", "0.2.0"));
+    }
+
+    #[test]
+    fn is_outdated_newer_installed_is_false() {
+        assert!(!is_outdated("0.3.0", "0.2.0"));
     }
 }

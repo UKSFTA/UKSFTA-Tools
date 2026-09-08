@@ -46,6 +46,9 @@ uksfta investigate --online
 # Investigate all PBOs, including tracked ones
 uksfta investigate --all
 
+# Show the installed version and check for updates
+uksfta version
+
 # Import mods from an Arma 3 launcher modlist HTML file
 uksfta import ./my-modlist.html
 
