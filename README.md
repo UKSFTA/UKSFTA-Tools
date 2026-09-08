@@ -94,7 +94,7 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=887302721 # Boat Mod
 ## Output
 
 - `addons/` — PBOs copied from the Workshop cache
-- `mods.lock` — JSON manifest of synced mods (files, name, dependencies, last-updated timestamp)
+- `mods.lock` — JSON manifest of synced mods (files, name, tags, dependencies, last-updated timestamp)
 
 The tool reads the Workshop cache and its `appworkshop_107410.acf` metadata
 directly from your Steam libraries. It performs no Steam API calls.

@@ -247,13 +247,9 @@ enum Commands {
 struct ModEntry {
     id: String,
     name: String,
-    #[allow(dead_code)]
-    tag: Option<String>,
-    #[allow(dead_code)]
     tags: Vec<String>,
     role: String,
     enabled: bool,
-    #[allow(dead_code)]
     dependencies: Vec<String>,
 }
 
@@ -347,7 +343,6 @@ fn parse_mod_sources_content(content: &str) -> (Vec<ModEntry>, Vec<String>, bool
                     let entry = ModEntry {
                         id,
                         name,
-                        tag: None,
                         tags: m.tags,
                         role: m.role,
                         enabled: m.enabled,
@@ -399,11 +394,9 @@ fn parse_legacy_mod_sources(content: &str) -> (Vec<ModEntry>, Vec<String>) {
         }
         if let Some(id) = extract_id(line) {
             let name = extract_tag(line).unwrap_or_else(|| format!("Mod {}", id));
-            let tag = extract_tag(line);
             mods.push(ModEntry {
                 id,
                 name,
-                tag,
                 tags: Vec::new(),
                 role: "mod".to_string(),
                 enabled: true,
@@ -653,6 +646,8 @@ fn default_lock_version() -> u32 {
 struct ModLockEntry {
     files: Vec<String>,
     name: String,
+    #[serde(default)]
+    tags: Vec<String>,
     dependencies: Vec<Dependency>,
     updated: String,
 }
@@ -1081,11 +1076,26 @@ fn sync_mods(
             }
         };
 
+        // Resolve declared dependency names from the mods list where possible
+        let dependencies: Vec<Dependency> = entry
+            .dependencies
+            .iter()
+            .map(|dep_id| Dependency {
+                id: dep_id.clone(),
+                name: mods
+                    .iter()
+                    .find(|m| &m.id == dep_id)
+                    .map(|m| m.name.clone())
+                    .unwrap_or_default(),
+            })
+            .collect();
+
         planned.push((
             ModLockEntry {
                 files,
                 name: display_name,
-                dependencies: Vec::new(),
+                tags: entry.tags.clone(),
+                dependencies,
                 updated,
             },
             entry.id.clone(),
@@ -1952,6 +1962,7 @@ name = "CBA_A3"
 id = "887302721"
 name = "Boat Mod"
 tags = ["vehicles"]
+dependencies = ["450814997"]
 
 [[mods]]
 id = "463939057"
@@ -1964,6 +1975,7 @@ enabled = false
         assert_eq!(mods[0].id, "450814997");
         assert_eq!(mods[0].name, "CBA_A3");
         assert_eq!(mods[1].tags, vec!["vehicles".to_string()]);
+        assert_eq!(mods[1].dependencies, vec!["450814997".to_string()]);
         assert_eq!(ignored, vec!["463939057".to_string()]);
     }
 
