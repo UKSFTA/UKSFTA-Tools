@@ -82,6 +82,12 @@ jobs:
           } > changelog.txt
           echo "BODY_PATH=changelog.txt" >> $GITHUB_ENV
 
+      - name: Generate Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
