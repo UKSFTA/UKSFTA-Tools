@@ -55,6 +55,13 @@ jobs:
         run: |
           # Generate from v0.1.0 (first Rust release) to HEAD so the
           # pre-Rust HEMTT history is not included.
+          #
+          # Squash merges append "(#NN)" to a commit subject after the
+          # changelog was generated, so the committed file can hold either
+          # form. Strip "(#NN)" from both sides before comparing so the
+          # check is immune to the suffix either way.
           git-cliff v0.1.0..HEAD -o /tmp/CHANGELOG.new
-          diff /tmp/CHANGELOG.new CHANGELOG.md
+          sed -E 's/ \(#[0-9]+\)$//' /tmp/CHANGELOG.new > /tmp/CHANGELOG.norm
+          sed -E 's/ \(#[0-9]+\)$//' CHANGELOG.md > /tmp/CHANGELOG.comm
+          diff /tmp/CHANGELOG.norm /tmp/CHANGELOG.comm
           echo "CHANGELOG.md is up to date."

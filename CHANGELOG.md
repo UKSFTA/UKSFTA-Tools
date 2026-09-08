@@ -57,7 +57,9 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Sync changelog after squash merge and restore CI check
+- Make changelog check immune to squash-merge PR suffix
+
+- Sync changelog after squash merge and restore CI check (#50)
 
 - Escape untrusted mod names in HTML and TOML output (#36)
 
