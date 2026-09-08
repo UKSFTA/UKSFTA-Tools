@@ -159,18 +159,36 @@ All library folders come from `libraryfolders.vdf`, so extra libraries
 
 ## Installation
 
+### Windows (recommended)
+
+Run this in PowerShell:
+
+```powershell
+irm https://github.com/UKSFTA/UKSFTA-Tools/releases/latest/download/install.ps1 | iex
+```
+
+This downloads `uksfta.exe`, verifies its SHA256 checksum against the
+release's `SHA256SUMS`, installs it under `%LOCALAPPDATA%\Programs\uksfta`,
+and adds it to your user PATH. Open a new terminal and run `uksfta --help`
+to verify.
+
+### Manual download
+
 Download the binary for your platform from the [Releases
 page](https://github.com/UKSFTA/UKSFTA-Tools/releases) and put it on your
 `PATH`:
 
 ```bash
 # Linux
-chmod +x uksfta-linux
-sudo mv uksfta-linux /usr/local/bin/uksfta
+chmod +x uksfta
+sudo mv uksfta /usr/local/bin/uksfta
 
 # Windows
-# rename uksfta-windows.exe to uksfta.exe and add to PATH
+# uksfta.exe from the release, rename to uksfta.exe if needed and add to PATH
 ```
+
+Each release also includes a `SHA256SUMS` file so you can verify the
+binary you downloaded.
 
 Or build from source: `cargo build --release` (Linux, macOS) /
 `cargo build --release --target x86_64-pc-windows-msvc` (Windows, matches
