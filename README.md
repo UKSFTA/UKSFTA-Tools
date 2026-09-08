@@ -172,6 +172,19 @@ release's `SHA256SUMS`, installs it under `%LOCALAPPDATA%\Programs\uksfta`,
 and adds it to your user PATH. Open a new terminal and run `uksfta --help`
 to verify.
 
+### Linux / macOS
+
+Run this in a terminal:
+
+```sh
+curl -fsSL https://github.com/UKSFTA/UKSFTA-Tools/releases/latest/download/install.sh | sh
+```
+
+This downloads `uksfta`, verifies its SHA256 checksum against the release's
+`SHA256SUMS`, and installs it to `~/.local/bin` (or `/usr/local/bin` for a
+root install on macOS). Open a new terminal and run `uksfta --help` to
+verify.
+
 ### Manual download
 
 Download the binary for your platform from the [Releases

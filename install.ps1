@@ -28,10 +28,10 @@ function Get-Checksum {
     throw "Checksum for $AssetName not found in SHA256SUMS"
 }
 
-Write-Host "Finding latest uksfta release..." -ForegroundColor Cyan
+Write-Output "Finding latest uksfta release..."
 $release = Get-LatestRelease
 $tag = $release.tag_name
-Write-Host "Latest release: $tag"
+Write-Output "Latest release: $tag"
 
 # Locate the exe asset
 $asset = $release.assets | Where-Object { $_.name -eq $Asset }
@@ -41,7 +41,7 @@ if (-not $asset) {
 
 $expected = Get-Checksum -Tag $tag -AssetName $Asset
 
-Write-Host "Downloading $Asset..." -ForegroundColor Cyan
+Write-Output "Downloading $Asset..."
 $tmp = Join-Path $env:TEMP $Asset
 Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmp -UseBasicParsing
 
@@ -50,7 +50,7 @@ if ($actual -ne $expected) {
     Remove-Item $tmp -Force
     throw "Checksum mismatch. Expected $expected, got $actual. Aborting."
 }
-Write-Host "Checksum verified." -ForegroundColor Green
+Write-Output "Checksum verified."
 
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 Move-Item -Path $tmp -Destination $ExePath -Force
@@ -60,8 +60,8 @@ $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($userPath -notlike "*$InstallDir*") {
     $newPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
     [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-    Write-Host "Added $InstallDir to user PATH." -ForegroundColor Green
+    Write-Output "Added $InstallDir to user PATH."
 }
 
-Write-Host "Installed uksfta $tag to $ExePath" -ForegroundColor Green
-Write-Host "Open a new terminal and run 'uksfta --help' to verify." -ForegroundColor Cyan
+Write-Output "Installed uksfta $tag to $ExePath"
+Write-Output "Open a new terminal and run 'uksfta --help' to verify."
