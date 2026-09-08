@@ -22,3 +22,31 @@ jobs:
             **/*.md
             !**/node_modules/**
             !**/.hemttout/**
+
+      - name: Lint Shell Scripts
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          ignore_paths: |
+            target
+            .hemttout
+
+  lint-ps1:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+
+      - name: Lint PowerShell Scripts
+        shell: pwsh
+        run: |
+          $issues = Invoke-ScriptAnalyzer -Path ./install.ps1 -Severity Warning,Error
+          if ($issues) {
+            $issues | Format-Table -AutoSize
+            exit 1
+          }
