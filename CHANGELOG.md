@@ -57,7 +57,7 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Make changelog check immune to squash-merge PR suffix
+- Make changelog check immune to squash-merge PR suffix (#51)
 
 - Sync changelog after squash merge and restore CI check (#50)
 
@@ -69,6 +69,8 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 
 ### Miscellaneous
+
+- Bump version to 0.3.0 for release
 
 - Bump version to 0.2.0 for release (#43)
 
