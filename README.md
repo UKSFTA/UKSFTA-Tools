@@ -46,9 +46,40 @@ uksfta import ./my-modlist.html --dry-run
 
 ## Input Format
 
-`mod_sources.txt` — one Workshop mod per line (URL or bare ID), with an
-optional tag after `#`. Mods under `[ignore]` are excluded (for example the
-base dependency set that is not repacked).
+`mod_sources.txt` supports two formats. The TOML format (v2) adds metadata
+per mod and is written automatically when a legacy file is first read (a
+`.bak` backup is kept):
+
+```toml
+version = 2
+
+[[mods]]
+id = "887302721"
+name = "Boat Mod"
+tags = ["vehicles"]
+
+[[mods]]
+id = "450814997"
+name = "CBA_A3"
+
+[[mods]]
+id = "463939057"
+role = "ignore"
+enabled = false
+```
+
+Fields per mod:
+
+- `id` — Steam Workshop item ID (required)
+- `name` — display name, shown in sync output
+- `tags` — optional array of tags
+- `role` — `mod` (default) or `ignore`
+- `enabled` — set `false` to exclude without deleting the entry
+- `dependencies` — optional array of Workshop IDs
+
+The legacy format (v1) is still accepted: one Workshop mod per line (URL
+or bare ID), with an optional tag after `#`. Mods under `[ignore]` are
+excluded (for example the base dependency set that is not repacked).
 
 ```text
 https://steamcommunity.com/sharedfiles/filedetails/?id=887302721 # Boat Mod
