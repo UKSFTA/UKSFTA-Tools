@@ -52,10 +52,12 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Documentation
 
-- Add auto-generated changelog and repo hygiene files
+- Add auto-generated changelog and repo hygiene files (#49)
 
 
 ### Fixed
+
+- Sync changelog after squash merge and restore CI check
 
 - Escape untrusted mod names in HTML and TOML output (#36)
 
