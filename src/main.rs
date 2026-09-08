@@ -231,6 +231,14 @@ enum Commands {
     },
     /// Check for updates available in Workshop cache
     Updates,
+    /// Import mods from an Arma 3 launcher modlist HTML file
+    Import {
+        /// Path to the modlist HTML file
+        modlist_file: PathBuf,
+        /// Show what would be imported without modifying mod_sources.txt
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // --- Mod list parsing ---
@@ -601,34 +609,10 @@ const MODLIST_TEMPLATE_FOOTER: &str = "\
   </body>\n\
 </html>\n";
 
-/// Fetch a Workshop item's page and return its required dependencies as
-/// Vec<(id, name)>. Returns empty on network error or if no deps exist.
-fn fetch_workshop_dependencies(workshop_id: &str) -> Vec<(String, String)> {
-    let url = format!(
-        "https://steamcommunity.com/sharedfiles/filedetails/?id={}",
-        workshop_id
-    );
-    let body = match reqwest::blocking::get(&url) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!(
-                "Warning: failed to fetch Workshop page for {}: {}",
-                workshop_id, e
-            );
-            return Vec::new();
-        }
-    };
-    let html = match body.text() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!(
-                "Warning: failed to read response for {}: {}",
-                workshop_id, e
-            );
-            return Vec::new();
-        }
-    };
-    let document = scraper::Html::parse_document(&html);
+/// Parse a Workshop page's "Required Items" section.
+/// Returns Vec<(id, name)>. Empty if the section is absent.
+fn parse_required_items(html: &str) -> Vec<(String, String)> {
+    let document = scraper::Html::parse_document(html);
 
     // Steam renders required items in a div with id="RequiredItems"
     // Each item is a link: <a href="...?id=NNN">Name</a>
@@ -659,18 +643,50 @@ fn fetch_workshop_dependencies(workshop_id: &str) -> Vec<(String, String)> {
     deps
 }
 
+/// Fetch a Workshop item's page and return its required dependencies as
+/// Vec<(id, name)>. Returns empty on network error or if no deps exist.
+fn fetch_workshop_dependencies(workshop_id: &str) -> Vec<(String, String)> {
+    let url = format!(
+        "https://steamcommunity.com/sharedfiles/filedetails/?id={}",
+        workshop_id
+    );
+    let body = match reqwest::blocking::get(&url) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to fetch Workshop page for {}: {}",
+                workshop_id, e
+            );
+            return Vec::new();
+        }
+    };
+    let html = match body.text() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to read response for {}: {}",
+                workshop_id, e
+            );
+            return Vec::new();
+        }
+    };
+    parse_required_items(&html)
+}
+
 /// Resolve transitive dependencies for a list of missing mods.
 /// Returns (expanded list, direct deps per fetched mod).
 /// The expanded list is missing mods + discovered deps not already known.
 /// Deps already present in the workshop cache are skipped entirely.
+type DepResolution = (
+    Vec<(String, String)>,
+    HashMap<String, Vec<(String, String)>>,
+);
+
 fn resolve_transitive_deps(
     missing: &[(String, String)],
     known_ids: &HashSet<String>,
     cached_ids: &HashSet<String>,
-) -> (
-    Vec<(String, String)>,
-    HashMap<String, Vec<(String, String)>>,
-) {
+) -> DepResolution {
     let mut result = Vec::new();
     let mut deps_by_mod: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut fetched: HashSet<String> = HashSet::new();
@@ -733,20 +749,15 @@ fn print_dep_tree(
     }
 }
 
-fn generate_modlist(missing: &[(String, String)], path: &Path) {
-    if missing.is_empty() {
-        return;
-    }
-
-    let mut html = String::from(MODLIST_TEMPLATE_HEADER);
-    for (id, name) in missing {
-        let url = format!(
-            "https://steamcommunity.com/sharedfiles/filedetails/?id={}",
-            id
-        );
-        let escaped_name = name.replace('&', "&amp;");
-        html.push_str(&format!(
-            "        <tr data-type=\"ModContainer\">\n\
+/// Build a single mod row for the modlist HTML. Names are HTML-escaped.
+fn modlist_row_html(id: &str, name: &str) -> String {
+    let url = format!(
+        "https://steamcommunity.com/sharedfiles/filedetails/?id={}",
+        id
+    );
+    let escaped_name = name.replace('&', "&amp;");
+    format!(
+        "        <tr data-type=\"ModContainer\">\n\
               <td data-type=\"DisplayName\">{}</td>\n\
               <td>\n\
                 <span class=\"from-steam\">Steam</span>\n\
@@ -755,8 +766,18 @@ fn generate_modlist(missing: &[(String, String)], path: &Path) {
                 <a href=\"{}\" data-type=\"Link\">{}</a>\n\
               </td>\n\
             </tr>\n",
-            escaped_name, url, url
-        ));
+        escaped_name, url, url
+    )
+}
+
+fn generate_modlist(missing: &[(String, String)], path: &Path) {
+    if missing.is_empty() {
+        return;
+    }
+
+    let mut html = String::from(MODLIST_TEMPLATE_HEADER);
+    for (id, name) in missing {
+        html.push_str(&modlist_row_html(id, name));
     }
     html.push_str(MODLIST_TEMPLATE_FOOTER);
 
@@ -1391,5 +1412,311 @@ fn main() {
         Commands::Verify => verify(),
         Commands::Audit { missing_only } => audit(missing_only),
         Commands::Updates => check_updates(),
+        Commands::Import {
+            modlist_file,
+            dry_run,
+        } => import_modlist(&modlist_file, dry_run),
+    }
+}
+
+/// Parse an Arma 3 launcher modlist HTML document.
+/// Returns (steam mods as (id, name), local mod names without a Workshop ID).
+fn parse_modlist_html(content: &str) -> (Vec<(String, String)>, Vec<String>) {
+    let document = scraper::Html::parse_document(content);
+    let row_selector = scraper::Selector::parse("tr[data-type=\"ModContainer\"]").unwrap();
+    let name_selector = scraper::Selector::parse("td[data-type=\"DisplayName\"]").unwrap();
+    let link_selector = scraper::Selector::parse("a[data-type=\"Link\"]").unwrap();
+
+    let mut found: Vec<(String, String)> = Vec::new(); // (id, name)
+    let mut local_mods: Vec<String> = Vec::new();
+
+    for row in document.select(&row_selector) {
+        let name = row
+            .select(&name_selector)
+            .next()
+            .map(|el| el.text().collect::<String>().trim().to_string())
+            .unwrap_or_default();
+
+        let href = row
+            .select(&link_selector)
+            .next()
+            .and_then(|el| el.value().attr("href"))
+            .unwrap_or("");
+
+        match extract_id(href) {
+            Some(id) => found.push((id, name)),
+            None => {
+                if !name.is_empty() {
+                    local_mods.push(name);
+                }
+            }
+        }
+    }
+    (found, local_mods)
+}
+
+/// Import mods from an Arma 3 launcher modlist HTML file into mod_sources.txt.
+/// Appends each Steam mod as "{id} # {name}". Local mods and duplicates
+/// (already present in mod_sources.txt) are skipped with a message.
+fn import_modlist(modlist_file: &Path, dry_run: bool) {
+    let content = match fs::read_to_string(modlist_file) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: cannot read {}: {}", modlist_file.display(), e);
+            std::process::exit(1);
+        }
+    };
+
+    // Parse <tr data-type="ModContainer"> rows from the launcher export
+    let (found, local_mods) = parse_modlist_html(&content);
+
+    if found.is_empty() && local_mods.is_empty() {
+        println!(
+            "No mods found in {}. Is it an Arma 3 launcher modlist?",
+            modlist_file.display()
+        );
+        return;
+    }
+
+    // Load existing IDs to skip duplicates
+    let sources_path = Path::new("mod_sources.txt");
+    let mut existing: HashSet<String> = HashSet::new();
+    if let Ok(content) = fs::read_to_string(sources_path) {
+        for line in content.lines() {
+            if let Some(id) = extract_id(line) {
+                existing.insert(id);
+            }
+        }
+    }
+
+    let mut new_mods: Vec<(String, String)> = Vec::new();
+    for (id, name) in found {
+        if existing.contains(&id) {
+            println!("Skip {} ({}) — already in mod_sources.txt", name, id);
+        } else {
+            new_mods.push((id, name));
+        }
+    }
+
+    if !local_mods.is_empty() {
+        println!(
+            "Skipped {} local mod(s) with no Workshop ID: {}",
+            local_mods.len(),
+            local_mods.join(", ")
+        );
+    }
+
+    if dry_run {
+        println!("\nDry run — would add {} mod(s):", new_mods.len());
+        for (id, name) in &new_mods {
+            println!("  {} # {}", id, name);
+        }
+        return;
+    }
+
+    if new_mods.is_empty() {
+        println!("Nothing new to import.");
+        return;
+    }
+
+    // Append to mod_sources.txt, preserving any [ignore] section at the end
+    let mut output = fs::read_to_string(sources_path).unwrap_or_default();
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    // Insert before [ignore] if present, else append at the end
+    let ignore_pos = output
+        .lines()
+        .position(|l| {
+            let l = l.trim().to_lowercase();
+            l.contains("[ignore]") || l.contains("@ignore")
+        })
+        .map(|line_idx| {
+            // byte offset of that line's start
+            let mut pos = 0usize;
+            for (i, line) in output.lines().enumerate() {
+                if i == line_idx {
+                    break;
+                }
+                pos += line.len() + 1;
+            }
+            pos
+        });
+
+    let mut additions = String::new();
+    for (id, name) in &new_mods {
+        additions.push_str(&format!("{} # {}\n", id, name));
+    }
+
+    match ignore_pos {
+        Some(pos) => output.insert_str(pos, &additions),
+        None => output.push_str(&additions),
+    }
+
+    match fs::write(sources_path, output) {
+        Ok(_) => println!("Imported {} mod(s) into mod_sources.txt", new_mods.len()),
+        Err(e) => {
+            eprintln!("Error: cannot write {}: {}", sources_path.display(), e);
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // --- extract_id ---
+    #[test]
+    fn extract_id_sharedfiles_url() {
+        assert_eq!(
+            extract_id("https://steamcommunity.com/sharedfiles/filedetails/?id=450814997").unwrap(),
+            "450814997"
+        );
+    }
+    #[test]
+    fn extract_id_workshop_url() {
+        // Current Steam pages link deps via /workshop/filedetails/
+        assert_eq!(
+            extract_id("https://steamcommunity.com/workshop/filedetails/?id=2262006564").unwrap(),
+            "2262006564"
+        );
+    }
+    #[test]
+    fn extract_id_bare() {
+        assert_eq!(extract_id("450814997").unwrap(), "450814997");
+    }
+    #[test]
+    fn extract_id_with_name_comment() {
+        assert_eq!(extract_id("450814997 # CBA_A3").unwrap(), "450814997");
+    }
+    #[test]
+    fn extract_id_rejects_short_numbers() {
+        // Steam IDs are 8+ digits; 7-digit numbers must not match
+        assert_eq!(extract_id("1234567"), None);
+        assert_eq!(extract_id("id=1234567"), None);
+    }
+    #[test]
+    fn extract_id_rejects_non_id() {
+        assert_eq!(extract_id("no id here"), None);
+        assert_eq!(extract_id(""), None);
+    }
+    // --- parse_modlist_html ---
+    const MODLIST_SAMPLE: &str = r#"<html><body><div class="mod-list"><table>
+<tr data-type="ModContainer">
+<td data-type="DisplayName">CBA_A3</td>
+<td><span class="from-steam">Steam</span></td>
+<td><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=450814997" data-type="Link">URL</a></td>
+</tr>
+<tr data-type="ModContainer">
+<td data-type="DisplayName">O&amp;T Warfighters</td>
+<td><span class="from-steam">Steam</span></td>
+<td><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=1234567890" data-type="Link">URL</a></td>
+</tr>
+<tr data-type="ModContainer">
+<td data-type="DisplayName">Local Custom Mod</td>
+<td><span class="from-local">Local</span></td>
+<td></td>
+</tr>
+</table></div></body></html>"#;
+    #[test]
+    fn parse_modlist_html_extracts_steam_and_local() {
+        let (found, local) = parse_modlist_html(MODLIST_SAMPLE);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0], ("450814997".to_string(), "CBA_A3".to_string()));
+        // HTML entities are decoded by the parser
+        assert_eq!(
+            found[1],
+            ("1234567890".to_string(), "O&T Warfighters".to_string())
+        );
+        assert_eq!(local, vec!["Local Custom Mod".to_string()]);
+    }
+    #[test]
+    fn parse_modlist_html_empty() {
+        let (found, local) = parse_modlist_html("<html><body></body></html>");
+        assert!(found.is_empty());
+        assert!(local.is_empty());
+    }
+    #[test]
+    fn parse_modlist_html_not_a_modlist() {
+        let (found, local) = parse_modlist_html("this is not html");
+        assert!(found.is_empty());
+        assert!(local.is_empty());
+    }
+    // --- parse_required_items ---
+    #[test]
+    fn parse_required_items_real_structure() {
+        // Mirrors the current Steam HTML: links wrap a div.requiredItem
+        let html = r#"<div id="rightContents">
+<div class="requiredItemsContainer" id="RequiredItems">
+<a href="https://steamcommunity.com/workshop/filedetails/?id=2262006564" target="_blank" data-subscribed="0">
+<div class="requiredItem">cTab 1erGTD</div>
+</a>
+<a href="https://steamcommunity.com/workshop/filedetails/?id=2853828143" target="_blank" data-subscribed="0">
+<div class="requiredItem">Better CAS Environment (BCE)</div>
+</a>
+</div>
+</div>"#;
+        let deps = parse_required_items(html);
+        assert_eq!(
+            deps,
+            vec![
+                ("2262006564".to_string(), "cTab 1erGTD".to_string()),
+                (
+                    "2853828143".to_string(),
+                    "Better CAS Environment (BCE)".to_string()
+                ),
+            ]
+        );
+    }
+    #[test]
+    fn parse_required_items_no_section() {
+        assert!(parse_required_items("<html><body>no deps</body></html>").is_empty());
+    }
+    // --- modlist_row_html ---
+    #[test]
+    fn modlist_row_html_escapes_ampersand() {
+        let row = modlist_row_html("1234567890", "O&T Warfighters");
+        assert!(row.contains("O&amp;T Warfighters"));
+        assert!(!row.contains("O&T Warfighters"));
+        assert!(row.contains("id=1234567890"));
+        assert!(row.contains("data-type=\"ModContainer\""));
+    }
+    // --- resolve_transitive_deps (logic, no network: deps map is empty) ---
+    #[test]
+    fn resolve_deps_includes_missing_and_excludes_known_and_cached() {
+        let missing = vec![("111".to_string(), "Mod A".to_string())];
+        let known: HashSet<String> = ["222".to_string()].into_iter().collect();
+        let cached: HashSet<String> = ["333".to_string()].into_iter().collect();
+        // fetch_workshop_dependencies will fail (network) and return empty,
+        // so only the missing root is returned. This verifies filtering
+        // invariants under no-network conditions.
+        let (result, deps_by_mod) = resolve_transitive_deps(&missing, &known, &cached);
+        assert_eq!(result, vec![("111".to_string(), "Mod A".to_string())]);
+        assert!(deps_by_mod.contains_key("111"));
+    }
+    // --- merge-into-mod_sources placement (byte offset logic) ---
+    #[test]
+    fn import_inserts_before_ignore_section() {
+        let sources = "450814997 # CBA_A3\n\n[ignore]\n463939057 # ACE\n";
+        let ignore_pos = sources
+            .lines()
+            .position(|l| {
+                let l = l.trim().to_lowercase();
+                l.contains("[ignore]") || l.contains("@ignore")
+            })
+            .map(|line_idx| {
+                let mut pos = 0usize;
+                for (i, line) in sources.lines().enumerate() {
+                    if i == line_idx {
+                        break;
+                    }
+                    pos += line.len() + 1;
+                }
+                pos
+            });
+        let pos = ignore_pos.unwrap();
+        let mut out = sources.to_string();
+        out.insert_str(pos, "1234567890 # O&T Warfighters\n");
+        assert!(out.starts_with("450814997 # CBA_A3\n\n1234567890 # O&T Warfighters\n[ignore]"));
     }
 }

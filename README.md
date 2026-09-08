@@ -36,6 +36,12 @@ uksfta audit --missing-only
 
 # Compare mods.lock timestamps against the Workshop cache
 uksfta updates
+
+# Import mods from an Arma 3 launcher modlist HTML file
+uksfta import ./my-modlist.html
+
+# Preview what would be imported without changing mod_sources.txt
+uksfta import ./my-modlist.html --dry-run
 ```
 
 ## Input Format
@@ -83,6 +89,24 @@ discover dependencies not listed in `mod_sources.txt`. Discovered
 dependencies are reported in the missing-mod warning and included in the
 generated modlist. This requires a network connection and adds a
 one-second delay per mod for rate limiting.
+
+## Importing a modlist
+
+Use `import` to add mods from an Arma 3 launcher preset file (HTML) to
+`mod_sources.txt`:
+
+```bash
+# Add all Steam mods from a shared modlist
+uksfta import ./my-modlist.html
+
+# Preview first — prints what would be added, changes nothing
+uksfta import ./my-modlist.html --dry-run
+```
+
+Each Steam mod is appended as `{id} # {name}`. Mods already present in
+`mod_sources.txt` (including the `[ignore]` section) are skipped. Local
+mods without a Workshop ID are skipped with a warning. New entries are
+inserted before the `[ignore]` section if one exists.
 
 ## Platforms
 

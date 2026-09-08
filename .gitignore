@@ -29,3 +29,6 @@ mod_sources.txt
 # System
 .DS_Store
 Thumbs.db
+# Agent tool state
+.omo/
+.opencode/
