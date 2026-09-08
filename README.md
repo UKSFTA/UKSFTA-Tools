@@ -46,7 +46,7 @@ uksfta investigate --online
 # Investigate all PBOs, including tracked ones
 uksfta investigate --all
 
-# Show the installed version and check for updates
+# Show the installed version and force a fresh update check
 uksfta version
 
 # Import mods from an Arma 3 launcher modlist HTML file
@@ -202,6 +202,13 @@ searches instead of re-hitting the Workshop.
 
 The `identify` command uses the same byte-hash matching, so its origin
 reports are now deterministic too.
+
+## Update checking
+
+Every command checks for a newer release at most once per day and prints
+a notice when one exists. The check is cached in `.uksfta/` so normal
+commands stay fast and work offline. `uksfta version` forces a fresh
+check and prints the install one-liner for your platform.
 
 ## Platforms
 

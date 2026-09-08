@@ -2434,50 +2434,83 @@ fn check_updates() {
 
 /// Show the installed version and check GitHub for a newer release.
 /// Prints update instructions matching the install method in use.
-fn version() {
-    let current = env!("CARGO_PKG_VERSION");
-    println!("uksfta {}", current);
-
-    // Query the latest release tag from GitHub (no key required)
+/// Query the latest release tag from GitHub (no key required).
+fn latest_release_tag() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("Failed to build HTTP client");
 
-    let body = match client
+    let body = client
         .get("https://api.github.com/repos/UKSFTA/UKSFTA-Tools/releases/latest")
         .header("User-Agent", "uksfta")
         .send()
-    {
-        Ok(r) => match r.text() {
-            Ok(t) => t,
-            Err(e) => {
-                println!("Could not check for updates: {}", e);
-                return;
-            }
-        },
-        Err(e) => {
-            println!("Could not check for updates: {}", e);
-            println!("Offline or no access to GitHub.");
-            return;
-        }
-    };
+        .ok()?
+        .text()
+        .ok()?;
 
     #[derive(serde::Deserialize)]
     struct Release {
         tag_name: String,
     }
-    let release: Release = match serde_json::from_str(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            println!("Could not parse update response: {}", e);
+    let release: Release = serde_json::from_str(&body).ok()?;
+    Some(release.tag_name)
+}
+
+/// Print an update notice if a newer release exists. When `force` is false
+/// (the automatic check on every command), the GitHub API is queried at
+/// most once per day, using a timestamped marker in .uksfta/ so normal
+/// commands stay fast and offline-friendly.
+fn check_for_updates(force: bool) {
+    let current = env!("CARGO_PKG_VERSION");
+    let marker = Path::new(".uksfta").join("last-update-check");
+
+    if !force {
+        // Skip the API call if we already checked today
+        if let Ok(mtime) = fs::metadata(&marker).and_then(|m| m.modified()) {
+            if let Ok(elapsed) = mtime.elapsed() {
+                if elapsed < std::time::Duration::from_secs(24 * 3600) {
+                    return;
+                }
+            }
+        }
+    }
+
+    let latest = match latest_release_tag() {
+        Some(t) => t,
+        None => return, // offline or error: stay silent on auto-check
+    };
+
+    // Record the check (only when the API succeeded)
+    if let Some(dir) = marker.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = fs::write(&marker, b"");
+
+    if is_outdated(current, latest.trim_start_matches('v')) {
+        println!(
+            "\nA new version is available: v{} (you have v{})",
+            latest.trim_start_matches('v'),
+            current
+        );
+        println!("Run 'uksfta version' for update instructions.");
+    }
+}
+
+/// Show the installed version and check GitHub for a newer release.
+fn version() {
+    let current = env!("CARGO_PKG_VERSION");
+    println!("uksfta {}", current);
+
+    let latest = match latest_release_tag() {
+        Some(t) => t.trim_start_matches('v').to_string(),
+        None => {
+            println!("Could not check for updates (offline or no access to GitHub).");
             return;
         }
     };
 
-    // Tags are "vX.Y.Z"; strip the leading 'v' for comparison
-    let latest = release.tag_name.trim_start_matches('v');
-    if !is_outdated(current, latest) {
+    if !is_outdated(current, &latest) {
         println!("You are up to date.");
         return;
     }
@@ -2523,6 +2556,12 @@ fn is_outdated(installed: &str, latest: &str) -> bool {
 
 fn main() {
     let cli = Cli::parse();
+
+    // Daily update notice on every command (skips network if checked
+    // within 24h). The explicit `version` command forces a fresh check.
+    if !matches!(cli.command, Commands::Version) {
+        check_for_updates(false);
+    }
 
     match cli.command {
         Commands::Sync {
@@ -3366,5 +3405,13 @@ name = "CBA_A3"
     #[test]
     fn is_outdated_newer_installed_is_false() {
         assert!(!is_outdated("0.3.0", "0.2.0"));
+    }
+
+    #[test]
+    fn is_outdated_handles_v_prefix_and_trimmed() {
+        // The auto-check passes trimmed tags; version passes raw
+        assert!(!is_outdated("0.4.0", "0.4.0"));
+        assert!(is_outdated("0.3.0", "0.4.0"));
+        assert!(is_outdated("0.3.0", "0.4.1"));
     }
 }
