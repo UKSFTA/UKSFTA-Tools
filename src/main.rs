@@ -769,6 +769,15 @@ name = "CBA_A3"
         assert_eq!(urlencode("ACE"), "ACE");
     }
 
+    #[test]
+    fn urlencode_pairs_encodes_key_values() {
+        let pairs = [("search_text", "Zulu Custom"), ("numperpage", "10")];
+        assert_eq!(
+            urlencode_pairs(&pairs),
+            "search_text=Zulu%20Custom&numperpage=10"
+        );
+    }
+
     /// Write a fake PBO whose packed config contains the given text.
     fn write_pbo_with_config(path: &Path, config: &str) {
         let mut data = b"\x00sreV\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();

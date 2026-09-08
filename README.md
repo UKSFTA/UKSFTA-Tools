@@ -196,6 +196,13 @@ tokens match mod titles far better than PBO filenames. This is a
 best-effort search — Workshop text search is imprecise, so candidates
 are shown for verification rather than asserted.
 
+If the `STEAM_API_KEY` environment variable is set, `--online` uses
+Steam's official `QueryFiles` API instead of scraping the browse page.
+The keyed search ranks results properly and surfaces mods the page
+scrape buries (for example `Zulu Custom`). The key is read from the
+environment only and never embedded in the binary. Without a key the
+tool falls back to the keyless browse-page scrape.
+
 Search results are cached locally in `.uksfta/identities.json`
 (gitignored, never pushed) so repeat investigations reuse prior
 searches instead of re-hitting the Workshop.

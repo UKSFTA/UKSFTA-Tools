@@ -314,8 +314,13 @@ pub fn investigate(all: bool, online: bool) {
                         println!("  {} (search \"{}\"): from cache", name, term);
                         (cached.clone(), true)
                     } else {
-                        let candidates = search_workshop(&term);
-                        let confirmed = batch_workshop_titles(&candidates, &api_client);
+                        // Prefer the keyed QueryFiles API when STEAM_API_KEY
+                        // is set (returns titles directly); fall back to
+                        // the keyless browse-page scrape + batch confirm.
+                        let confirmed = search_workshop_api(&term).unwrap_or_else(|| {
+                            let candidates = search_workshop(&term);
+                            batch_workshop_titles(&candidates, &api_client)
+                        });
                         cache.insert(term.clone(), confirmed.clone());
                         save_identity_cache(&cache);
                         (confirmed, false)
@@ -373,6 +378,71 @@ fn search_workshop(query: &str) -> Vec<String> {
         }
     }
     ids
+}
+
+/// Search the Workshop via the keyed IPublishedFileService/QueryFiles API.
+/// Requires STEAM_API_KEY in the environment. Returns (id, title) pairs
+/// directly (no separate confirm call needed). None when the key is
+/// absent or the API call fails, so callers can fall back to the scrape.
+///
+/// The key must never be embedded in the binary or repo — it is read
+/// from the environment only. QueryFiles search_text matches the item's
+/// title or description (the only text search Steam offers); it cannot
+/// search by file name or content.
+fn search_workshop_api(query: &str) -> Option<Vec<(String, String)>> {
+    let key = std::env::var("STEAM_API_KEY").ok()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("Failed to build HTTP client");
+
+    let params = [
+        ("key", key.as_str()),
+        ("format", "json"),
+        ("appid", "107410"),
+        ("numperpage", "10"),
+        ("query_type", "12"), // k_PublishedFileQueryType_RankedByTextSearch
+        ("return_short_description", "1"),
+        ("search_text", query),
+    ];
+    let url = format!(
+        "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/?{}",
+        urlencode_pairs(&params)
+    );
+
+    let body = client.get(&url).send().ok()?.text().ok()?;
+    #[derive(serde::Deserialize)]
+    struct ApiResponse {
+        response: ResponseInner,
+    }
+    #[derive(serde::Deserialize)]
+    struct ResponseInner {
+        publishedfiledetails: Vec<FileDetail>,
+    }
+    #[derive(serde::Deserialize)]
+    struct FileDetail {
+        publishedfileid: String,
+        #[serde(default)]
+        title: String,
+    }
+    let parsed: ApiResponse = serde_json::from_str(&body).ok()?;
+    Some(
+        parsed
+            .response
+            .publishedfiledetails
+            .into_iter()
+            .map(|d| (d.publishedfileid, d.title))
+            .collect(),
+    )
+}
+
+/// Percent-encode a list of (key, value) pairs for a query string.
+pub fn urlencode_pairs(pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, urlencode(v)))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 /// Query the Steam Workshop API for each investigated mod's visibility.
