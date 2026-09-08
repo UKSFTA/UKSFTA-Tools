@@ -1373,6 +1373,7 @@ fn identify() {
     }
 
     println!("PBO Origins:");
+    let index = build_pbo_index(&mod_dirs);
     if let Ok(entries) = fs::read_dir(addons_dir) {
         for entry in entries.flatten() {
             if entry
@@ -1382,9 +1383,15 @@ fn identify() {
                 .unwrap_or(false)
             {
                 let name = entry.file_name().to_string_lossy().to_string();
-                let origin = resolve_pbo_origin(&entry.path(), &mod_dirs)
-                    .map(|r| r.id)
-                    .unwrap_or_else(|| "Unknown".to_string());
+                let target_prefix = pbo_prefix(&entry.path());
+                let candidates = index
+                    .get(name.as_str())
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let origin =
+                    resolve_pbo_from_index(&entry.path(), candidates, target_prefix.as_deref())
+                        .map(|r| r.id)
+                        .unwrap_or_else(|| "Unknown".to_string());
                 println!("  {} -> Workshop {}", name, origin);
             }
         }
@@ -1499,6 +1506,21 @@ struct ResolvedOrigin {
     is_pack: bool,
 }
 
+/// Build a single-pass index of every PBO name to the mod folders that
+/// contain it. This is the expensive cache walk; resolving then becomes
+/// in-memory lookups instead of re-scanning folders per PBO.
+fn build_pbo_index(mod_dirs: &[ModDir]) -> HashMap<String, Vec<&ModDir>> {
+    let mut index: HashMap<String, Vec<&ModDir>> = HashMap::new();
+    for dir in mod_dirs {
+        for pbo in &dir.pbos {
+            if let Some(name) = pbo.file_name().and_then(|n| n.to_str()) {
+                index.entry(name.to_string()).or_default().push(dir);
+            }
+        }
+    }
+    index
+}
+
 /// Match a PBO against the Workshop cache and arbitrate its origin.
 /// Primary signal: the PBO header prefix, which identifies the original
 /// addon and survives re-packing. Byte-hash is a fallback for PBOs
@@ -1508,40 +1530,35 @@ struct ResolvedOrigin {
 /// distinct prefix roots: a standalone mod (e.g. ACE) has one root, while
 /// an aggregate pack spans many. This steers the result to the original
 /// owner mod over any pack that bundled a copy.
-fn resolve_pbo_origin(pbo_path: &Path, mod_dirs: &[ModDir]) -> Option<ResolvedOrigin> {
+///
+/// `candidates` is the prebuilt per-name folder list from the index.
+fn resolve_pbo_from_index(
+    pbo_path: &Path,
+    candidates: &[&ModDir],
+    target_prefix: Option<&str>,
+) -> Option<ResolvedOrigin> {
     let pbo_name = pbo_path.file_name()?.to_string_lossy().to_string();
-    let target_prefix = pbo_prefix(pbo_path);
-    let target_hash = file_sha256(pbo_path);
 
-    // Collect same-named candidate PBOs across all mod folders
-    let mut candidates: Vec<&ModDir> = Vec::new();
-    for dir in mod_dirs {
-        if dir.pbos.iter().any(|pbo| {
-            pbo.file_name()
-                .map(|n| n == pbo_name.as_str())
-                .unwrap_or(false)
-        }) {
-            candidates.push(dir);
-        }
-    }
-
-    // Score each candidate. Prefix match is the strongest signal; byte
-    // hash confirms identity when the prefix is unavailable.
+    // Score each candidate. Prefix match is the primary signal and is
+    // cheap (512-byte header read). Byte-hash is a fallback used only
+    // when the prefix path fails, since hashing reads the whole PBO.
     let mut scored: Vec<(&ModDir, u8)> = Vec::new();
-    for dir in &candidates {
+    for dir in candidates {
         let cached_path = dir.pbos.iter().find(|pbo| {
             pbo.file_name()
                 .map(|n| n == pbo_name.as_str())
                 .unwrap_or(false)
         })?;
         let mut score = 0u8;
-        if let Some(target) = &target_prefix {
-            if pbo_prefix(cached_path).as_ref() == Some(target) {
+        if let Some(target) = target_prefix {
+            if pbo_prefix(cached_path).as_deref() == Some(target) {
                 score += 2; // same canonical addon prefix
             }
-        } else if let Some(target) = &target_hash {
-            if file_sha256(cached_path) == Some(target.clone()) {
-                score += 1; // byte-identical fallback
+        } else {
+            // No prefix available: fall back to byte identity.
+            let target_hash = file_sha256(pbo_path)?;
+            if file_sha256(cached_path) == Some(target_hash) {
+                score += 1;
             }
         }
         if score > 0 {
@@ -1570,7 +1587,7 @@ fn resolve_pbo_origin(pbo_path: &Path, mod_dirs: &[ModDir]) -> Option<ResolvedOr
 
     Some(ResolvedOrigin {
         id: best.id.clone(),
-        prefix: target_prefix,
+        prefix: target_prefix.map(|s| s.to_string()),
         is_pack,
     })
 }
@@ -1635,10 +1652,18 @@ fn investigate(all: bool, online: bool) {
         return;
     }
 
-    // Match each untracked PBO against the cache and arbitrate the origin
+    // Build a single-pass index of every cached PBO name to its folders
+    let index = build_pbo_index(&mod_dirs);
+
+    // Match each untracked PBO against the index and arbitrate the origin
     for (pbo_name, origin) in &mut results {
         let pbo_path = addons_dir.join(pbo_name.as_str());
-        *origin = resolve_pbo_origin(&pbo_path, &mod_dirs);
+        let target_prefix = pbo_prefix(&pbo_path);
+        let candidates = index
+            .get(pbo_name.as_str())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        *origin = resolve_pbo_from_index(&pbo_path, candidates, target_prefix.as_deref());
     }
 
     // Report
@@ -2668,13 +2693,17 @@ name = "CBA_A3"
                 root_count: 1,
             },
         ];
+        let index = build_pbo_index(&mod_dirs);
 
         let target = dir.join("common.pbo");
         fs::write(&target, content).unwrap();
 
         // Arbitration must pick the standalone mod (111) with fewer roots
+        let candidates = index.get("common.pbo").map(|v| v.as_slice()).unwrap_or(&[]);
         assert_eq!(
-            resolve_pbo_origin(&target, &mod_dirs).unwrap().id,
+            resolve_pbo_from_index(&target, candidates, pbo_prefix(&target).as_deref())
+                .unwrap()
+                .id,
             "111".to_string()
         );
 
@@ -2698,7 +2727,12 @@ name = "CBA_A3"
             pbos: find_pbos(&dir.join("111")),
             root_count: 1,
         }];
-        assert_eq!(resolve_pbo_origin(&target, &mod_dirs), None);
+        let index = build_pbo_index(&mod_dirs);
+        let candidates = index.get("target.pbo").map(|v| v.as_slice()).unwrap_or(&[]);
+        assert_eq!(
+            resolve_pbo_from_index(&target, candidates, pbo_prefix(&target).as_deref()),
+            None
+        );
 
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -2775,11 +2809,14 @@ name = "CBA_A3"
                 root_count: 1,
             },
         ];
+        let index = build_pbo_index(&mod_dirs);
 
         let target = dir.join("common.pbo");
         write_pbo(&target, "z\\ace\\addons\\common", b"version-a");
 
-        let origin = resolve_pbo_origin(&target, &mod_dirs).unwrap();
+        let candidates = index.get("common.pbo").map(|v| v.as_slice()).unwrap_or(&[]);
+        let origin =
+            resolve_pbo_from_index(&target, candidates, pbo_prefix(&target).as_deref()).unwrap();
         assert_eq!(origin.id, "111".to_string());
         assert!(!origin.is_pack);
 
