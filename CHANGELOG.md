@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] - 2026-09-08
 
 ### Added
 
@@ -70,7 +70,7 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Miscellaneous
 
-- Bump version to 0.3.0 for release
+- Bump version to 0.3.0 for release (#52)
 
 - Bump version to 0.2.0 for release (#43)
 
