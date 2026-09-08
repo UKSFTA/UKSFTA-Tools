@@ -231,6 +231,14 @@ enum Commands {
     },
     /// Check for updates available in Workshop cache
     Updates,
+    /// Import mods from an Arma 3 launcher modlist HTML file
+    Import {
+        /// Path to the modlist HTML file
+        modlist_file: PathBuf,
+        /// Show what would be imported without modifying mod_sources.txt
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // --- Mod list parsing ---
@@ -1391,5 +1399,145 @@ fn main() {
         Commands::Verify => verify(),
         Commands::Audit { missing_only } => audit(missing_only),
         Commands::Updates => check_updates(),
+        Commands::Import {
+            modlist_file,
+            dry_run,
+        } => import_modlist(&modlist_file, dry_run),
+    }
+}
+
+/// Import mods from an Arma 3 launcher modlist HTML file into mod_sources.txt.
+/// Appends each Steam mod as "{id} # {name}". Local mods and duplicates
+/// (already present in mod_sources.txt) are skipped with a message.
+fn import_modlist(modlist_file: &Path, dry_run: bool) {
+    let content = match fs::read_to_string(modlist_file) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: cannot read {}: {}", modlist_file.display(), e);
+            std::process::exit(1);
+        }
+    };
+
+    // Parse <tr data-type="ModContainer"> rows from the launcher export
+    let document = scraper::Html::parse_document(&content);
+    let row_selector = scraper::Selector::parse("tr[data-type=\"ModContainer\"]").unwrap();
+    let name_selector = scraper::Selector::parse("td[data-type=\"DisplayName\"]").unwrap();
+    let link_selector = scraper::Selector::parse("a[data-type=\"Link\"]").unwrap();
+
+    let mut found: Vec<(String, String)> = Vec::new(); // (id, name)
+    let mut local_mods: Vec<String> = Vec::new();
+
+    for row in document.select(&row_selector) {
+        let name = row
+            .select(&name_selector)
+            .next()
+            .map(|el| el.text().collect::<String>().trim().to_string())
+            .unwrap_or_default();
+
+        let href = row
+            .select(&link_selector)
+            .next()
+            .and_then(|el| el.value().attr("href"))
+            .unwrap_or("");
+
+        match extract_id(href) {
+            Some(id) => found.push((id, name)),
+            None => {
+                if !name.is_empty() {
+                    local_mods.push(name);
+                }
+            }
+        }
+    }
+
+    if found.is_empty() && local_mods.is_empty() {
+        println!(
+            "No mods found in {}. Is it an Arma 3 launcher modlist?",
+            modlist_file.display()
+        );
+        return;
+    }
+
+    // Load existing IDs to skip duplicates
+    let sources_path = Path::new("mod_sources.txt");
+    let mut existing: HashSet<String> = HashSet::new();
+    if let Ok(content) = fs::read_to_string(sources_path) {
+        for line in content.lines() {
+            if let Some(id) = extract_id(line) {
+                existing.insert(id);
+            }
+        }
+    }
+
+    let mut new_mods: Vec<(String, String)> = Vec::new();
+    for (id, name) in found {
+        if existing.contains(&id) {
+            println!("Skip {} ({}) — already in mod_sources.txt", name, id);
+        } else {
+            new_mods.push((id, name));
+        }
+    }
+
+    if !local_mods.is_empty() {
+        println!(
+            "Skipped {} local mod(s) with no Workshop ID: {}",
+            local_mods.len(),
+            local_mods.join(", ")
+        );
+    }
+
+    if dry_run {
+        println!("\nDry run — would add {} mod(s):", new_mods.len());
+        for (id, name) in &new_mods {
+            println!("  {} # {}", id, name);
+        }
+        return;
+    }
+
+    if new_mods.is_empty() {
+        println!("Nothing new to import.");
+        return;
+    }
+
+    // Append to mod_sources.txt, preserving any [ignore] section at the end
+    let mut output = fs::read_to_string(sources_path).unwrap_or_default();
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    // Insert before [ignore] if present, else append at the end
+    let ignore_pos = output
+        .lines()
+        .position(|l| {
+            let l = l.trim().to_lowercase();
+            l.contains("[ignore]") || l.contains("@ignore")
+        })
+        .map(|line_idx| {
+            // byte offset of that line's start
+            let mut pos = 0usize;
+            for (i, line) in output.lines().enumerate() {
+                if i == line_idx {
+                    break;
+                }
+                pos += line.len() + 1;
+            }
+            pos
+        });
+
+    let mut additions = String::new();
+    for (id, name) in &new_mods {
+        additions.push_str(&format!("{} # {}\n", id, name));
+    }
+
+    match ignore_pos {
+        Some(pos) => output.insert_str(pos, &additions),
+        None => output.push_str(&additions),
+    }
+
+    match fs::write(sources_path, output) {
+        Ok(_) => println!("Imported {} mod(s) into mod_sources.txt", new_mods.len()),
+        Err(e) => {
+            eprintln!("Error: cannot write {}: {}", sources_path.display(), e);
+            std::process::exit(1);
+        }
     }
 }
