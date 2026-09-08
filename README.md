@@ -170,16 +170,26 @@ uksfta investigate --online
 uksfta investigate --all
 ```
 
-Each PBO is matched by **byte hash** against the local Workshop cache,
-then the winning mod's `meta.cpp` gives its Workshop ID and name. When a
-PBO exists in multiple cache folders (for example a standalone mod and an
-aggregate pack), the standalone mod is preferred. PBOs with no matching
-copy anywhere are reported as unknown — they may come from a deleted or
-private mod, or be manually placed.
+Each PBO is matched by its **header prefix** (the addon's canonical path,
+e.g. `z\ace\addons\grenades`) against the local Workshop cache, then the
+winning mod's `meta.cpp` gives its Workshop ID and name. The prefix
+survives re-packing, so a repacked copy still resolves to its original
+mod. When a PBO exists in multiple cache folders, the standalone mod is
+preferred over aggregate packs (identified by spanning many distinct
+prefix roots). PBOs with no matching copy are reported as unknown — they
+may come from a deleted or private mod, or be manually placed. A result
+whose best match is itself a pack is flagged `[pack: verify source]`.
 
 With `--online`, the tool calls Steam's `GetPublishedFileDetails` API
 (no key required) to report whether each origin still exists and is
 publicly visible. An item that is not publicly visible is either removed
+or set private — the API cannot tell the two apart without the owner
+authenticating. For PBOs with no local origin (or a pack-only origin),
+`--online` also searches the Workshop by the PBO's prefix and lists the
+top candidate mods with their titles, so you can trace where a repacked
+or deleted mod's content came from. This is a best-effort search —
+Workshop text search is imprecise, so candidates are shown for
+verification rather than asserted.
 or set private — the API cannot tell the two apart without the owner
 authenticating.
 

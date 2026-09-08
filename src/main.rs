@@ -1499,7 +1499,7 @@ fn pbo_prefix(path: &Path) -> Option<String> {
 
 /// The resolved origin of a PBO: the Workshop ID plus the prefix that
 /// identified it, and whether the match was itself an aggregate pack.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 struct ResolvedOrigin {
     id: String,
     prefix: Option<String>,
@@ -1709,8 +1709,206 @@ fn investigate(all: bool, online: bool) {
     }
 
     if online {
-        check_workshop_visibility(results);
+        check_workshop_visibility(results.clone());
+
+        // For PBOs with no local origin OR whose origin is itself an aggregate
+        // pack, search the Workshop by prefix and report the best candidate
+        // matches. This is a best-effort search: Workshop text search is
+        // imprecise, so candidates are shown for the user to verify rather
+        // than asserted.
+        let searchable: Vec<(String, String)> = results
+            .iter()
+            .filter(|(_, origin)| match origin {
+                None => true,
+                Some(o) => o.is_pack,
+            })
+            .map(|(name, _)| {
+                let prefix = pbo_prefix(&addons_dir.join(name)).unwrap_or_else(|| name.clone());
+                (name.clone(), prefix)
+            })
+            .collect();
+
+        if !searchable.is_empty() {
+            println!(
+                "\nSearching Workshop for {} PBO(s) whose origin is unknown or a pack...",
+                searchable.len()
+            );
+            let mut searched = HashSet::new();
+            let api_client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .expect("Failed to build HTTP client");
+            for (name, prefix) in searchable {
+                let term = search_term_from_prefix(&prefix);
+                if searched.contains(&term) {
+                    continue;
+                }
+                searched.insert(term.clone());
+                let candidates = search_workshop(&term);
+                if candidates.is_empty() {
+                    println!("  {}: no candidates for \"{}\"", name, term);
+                } else {
+                    // Confirm the top candidates' titles via the batch API
+                    // so the user can judge relevance at a glance.
+                    let titles = batch_workshop_titles(&candidates, &api_client);
+                    let shown = if titles.is_empty() {
+                        candidates
+                            .iter()
+                            .take(3)
+                            .map(|c| {
+                                format!(
+                                    "https://steamcommunity.com/sharedfiles/filedetails/?id={}",
+                                    c
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        titles
+                            .iter()
+                            .take(3)
+                            .map(|(id, title)| format!("{} ({})", title, id))
+                            .collect::<Vec<_>>()
+                    };
+                    println!(
+                        "  {} (prefix \"{}\"): {} candidate(s) — {}",
+                        name,
+                        prefix,
+                        candidates.len(),
+                        shown.join(", ")
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1100));
+            }
+        }
     }
+
+    /// Batch-confirm a list of Workshop item IDs via the keyless
+    /// GetPublishedFileDetails API. Returns (id, title) pairs for the items
+    /// that exist. Empty on network or parse failure.
+    fn batch_workshop_titles(
+        ids: &[String],
+        client: &reqwest::blocking::Client,
+    ) -> Vec<(String, String)> {
+        let mut form = String::from("itemcount=");
+        form.push_str(&ids.len().to_string());
+        for (i, id) in ids.iter().enumerate() {
+            form.push_str(&format!("&publishedfileids[{}]={}", i, id));
+        }
+        let body = match client
+            .post("https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(form)
+            .send()
+            .ok()
+            .and_then(|r| r.text().ok())
+        {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+
+        #[derive(serde::Deserialize)]
+        struct ApiResponse {
+            response: ResponseInner,
+        }
+        #[derive(serde::Deserialize)]
+        struct ResponseInner {
+            publishedfiledetails: Vec<FileDetail>,
+        }
+        #[derive(serde::Deserialize)]
+        struct FileDetail {
+            publishedfileid: String,
+            result: u32,
+            #[serde(default)]
+            title: String,
+        }
+
+        let parsed: ApiResponse = match serde_json::from_str(&body) {
+            Ok(p) => p,
+            Err(_) => return Vec::new(),
+        };
+        parsed
+            .response
+            .publishedfiledetails
+            .into_iter()
+            .filter(|d| d.result == 1)
+            .map(|d| (d.publishedfileid, d.title))
+            .collect()
+    }
+}
+
+/// Derive a Workshop search term from a PBO prefix. The prefix is the
+/// addon's canonical path (e.g. "TFL_Headgear" or "z\ace\addons\grenades").
+/// The most distinctive token is used: for a bare prefix the first
+/// underscore-separated token; for a namespaced prefix the root before
+/// the first backslash. Short distinctive tokens (TFL, UKAF,
+/// NAVSPECWARGRU) are what Workshop search actually matches on.
+fn search_term_from_prefix(prefix: &str) -> String {
+    // Split the namespace: for "z\ace\addons\grenades" the parts are
+    // z, ace, addons, grenades. The mod identity is usually the second
+    // component ("ace"); the first ("z") is a generic convention.
+    let parts: Vec<&str> = prefix.split('\\').collect();
+    let candidate = if parts.len() >= 2 {
+        // "z\ace" -> "ace"; skip a too-short first component
+        if parts[0].len() < 3 && parts[1].len() >= 3 {
+            parts[1]
+        } else {
+            parts[0]
+        }
+    } else {
+        parts[0]
+    };
+    let first = candidate.split('_').next().unwrap_or(candidate);
+    // Use the first underscore token when it is a plausible mod identity;
+    // otherwise fall back to the full candidate. No upper cap: mod names
+    // like NAVSPECWARGRU2 legitimately exceed a short token limit.
+    if first.len() >= 3 {
+        first.to_string()
+    } else {
+        candidate.to_string()
+    }
+}
+
+/// Search the Steam Workshop browse page for a query and return candidate
+/// item IDs. Returns an empty vec on network or parse failure.
+fn search_workshop(query: &str) -> Vec<String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("Failed to build HTTP client");
+    let url = format!(
+        "https://steamcommunity.com/workshop/browse/?appid=107410&searchtext={}",
+        urlencode(query)
+    );
+    let html = match client.get(&url).send().ok().and_then(|r| r.text().ok()) {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+    // The browse page links items as filedetails/?id=NNN. Deduplicate.
+    let mut ids = Vec::new();
+    for id in html.split("filedetails/?id=").skip(1) {
+        let id: String = id.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !id.is_empty() && !ids.contains(&id) {
+            ids.push(id);
+            if ids.len() >= 10 {
+                break;
+            }
+        }
+    }
+    ids
+}
+
+/// Percent-encode a query string for the Workshop browse URL.
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 /// Query the Steam Workshop API for each investigated mod's visibility.
@@ -2824,6 +3022,28 @@ name = "CBA_A3"
     }
 
     // --- version comparison ---
+
+    #[test]
+    fn search_term_from_prefix_uses_distinctive_token() {
+        // Bare prefix: first underscore token is the mod identity
+        assert_eq!(search_term_from_prefix("TFL_Headgear"), "TFL");
+        assert_eq!(
+            search_term_from_prefix("NAVSPECWARGRU2_TACDEV"),
+            "NAVSPECWARGRU2"
+        );
+        // Namespaced prefix: second component is the mod identity
+        assert_eq!(search_term_from_prefix("z\\ace\\addons\\grenades"), "ace");
+        // Too-generic root falls back to the full root
+        assert_eq!(search_term_from_prefix("z"), "z");
+        assert_eq!(search_term_from_prefix("x\\zen\\addons\\ai"), "zen");
+    }
+
+    #[test]
+    fn urlencode_encodes_spaces_and_symbols() {
+        assert_eq!(urlencode("TFL Headgear"), "TFL%20Headgear");
+        assert_eq!(urlencode("a/b&c"), "a%2Fb%26c");
+        assert_eq!(urlencode("ACE"), "ACE");
+    }
 
     #[test]
     fn is_outdated_detects_newer_major() {
