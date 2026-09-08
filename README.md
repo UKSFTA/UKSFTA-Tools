@@ -19,6 +19,9 @@ uksfta sync --modlist
 # Custom output path for the modlist
 uksfta sync --modlist --modlist-path ./my-modlist.html
 
+# Also resolve dependencies from Steam Workshop pages
+uksfta sync --modlist --resolve-deps
+
 # Show which PBOs came from which Workshop mod
 uksfta identify
 
@@ -74,6 +77,12 @@ Use `--modlist` to generate an Arma 3 launcher preset file (HTML) that
 lists all missing mods. Open the file in the launcher to batch-subscribe
 to every missing mod at once. The output defaults to `missing-mods.html`;
 override with `--modlist-path`.
+
+Add `--resolve-deps` to also fetch each missing mod's Workshop page and
+discover dependencies not listed in `mod_sources.txt`. Discovered
+dependencies are reported in the missing-mod warning and included in the
+generated modlist. This requires a network connection and adds a
+one-second delay per mod for rate limiting.
 
 ## Platforms
 

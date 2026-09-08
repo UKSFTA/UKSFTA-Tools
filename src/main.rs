@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -215,6 +215,9 @@ enum Commands {
         /// Output path for the modlist HTML (default: missing-mods.html)
         #[arg(long, default_value = "missing-mods.html")]
         modlist_path: PathBuf,
+        /// Resolve missing mods' dependencies from Workshop pages
+        #[arg(long)]
+        resolve_deps: bool,
     },
     /// Show which PBOs came from which Workshop mod
     Identify,
@@ -598,6 +601,138 @@ const MODLIST_TEMPLATE_FOOTER: &str = "\
   </body>\n\
 </html>\n";
 
+/// Fetch a Workshop item's page and return its required dependencies as
+/// Vec<(id, name)>. Returns empty on network error or if no deps exist.
+fn fetch_workshop_dependencies(workshop_id: &str) -> Vec<(String, String)> {
+    let url = format!(
+        "https://steamcommunity.com/sharedfiles/filedetails/?id={}",
+        workshop_id
+    );
+    let body = match reqwest::blocking::get(&url) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to fetch Workshop page for {}: {}",
+                workshop_id, e
+            );
+            return Vec::new();
+        }
+    };
+    let html = match body.text() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to read response for {}: {}",
+                workshop_id, e
+            );
+            return Vec::new();
+        }
+    };
+    let document = scraper::Html::parse_document(&html);
+
+    // Steam renders required items in a div with id="RequiredItems"
+    // Each item is a link: <a href="...?id=NNN">Name</a>
+    let Some(required_section) = document
+        .select(&scraper::Selector::parse("#RequiredItems").unwrap())
+        .next()
+    else {
+        return Vec::new();
+    };
+
+    let mut deps = Vec::new();
+    for link in required_section.select(&scraper::Selector::parse("a").unwrap()) {
+        let href = link.value().attr("href").unwrap_or("");
+        // Extract id=NNN from the href
+        let id = href
+            .split("?id=")
+            .nth(1)
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+            .unwrap_or("");
+        if id.is_empty() {
+            continue;
+        }
+        let name = link.text().collect::<String>().trim().to_string();
+        if !name.is_empty() {
+            deps.push((id.to_string(), name));
+        }
+    }
+    deps
+}
+
+/// Resolve transitive dependencies for a list of missing mods.
+/// Returns (expanded list, direct deps per fetched mod).
+/// The expanded list is missing mods + discovered deps not already known.
+/// Deps already present in the workshop cache are skipped entirely.
+fn resolve_transitive_deps(
+    missing: &[(String, String)],
+    known_ids: &HashSet<String>,
+    cached_ids: &HashSet<String>,
+) -> (
+    Vec<(String, String)>,
+    HashMap<String, Vec<(String, String)>>,
+) {
+    let mut result = Vec::new();
+    let mut deps_by_mod: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut fetched: HashSet<String> = HashSet::new();
+    let mut queue: Vec<(String, String)> = missing.to_vec();
+
+    while let Some((id, name)) = queue.pop() {
+        if fetched.contains(&id) {
+            continue;
+        }
+        fetched.insert(id.clone());
+
+        // Missing mods always go in the result
+        result.push((id.clone(), name));
+
+        let deps = fetch_workshop_dependencies(&id);
+        // Keep only deps we do not already have: not cached, not known
+        let missing_deps: Vec<(String, String)> = deps
+            .into_iter()
+            .filter(|(dep_id, _)| !cached_ids.contains(dep_id) && !known_ids.contains(dep_id))
+            .collect();
+        // Record for tree display
+        deps_by_mod.insert(id.clone(), missing_deps.clone());
+        for (dep_id, dep_name) in missing_deps {
+            if !fetched.contains(&dep_id) {
+                queue.push((dep_id, dep_name));
+            }
+        }
+        // Rate limit: 1 request per second
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    (result, deps_by_mod)
+}
+
+/// Print a mod's missing dependency tree with tree-style indentation.
+/// Only shows deps that were themselves fetched (i.e. also missing).
+fn print_dep_tree(
+    id: &str,
+    deps_by_mod: &HashMap<String, Vec<(String, String)>>,
+    prefix: &str,
+    visited: &mut HashSet<String>,
+) {
+    let Some(deps) = deps_by_mod.get(id) else {
+        return;
+    };
+    let missing: Vec<&(String, String)> = deps
+        .iter()
+        .filter(|(dep_id, _)| deps_by_mod.contains_key(dep_id) && !visited.contains(dep_id))
+        .collect();
+    for (i, (dep_id, dep_name)) in missing.iter().enumerate() {
+        let is_last = i == missing.len() - 1;
+        let connector = if is_last { "└─ " } else { "├─ " };
+        eprintln!("{}{}{} ({})", prefix, connector, dep_name, dep_id);
+        visited.insert(dep_id.clone());
+        let child_prefix = if is_last {
+            format!("{}   ", prefix)
+        } else {
+            format!("{}│  ", prefix)
+        };
+        print_dep_tree(dep_id, deps_by_mod, &child_prefix, visited);
+    }
+}
+
 fn generate_modlist(missing: &[(String, String)], path: &Path) {
     if missing.is_empty() {
         return;
@@ -636,6 +771,7 @@ fn sync_mods(
     _offline: bool,
     modlist: bool,
     modlist_path: &Path,
+    resolve_deps: bool,
 ) {
     let caches = find_all_workshop_caches();
     if caches.is_empty() {
@@ -873,8 +1009,35 @@ fn sync_mods(
         save_lock(lock_path, &new_lock);
     }
 
+    // Resolve dependencies once (only when requested) so warnings and
+    // modlist both benefit without double-fetching Workshop pages.
+    let (mods_for_list, deps_by_mod) = if resolve_deps {
+        let known_ids: std::collections::HashSet<String> =
+            mods.iter().map(|m| m.id.clone()).collect();
+        let cached_ids: std::collections::HashSet<String> = caches
+            .iter()
+            .flat_map(|cache| {
+                fs::read_dir(cache)
+                    .map(|rd| {
+                        rd.filter_map(|e| e.ok())
+                            .filter_map(|e| e.file_name().into_string().ok())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        resolve_transitive_deps(&missing_from_cache, &known_ids, &cached_ids)
+    } else {
+        (missing_from_cache.clone(), HashMap::new())
+    };
+
     for (id, name) in &missing_from_cache {
         eprintln!("Warning: {} ({}) not found in Workshop cache", name, id);
+        if resolve_deps {
+            let mut visited = HashSet::new();
+            visited.insert(id.clone());
+            print_dep_tree(id, &deps_by_mod, "         ", &mut visited);
+        }
         eprintln!(
             "         https://steamcommunity.com/sharedfiles/filedetails/?id={}",
             id
@@ -891,7 +1054,7 @@ fn sync_mods(
         }
 
         if modlist {
-            generate_modlist(&missing_from_cache, modlist_path);
+            generate_modlist(&mods_for_list, modlist_path);
         }
     } else if modlist {
         println!("No missing mods — modlist not generated.");
@@ -1206,6 +1369,7 @@ fn main() {
             offline,
             modlist,
             modlist_path,
+            resolve_deps,
         } => {
             let (mods, ignored) = parse_mod_sources(Path::new("mod_sources.txt"));
             if mods.is_empty() {
@@ -1213,7 +1377,15 @@ fn main() {
                 return;
             }
             println!("Found {} mods, {} ignored", mods.len(), ignored.len());
-            sync_mods(&mods, &ignored, dry_run, offline, modlist, &modlist_path);
+            sync_mods(
+                &mods,
+                &ignored,
+                dry_run,
+                offline,
+                modlist,
+                &modlist_path,
+                resolve_deps,
+            );
         }
         Commands::Identify => identify(),
         Commands::Verify => verify(),
