@@ -68,10 +68,10 @@ jobs:
       - name: Generate Changelog
         id: changelog
         run: |
-          # Release notes for this tag. git-cliff reads conventional
-          # commits and stamps the version from the current tag.
-          git-cliff --config .cliff.toml --bump --unreleased \
-            --tag "${GITHUB_REF_NAME}" > changelog.txt
+          # Release notes for this tag: the commits since the previous
+          # tag. git-cliff reads conventional commits and groups them.
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "v0.1.0")
+          git-cliff --config .cliff.toml "${PREV_TAG}..HEAD" > changelog.txt
           echo "BODY_PATH=changelog.txt" >> $GITHUB_ENV
 
       - name: Generate Checksums
@@ -79,6 +79,12 @@ jobs:
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Stage Installers
+        run: |
+          # The one-liner installers are served from the release assets, so
+          # copy them into the upload directory alongside the binaries.
+          cp install.ps1 install.sh dist/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
@@ -89,18 +95,3 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Update Committed Changelog
-        run: |
-          # Regenerate the committed CHANGELOG.md from v0.1.0 (first Rust
-          # release) so it keeps all version sections, then push it back.
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git-cliff --config .cliff.toml v0.1.0..HEAD -o CHANGELOG.md
-          git add CHANGELOG.md
-          if git diff --cached --quiet; then
-            echo "Changelog unchanged."
-          else
-            git commit -m "docs: update changelog for ${GITHUB_REF_NAME}"
-            git push
-          fi
