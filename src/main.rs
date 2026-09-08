@@ -334,13 +334,18 @@ fn parse_mod_sources_content(content: &str) -> (Vec<ModEntry>, Vec<String>, bool
                 let mut mods = Vec::new();
                 let mut ignored = Vec::new();
                 for m in src.mods {
+                    // The id field accepts a bare ID or a full Workshop URL
+                    let Some(id) = extract_id(&m.id) else {
+                        eprintln!("Error: invalid mod id in mod_sources.txt: {}", m.id);
+                        std::process::exit(1);
+                    };
                     let name = if m.name.is_empty() {
-                        format!("Mod {}", m.id)
+                        format!("Mod {}", id)
                     } else {
                         m.name
                     };
                     let entry = ModEntry {
-                        id: m.id,
+                        id,
                         name,
                         tag: None,
                         tags: m.tags,
@@ -409,7 +414,16 @@ fn parse_legacy_mod_sources(content: &str) -> (Vec<ModEntry>, Vec<String>) {
     (mods, ignored)
 }
 
+/// Build the Steam Workshop page URL for a mod ID.
+fn workshop_url(id: &str) -> String {
+    format!(
+        "https://steamcommunity.com/sharedfiles/filedetails/?id={}",
+        id
+    )
+}
+
 /// Serialise legacy data into the TOML v2 format.
+/// Ids are written as full Workshop URLs so entries stay clickable.
 fn toml_from_legacy(mods: &[ModEntry], ignored: &[String]) -> String {
     let mut out = TomlModSources {
         version: 2,
@@ -422,7 +436,7 @@ fn toml_from_legacy(mods: &[ModEntry], ignored: &[String]) -> String {
             m.name.clone()
         };
         out.mods.push(TomlMod {
-            id: m.id.clone(),
+            id: workshop_url(&m.id),
             name,
             tags: Vec::new(),
             role: "mod".to_string(),
@@ -432,7 +446,7 @@ fn toml_from_legacy(mods: &[ModEntry], ignored: &[String]) -> String {
     }
     for id in ignored {
         out.mods.push(TomlMod {
-            id: id.clone(),
+            id: workshop_url(id),
             name: String::new(),
             tags: Vec::new(),
             role: "ignore".to_string(),
@@ -1712,13 +1726,14 @@ fn import_modlist(modlist_file: &Path, dry_run: bool) {
     }
 
     if is_toml {
-        // Append [[mods]] blocks at the end, separated by a blank line
+        // Append [[mods]] blocks at the end, separated by a blank line.
+        // Ids are written as full Workshop URLs so entries stay clickable.
         if !output.ends_with("\n\n") {
             output.push('\n');
         }
         let mut additions = String::new();
         for (id, name) in &new_mods {
-            additions.push_str(&format!("[[mods]]\nid = \"{}\"\n", id));
+            additions.push_str(&format!("[[mods]]\nid = \"{}\"\n", workshop_url(id)));
             if !name.is_empty() {
                 additions.push_str(&format!("name = \"{}\"\n", name));
             }
@@ -2004,7 +2019,9 @@ id = "1234567890"
 
         let migrated = toml_from_legacy(&mods, &ignored);
         assert!(migrated.contains("version = 2"));
-        assert!(migrated.contains("id = \"450814997\""));
+        // Ids migrate as clickable Workshop URLs
+        assert!(migrated
+            .contains("id = \"https://steamcommunity.com/sharedfiles/filedetails/?id=450814997\""));
         assert!(migrated.contains("name = \"CBA_A3\""));
         assert!(migrated.contains("role = \"ignore\""));
         assert!(migrated.contains("enabled = false"));
@@ -2014,5 +2031,25 @@ id = "1234567890"
         assert!(!is_legacy2);
         assert_eq!(mods2.len(), mods.len());
         assert_eq!(ignored2, ignored);
+    }
+
+    #[test]
+    fn parse_toml_accepts_workshop_url_in_id() {
+        let toml = r#"[[mods]]
+id = "https://steamcommunity.com/sharedfiles/filedetails/?id=450814997"
+name = "CBA_A3"
+"#;
+        let (mods, _, is_legacy) = parse_mod_sources_content(toml);
+        assert!(!is_legacy);
+        assert_eq!(mods[0].id, "450814997");
+        assert_eq!(mods[0].name, "CBA_A3");
+    }
+
+    #[test]
+    fn parse_toml_rejects_invalid_id() {
+        // Invalid id (no 8+ digit ID, no URL) must error out. We simulate by
+        // checking extract_id directly since parse_mod_sources_content exits.
+        assert_eq!(extract_id("not-a-mod"), None);
+        assert_eq!(extract_id("123"), None);
     }
 }
