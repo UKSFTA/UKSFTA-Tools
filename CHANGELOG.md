@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-09-09
+
+### Added
+
+- `investigate` groups PBOs by mod family and searches the Workshop once
+  per family instead of once per PBO. Each family search tries multiple
+  variations: the full name, word parts, prefix-path segments, the
+  CfgPatches class name, the author handle, and required-addon roots.
+- New scoring signals: word-level title overlap, CfgPatches class name,
+  author handle, description content, prefix path, dependency graph and
+  PBO-name words. On the UKSF mod pack 34 of 92 groups resolve to a
+  confident match with no false positives.
+- Short search terms (under 5 characters) must match a title as a whole
+  word or a suffix. This rejects prefix noise ("sty" in "style") while
+  keeping compound acronyms ("nvg" in "GPNVG18").
+- Colour-coded report output: green for a confident match, yellow for
+  weak, red for unresolved. Colour turns off automatically when stdout
+  is piped.
+- Progress counter and final summary block in the report.
+
+### Changed
+
+- The identity cache now stores the full candidate data, so offline
+  scoring matches online scoring. Previously a cached run zeroed
+  popularity and quality signals and could flip a confident match to
+  weak.
+
+### Fixed
+
+- Cache writes are atomic (temp file then rename). An interrupted run
+  no longer corrupts the cache and forces a full re-search.
+
 ## [0.5.0] - 2026-09-08
 
 ### Added
