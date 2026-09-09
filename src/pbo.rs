@@ -208,6 +208,127 @@ pub fn pbo_identity(path: &Path) -> Option<String> {
 /// Returns the most distinctive identity: a non-vanilla required addon
 /// root (MRHMilsimTools, rhsusf, ace), then the CfgPatches author if it
 /// is a short single-word handle. None if the config is not readable.
+/// Structured data extracted from a PBO's CfgPatches config block.
+/// Used for cross-referencing PBOs against Workshop candidates.
+#[derive(Debug, Clone, Default)]
+pub struct CfgPatchesInfo {
+    /// The `author` field: mod author name (e.g. "UnderSiege Productionz").
+    pub author: Option<String>,
+    /// The `url` field: sometimes a direct Workshop page URL.
+    pub url: Option<String>,
+    /// Required addons from `requiredAddons[]`: dependency mod families.
+    pub required_addons: Vec<String>,
+}
+
+/// Extract structured CfgPatches data from a PBO's packed config.
+/// Returns author, URL, and required addons list. Free cross-reference
+/// signals: author matches creator_name from Workshop, URL may be the
+/// exact Workshop page, required addons identify dependency families.
+pub fn pbo_cfg_patches(path: &Path) -> CfgPatchesInfo {
+    use std::io::Read;
+    let mut info = CfgPatchesInfo::default();
+    let file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return info,
+    };
+    let mut data = Vec::new();
+    if file.take(4_000_000).read_to_end(&mut data).is_err() {
+        return info;
+    }
+
+    let strings: Vec<String> = data
+        .split(|&b| !(0x20..=0x7e).contains(&b))
+        .filter(|s| s.len() >= 4)
+        .map(|s| String::from_utf8_lossy(s).to_string())
+        .collect();
+    let text = strings.join("\n");
+
+    // 1. author = "Name"
+    for s in text.lines() {
+        let s = s.trim();
+        if let Some(idx) = s.find("author") {
+            let after = &s[idx + 6..];
+            let after = after.trim_start();
+            if let Some(after) = after.strip_prefix('=') {
+                let after = after.trim_start();
+                if let Some(name) = extract_cfg_value(after) {
+                    if !name.starts_with('$') && name.len() >= 2 {
+                        info.author = Some(name);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. url = "https://..."
+    for s in text.lines() {
+        let s = s.trim();
+        if let Some(idx) = s.find("url") {
+            // Ensure it's the field assignment, not part of a class name
+            let before = s[..idx].trim();
+            if before.is_empty() || before.ends_with('{') || before.ends_with(';') {
+                let after = &s[idx + 3..];
+                let after = after.trim_start();
+                if let Some(after) = after.strip_prefix('=') {
+                    let after = after.trim_start();
+                    if let Some(url) = extract_cfg_value(after) {
+                        if url.starts_with("http") {
+                            info.url = Some(url);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. requiredAddons[] = { "addon1", "addon2", ... }
+    if let Some(start) = text.find("requiredAddons[]") {
+        let after = &text[start + "requiredAddons[]".len()..];
+        let after = after.trim_start();
+        if let Some(after) = after.strip_prefix('=') {
+            let after = after.trim_start();
+            if let Some(after) = after.strip_prefix('{') {
+                let after = after.trim_start();
+                if let Some(close) = after.find('}') {
+                    let body = &after[..close];
+                    for addon in body.split(',') {
+                        let addon: String = addon
+                            .chars()
+                            .filter(|c| !c.is_whitespace() && *c != '"')
+                            .collect();
+                        if !addon.is_empty() {
+                            info.required_addons.push(addon);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    info
+}
+
+/// Extract a quoted or bare value from a config line after `=`.
+fn extract_cfg_value(s: &str) -> Option<String> {
+    let s = s.trim();
+    if let Some(s) = s.strip_prefix('"') {
+        if let Some(end) = s.find('"') {
+            return Some(s[..end].to_string());
+        }
+    } else {
+        // Bare value: take until whitespace or semicolon
+        let end = s
+            .find(|c: char| c.is_whitespace() || c == ';')
+            .unwrap_or(s.len());
+        if end > 0 {
+            return Some(s[..end].to_string());
+        }
+    }
+    None
+}
+
 pub fn pbo_config_identity(path: &Path) -> Option<String> {
     use std::io::Read;
     let file = fs::File::open(path).ok()?;
