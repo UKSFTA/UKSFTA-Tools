@@ -8,7 +8,8 @@ use crate::origin::{
     ResolvedOrigin,
 };
 use crate::pbo::{
-    get_mod_metadata, pbo_config_identity, pbo_identity, pbo_prefix, search_term_from_prefix,
+    extra_search_terms_from_prefix, get_mod_metadata, pbo_cfg_patches, pbo_config_identity,
+    pbo_identity, pbo_prefix, search_term_from_prefix,
 };
 use crate::steam::find_all_workshop_caches;
 use crate::util::{urlencode, workshop_url};
@@ -42,8 +43,24 @@ struct ScoredCandidate {
 /// mod family instead of once per PBO.
 struct PboGroup {
     search_term: String,
+    /// Additional search terms derived from the full prefix path.
+    /// E.g. for prefix "x\SPS\Vehicles\sps_blackhornet", the primary
+    /// term is "SPS" but extras include "sps_blackhornet", "blackhornet".
+    extra_terms: Vec<String>,
     pbos: Vec<String>,
+    /// The full PBO prefix path (e.g. "z\ace\addons\grenades").
+    /// Used for prefix path search in descriptions.
+    prefix: Option<String>,
     author_handle: Option<String>,
+    /// CfgPatches `author` field: full author name (e.g. "UnderSiege Productionz").
+    cfg_author: Option<String>,
+    /// CfgPatches `url` field: sometimes the exact Workshop page URL.
+    cfg_url: Option<String>,
+    /// CfgPatches class name: the addon's identity (e.g. "ffaa_data", "ade").
+    /// Used as an additional search term.
+    cfg_name: Option<String>,
+    /// Required addons from CfgPatches: dependency mod families.
+    cfg_children: Vec<String>,
 }
 
 // ── Scoring ────────────────────────────────────────────────────────────
@@ -53,11 +70,59 @@ struct PboGroup {
 ///   search_score (Steam's own relevance): 100 pts
 ///   popularity (subscriptions + views):   ~45 pts
 ///   quality (star rating):                20 pts
-///   author match:                         50 pts
+///   author match (handle):                50 pts
+///   URL match (CfgPatches):              100 pts (near-certain)
+///   dependency children match:            +10 per required addon found
 ///   tag filter (Mod tag):                 10 pts
 ///   file_type penalty (non-mod):         -50 pts
+///
+/// Note: CfgPatches `author` is NOT used for scoring. In repacked mods
+/// it names the repacker, not the original mod author. Matching it
+/// against Workshop creator_name would be wrong.
 fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
     let mut score = 0.0;
+
+    // 0. Title relevance — multiple signals combined.
+    //    Substring match is strongest, word overlap catches compound
+    //    terms where the full string doesn't match but words do.
+    let term_lower = group.search_term.to_lowercase();
+    let title_lower = candidate.title.to_lowercase();
+    // Short terms must match as a whole word, longer terms as substring
+    let title_relevant = title_contains_term(&title_lower, &term_lower);
+
+    // Word-level overlap: split term into words, check how many
+    // appear in the title. "aceax" → ["aceax"] → 1.0 if "ACEAX" in title.
+    // "zulu_custom" → ["zulu","custom"] → 0.5 if only "Zulu" matches.
+    let word_score = word_overlap_score(&term_lower, &title_lower);
+
+    // Word-level token split for compound terms
+    let term_tokens: Vec<&str> = split_camel_or_underscore(&term_lower);
+    let matching_tokens = term_tokens
+        .iter()
+        .filter(|t| t.len() >= 3 && title_contains_term(&title_lower, t))
+        .count();
+    let token_ratio = if term_tokens.is_empty() {
+        0.0
+    } else {
+        matching_tokens as f64 / term_tokens.len() as f64
+    };
+
+    // Combine signals: substring is definitive, word overlap catches
+    // compound terms, token ratio catches partial matches.
+    if title_relevant {
+        score += 80.0;
+    } else if word_score >= 0.8 {
+        // Most words match — strong signal
+        score += 50.0 + word_score * 20.0;
+    } else if token_ratio >= 0.5 {
+        score += 40.0 * token_ratio;
+    } else if word_score > 0.3 || token_ratio > 0.0 {
+        // Some overlap — weak but non-zero signal
+        score += 20.0 * word_score + 15.0 * token_ratio;
+    } else {
+        // No overlap at all — heavy penalty
+        score -= 40.0;
+    }
 
     // 1. Steam's own search_score (0-1 range)
     score += candidate.search_score * 100.0;
@@ -70,7 +135,7 @@ fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
     // 3. Quality
     score += candidate.star_rating * 20.0;
 
-    // 4. Author match — strong signal when author handle present
+    // 4. Author match — short handle from config identity (scoring signal)
     if let Some(ref author) = group.author_handle {
         let author_lower = author.to_lowercase();
         if candidate
@@ -82,7 +147,43 @@ fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
         }
     }
 
-    // 5. Tag filter — bonus for mods, penalty for non-mods
+    // 5. CfgPatches URL match — if the PBO's url field contains this
+    //    candidate's Workshop ID, it's a near-certain match
+    if let Some(ref cfg_url) = group.cfg_url {
+        if cfg_url.contains(&candidate.id) {
+            score += 100.0;
+        }
+    }
+
+    // 6. Dependency children match — if candidate lists required addons
+    //    that match the PBO's requiredAddons, strong structural signal
+    for child in &candidate.children {
+        let child_lower = child.to_lowercase();
+        for required in &group.cfg_children {
+            let req_lower = required.to_lowercase();
+            // Match on the mod-family root: "rhsusf_c_weapons" matches
+            // "rhsusf" from the candidate's children
+            let req_root = req_lower.split('_').next().unwrap_or(&req_lower);
+            if req_root.len() >= 3 && child_lower.contains(req_root) {
+                score += 10.0;
+            }
+        }
+    }
+
+    // 6b. CfgPatches class name match — if the candidate title contains
+    //     the addon class name or its root, strong structural signal.
+    //     "ffaa_data" → "ffaa" in "FFAA MOD" → +30 pts
+    if let Some(ref cfg_name) = group.cfg_name {
+        let cfg_lower = cfg_name.to_lowercase();
+        let cfg_root = cfg_lower.split('_').next().unwrap_or(&cfg_lower);
+        if title_lower.contains(&cfg_lower) {
+            score += 30.0;
+        } else if cfg_root.len() >= 3 && title_lower.contains(cfg_root) {
+            score += 20.0;
+        }
+    }
+
+    // 7. Tag filter — bonus for mods, penalty for non-mods
     if candidate.tags.iter().any(|t| t.eq_ignore_ascii_case("Mod")) {
         score += 10.0;
     }
@@ -90,8 +191,7 @@ fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
         score -= 50.0;
     }
 
-    // 6. Dependency verification — if candidate lists children that
-    //    match known mod families (ace, rhs, cba), boost score
+    // 8. Legacy dependency check — known mod families in children
     for child in &candidate.children {
         let child_lower = child.to_lowercase();
         for known in &["ace", "rhs", "cba", "tf", "tfl"] {
@@ -101,7 +201,215 @@ fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
         }
     }
 
+    // 9. Description content match — if the candidate's description
+    //     contains PBO names from our group, strong confirmation signal.
+    //     Some modders list their PBO contents in the description.
+    let desc_lower = candidate.short_description.to_lowercase();
+    let mut desc_hits = 0;
+    for pbo_name in &group.pbos {
+        let stem = pbo_name
+            .strip_suffix(".pbo")
+            .unwrap_or(pbo_name)
+            .to_lowercase();
+        if stem.len() >= 4 && desc_lower.contains(&stem) {
+            desc_hits += 1;
+        }
+    }
+    if desc_hits > 0 {
+        score += 20.0 * desc_hits as f64;
+    }
+
+    // 9b. PBO-name word match — check the candidate title against every
+    //     PBO stem word in the group, not just the search term. Catches
+    //     cases where the derived search term is a generic author prefix
+    //     ("JAS") but the PBO name is descriptive ("NVG_Parts" → "nvg"
+    //     suffix-matches "GPNVG18"). Words equal to the search term are
+    //     skipped — title relevance already scored them.
+    let mut pbo_name_hits = 0;
+    for pbo_name in &group.pbos {
+        // Split BEFORE lowercasing: camelCase boundaries ("FranksMarkers"
+        // → ["Franks", "Markers"]) are lost if we lowercase first.
+        let stem = pbo_name.strip_suffix(".pbo").unwrap_or(pbo_name);
+        for word in split_camel_or_underscore(stem) {
+            let word = word.to_lowercase();
+            if word.len() >= 3 && word != term_lower && title_contains_term(&title_lower, &word) {
+                pbo_name_hits += 1;
+                break;
+            }
+        }
+    }
+    if pbo_name_hits > 0 {
+        score += 25.0 * pbo_name_hits as f64;
+    }
+
+    // 10. Prefix path in description — some modders include the exact
+    //     prefix path (e.g. "z\ace\addons\grenades") in their description.
+    //     This is a near-certain match when found.
+    if let Some(ref prefix) = group.prefix {
+        let prefix_lower = prefix.to_lowercase();
+        if desc_lower.contains(&prefix_lower) {
+            score += 60.0;
+        }
+    }
+
+    // 11. Dependency graph signal — if the PBO's required addons contain
+    //     a root that matches the group's search term, the mod family is
+    //     confirmed. E.g. PBO requires "rhsusf_c_weapons" and group
+    //     searches for "rhsusf" → the mod is RHS.
+    for required in &group.cfg_children {
+        let req_lower = required.to_lowercase();
+        let req_root = req_lower.split('_').next().unwrap_or(&req_lower);
+        if req_root.len() >= 3 && term_lower.contains(req_root) {
+            score += 25.0;
+            break;
+        }
+    }
+
     score
+}
+
+/// Split a camelCase or underscore_separated string into tokens.
+/// "zuluslicksters" → ["zuluslicksters"] (no split possible)
+/// "zulu_custom_slicksters" → ["zulu", "custom", "slicksters"]
+/// "tfl_headgear" → ["tfl", "headgear"]
+fn split_camel_or_underscore(s: &str) -> Vec<&str> {
+    // If underscores are present, split on them
+    if s.contains('_') {
+        return s.split('_').filter(|t| !t.is_empty()).collect();
+    }
+    // Otherwise, try camelCase split
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        if c.is_uppercase() && i > start {
+            let token = &s[start..i];
+            if !token.is_empty() {
+                tokens.push(token);
+            }
+            start = i;
+        }
+    }
+    let last = &s[start..];
+    if !last.is_empty() {
+        tokens.push(last);
+    }
+    // If we only got one token, return the whole thing
+    if tokens.len() <= 1 {
+        vec![s]
+    } else {
+        tokens
+    }
+}
+
+/// True when `term` appears in `title` as a meaningful match.
+/// Short terms (< 5 chars) must match as a whole word or as a suffix
+/// of a longer word. Suffix allows compound acronyms: "nvg" in
+/// "GPNVG-18" is a real match. Prefix matches are rejected: "sty"
+/// in "style" is noise, not a match.
+fn title_contains_term(title_lower: &str, term_lower: &str) -> bool {
+    if term_lower.len() < 5 {
+        title_lower
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == term_lower || (w.len() > term_lower.len() && w.ends_with(term_lower)))
+    } else {
+        title_lower.contains(term_lower)
+    }
+}
+
+/// Word-level overlap score between a search term and a title.
+/// Splits both into words, checks how many search-term words appear
+/// in the title. More discriminative than character-level matching
+/// because it avoids false positives from common letters.
+///
+/// "aceax" → ["aceax"] → if "ACEAX" in title → 1.0
+/// "zulu_custom_slicksters" → ["zulu","custom","slicksters"] → "A2 Declassified: Fireteam Zulu" has "zulu" → 1/3 = 0.33
+/// "usasoc_backpacks" → ["usasoc","backpacks"] → "121 USASOC Sniper Rifles Pack" has "usasoc" → 1/2 = 0.5
+///
+/// Short words (< 5 chars) must match exactly. "sty" is not "style".
+fn word_overlap_score(term_lower: &str, title_lower: &str) -> f64 {
+    let term_words: Vec<&str> = split_camel_or_underscore(term_lower);
+    if term_words.is_empty() {
+        return 0.0;
+    }
+
+    // Split title on non-alphanumeric boundaries
+    let title_words: Vec<&str> = title_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    let hits = term_words
+        .iter()
+        .filter(|tw| {
+            if tw.len() < 3 {
+                return false;
+            }
+            title_words.iter().any(|t| {
+                if tw.len() < 5 {
+                    // Short words must match exactly or as a suffix of a
+                    // longer word. "gpnvg" contains "nvg" (compound), but
+                    // "style" must not count as "sty" (prefix noise).
+                    *t == **tw || (t.len() > tw.len() && t.ends_with(*tw))
+                } else {
+                    *t == **tw || t.contains(*tw)
+                }
+            })
+        })
+        .count();
+
+    hits as f64 / term_words.len() as f64
+}
+
+/// Generate multiple search variations from a single search term.
+/// "sps_blackhornet" → ["sps blackhornet", "blackhornet", "sps"]
+/// "ZuluCustomSlicksters" → ["zulu custom slicksters", "slicksters",
+///   "zulu", "custom", "zulu custom", "custom slicksters"]
+/// The idea: one term may not match the Workshop title, but a
+/// substring or reordering might. We try all of them and merge.
+fn search_variation_terms(term: &str) -> Vec<String> {
+    let tokens = split_camel_or_underscore(term);
+    let mut variations = Vec::new();
+
+    if tokens.len() <= 1 {
+        // Single token: try it as-is
+        variations.push(term.to_string());
+        return variations;
+    }
+
+    // 1. All tokens joined with spaces (full term)
+    let full = tokens.join(" ");
+    if full != term {
+        variations.push(full);
+    }
+
+    // 2. Individual tokens (>= 3 chars to avoid noise)
+    for t in &tokens {
+        if t.len() >= 3 {
+            variations.push(t.to_string());
+        }
+    }
+
+    // 3. Pairs of adjacent tokens
+    for w in tokens.windows(2) {
+        variations.push(w.join(" "));
+    }
+
+    // 4. Last token first (reversal — "blackhornet sps")
+    if tokens.len() >= 2 {
+        let mut rev: Vec<&str> = tokens.iter().rev().copied().collect();
+        rev.truncate(3); // cap at 3 tokens
+        variations.push(rev.join(" "));
+    }
+
+    // 5. First token only (if >= 4 chars — the family root)
+    if tokens[0].len() >= 4 {
+        // Already added in step 2, skip
+    }
+
+    // Deduplicate while preserving order
+    let mut seen = std::collections::HashSet::new();
+    variations.retain(|v| seen.insert(v.clone()));
+    variations
 }
 
 /// Convert a ScoredCandidate to the cache format (id, title).
@@ -121,10 +429,35 @@ fn cache_to_candidate(id: &str, title: &str) -> ScoredCandidate {
 
 // ── PBO grouping ───────────────────────────────────────────────────────
 
-/// Group PBOs by their search term. All PBOs with the same prefix root
-/// are grouped together — this matches how Arma loads them (one mod
-/// family = one search). The best author handle from the group is used
-/// for scoring.
+/// Extract a grouping key from a PBO prefix. This identifies the mod
+/// family and is used to group PBOs that belong to the same Workshop
+/// item.
+///
+/// Rules (by prefix structure):
+/// - Namespaced root (`z\`, `x\`, `pz\`, `v\`, `a3\`): first 2 segments
+///   (`z\aceax\addons\main` → `z\aceax`). This keeps mod families
+///   together while preventing `z\` from merging all third-party mods.
+/// - Non-namespaced root (`NAVSPECWARGRU2\common`): full prefix — the
+///   root IS the mod identity.
+/// - No prefix (bare filename): filename stem before first `_`
+///   (`aceax_compat_tfl_cold` → `aceax`). This catches repacked PBOs
+///   whose prefix is just the filename.
+fn prefix_family(prefix: &str) -> String {
+    let parts: Vec<&str> = prefix.split('\\').collect();
+    if parts.len() >= 2 && parts[0].len() < 3 {
+        // Namespace root: z, x, pz, v, a3, opx, mg8
+        format!("{}\\{}", parts[0], parts[1])
+    } else {
+        prefix.to_string()
+    }
+}
+
+/// Group PBOs by their mod family. The grouping key is the prefix
+/// family (first 2 segments for namespaced roots, full prefix otherwise,
+/// filename stem for bare names). Config identity is a scoring signal
+/// only — it must not determine grouping because PBOs from the same mod
+/// can have different config identities (e.g. `requiredAddons` varies
+/// per PBO).
 fn group_pbos_by_term(
     pbos: &[(String, Option<ResolvedOrigin>)],
     addons_dir: &Path,
@@ -133,27 +466,45 @@ fn group_pbos_by_term(
 
     for (name, _origin) in pbos {
         let pbo_path = addons_dir.join(name);
-        // Extract the search term using the same priority chain as before:
-        // 1. requiredAddons root from plain-text config
-        // 2. string-table token from config
-        // 3. short author handle from config
-        // 4. header prefix
-        let term = pbo_config_identity(&pbo_path)
-            .or_else(|| pbo_identity(&pbo_path))
-            .or_else(|| pbo_prefix(&pbo_path))
-            .unwrap_or_else(|| name.clone());
-        let term = search_term_from_prefix(&term);
 
-        // Extract author handle for scoring (short tokens like DANZ, TFB)
+        // Primary grouping key: prefix family
+        let prefix = pbo_prefix(&pbo_path);
+        let group_key = match prefix {
+            Some(ref p) => prefix_family(p),
+            None => {
+                // No prefix — use filename stem before first `_`,
+                // stripping the .pbo extension first
+                let stem = name.strip_suffix(".pbo").unwrap_or(name);
+                stem.split('_').next().unwrap_or(stem).to_string()
+            }
+        };
+
+        // Search term for the Workshop query: derive from the group key.
+        let search_term = search_term_from_prefix(&group_key);
+
+        // Author handle from config identity (short handle, scoring signal only)
         let author_handle = pbo_config_identity(&pbo_path).filter(|t| t.len() < 6 && t.len() >= 2);
 
-        let group = groups.entry(term.clone()).or_insert_with(|| PboGroup {
-            search_term: term,
-            pbos: Vec::new(),
-            author_handle: None,
+        // Full CfgPatches data: author, url, required addons.
+        // Read from the first PBO in each group (free cross-reference signals).
+        let cfg = pbo_cfg_patches(&pbo_path);
+
+        let group = groups.entry(group_key.clone()).or_insert_with(|| {
+            let full_prefix = prefix.clone().unwrap_or_default();
+            let extra_terms = extra_search_terms_from_prefix(&full_prefix);
+            PboGroup {
+                search_term,
+                extra_terms,
+                pbos: Vec::new(),
+                prefix: prefix.clone(),
+                author_handle: None,
+                cfg_author: cfg.author.clone(),
+                cfg_url: cfg.url.clone(),
+                cfg_name: cfg.name.clone(),
+                cfg_children: cfg.required_addons.clone(),
+            }
         });
         group.pbos.push(name.clone());
-        // Keep the best author handle (longest = most specific)
         if let Some(ref ah) = author_handle {
             if group
                 .author_handle
@@ -162,6 +513,16 @@ fn group_pbos_by_term(
             {
                 group.author_handle = Some(ah.clone());
             }
+        }
+        // If the first PBO had no author/url/name, try this one
+        if group.cfg_author.is_none() && cfg.author.is_some() {
+            group.cfg_author = cfg.author;
+        }
+        if group.cfg_url.is_none() && cfg.url.is_some() {
+            group.cfg_url = cfg.url;
+        }
+        if group.cfg_name.is_none() && cfg.name.is_some() {
+            group.cfg_name = cfg.name;
         }
     }
 
@@ -258,7 +619,7 @@ fn search_workshop(query: &str) -> Vec<ScoredCandidate> {
         .build()
         .expect("Failed to build HTTP client");
     let url = format!(
-        "https://steamcommunity.com/workshop/browse/?appid=107410&searchtext={}",
+        "https://steamcommunity.com/workshop/browse/?appid=107410&searchtext={}&requiredtags[]=Mod",
         urlencode(query)
     );
     let html = match client.get(&url).send().ok().and_then(|r| r.text().ok()) {
@@ -587,6 +948,80 @@ pub fn urlencode_pairs(pairs: &[(&str, &str)]) -> String {
         .join("&")
 }
 
+// ── Changelog scraping ────────────────────────────────────────────────
+
+/// Scrape the Workshop changelog page for a mod and extract mod-name
+/// references. The changelog often names source mods that a pack
+/// repacked, e.g. "Updated ACE3 to 3.16.0" or "Added FFAA MOD".
+fn scrape_changelog(workshop_id: &str, client: &reqwest::blocking::Client) -> Vec<String> {
+    let url = format!(
+        "https://steamcommunity.com/sharedfiles/filedetails/changelog/{}",
+        workshop_id
+    );
+    let html = match client.get(&url).send().ok().and_then(|r| r.text().ok()) {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+
+    let mut names = Vec::new();
+    // Changelog entries are in <div class="entry"> blocks. Extract text
+    // content and look for known mod name patterns.
+    for entry in html.split("<div class=\"entry\">").skip(1) {
+        let text_end = entry.find("</div>").unwrap_or(entry.len());
+        let text = &entry[..text_end];
+        // Strip HTML tags to get plain text
+        let mut in_tag = false;
+        let plain: String = text
+            .chars()
+            .filter(|&c| {
+                if c == '<' {
+                    in_tag = true;
+                    false
+                } else if c == '>' {
+                    in_tag = false;
+                    false
+                } else {
+                    !in_tag
+                }
+            })
+            .collect();
+        let plain = plain.trim();
+        if plain.len() > 5 {
+            names.push(plain.to_string());
+        }
+    }
+    names
+}
+
+// ── Bikey detection ───────────────────────────────────────────────────
+
+/// Scan for .bikey files in the mod pack's parent directory. The key
+/// name often identifies the author team (e.g. "TFB.bistkeys",
+/// "ZSquadron.bistkeys"). Returns a list of key base names.
+fn scan_bikey_names(addons_dir: &Path) -> Vec<String> {
+    // Bikey files are typically in the parent of the addons/ folder
+    // (i.e. the Workshop item root: workshop/content/107410/<id>/keys/)
+    let pack_root = addons_dir.parent().unwrap_or(addons_dir);
+    let keys_dir = pack_root.join("keys");
+    let mut names = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(&keys_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".bikey") || name.ends_with(".bisign") {
+                let base = name
+                    .rsplit_once('.')
+                    .map(|(b, _)| b.to_string())
+                    .unwrap_or(name);
+                if !names.contains(&base) {
+                    names.push(base);
+                }
+            }
+        }
+    }
+    names
+}
+
 // ── Main investigate flow ──────────────────────────────────────────────
 
 /// Trace the Workshop origin of untracked PBOs in addons/.
@@ -730,6 +1165,12 @@ pub fn investigate(all: bool, online: bool) {
             searchable.len()
         );
 
+        // Scan for bikey files — author team signal
+        let bikey_names = scan_bikey_names(addons_dir);
+        if !bikey_names.is_empty() {
+            println!("  Signing keys found: {}", bikey_names.join(", "));
+        }
+
         let groups = group_pbos_by_term(&searchable, addons_dir);
         let mut cache = load_identity_cache();
         let api_client = reqwest::blocking::Client::builder()
@@ -744,6 +1185,43 @@ pub fn investigate(all: bool, online: bool) {
                 continue;
             }
             searched.insert(term.clone());
+
+            // Generate multiple search variations to cast a wider net.
+            // "sps_blackhornet" → ["sps blackhornet", "blackhornet", "sps"]
+            // Plus extra terms from the full prefix path.
+            let mut variations = search_variation_terms(term);
+            for extra in &group.extra_terms {
+                if !variations.contains(extra) {
+                    variations.push(extra.clone());
+                }
+            }
+            // Add CfgPatches class name as a search term.
+            // "ffaa_data" → search "ffaa" (the mod family)
+            if let Some(ref cfg_name) = group.cfg_name {
+                let cfg_root = cfg_name.split('_').next().unwrap_or(cfg_name);
+                if cfg_root.len() >= 3 && !variations.contains(&cfg_root.to_string()) {
+                    variations.push(cfg_root.to_string());
+                }
+                if !variations.contains(cfg_name) {
+                    variations.push(cfg_name.clone());
+                }
+            }
+            // Add author handle as a search term when distinctive.
+            // "TFB" → search "TFB" — Workshop titles often include author names.
+            if let Some(ref author) = group.author_handle {
+                if !variations.contains(author) {
+                    variations.push(author.clone());
+                }
+            }
+            // Add required addon roots as search terms.
+            // If PBO requires "rhsusf_c_weapons", search "rhsusf" —
+            // the dependency's mod family often appears in the title.
+            for required in &group.cfg_children {
+                let req_root = required.split('_').next().unwrap_or(required);
+                if req_root.len() >= 3 && !variations.contains(&req_root.to_string()) {
+                    variations.push(req_root.to_string());
+                }
+            }
 
             // Check the local cache first; only hit the Workshop for
             // terms we have not already searched.
@@ -763,23 +1241,74 @@ pub fn investigate(all: bool, online: bool) {
                     true,
                 )
             } else {
-                // Prefer the keyed QueryFiles API when STEAM_API_KEY
-                // is set; fall back to the keyless browse-page scrape.
-                let rich = search_workshop_api(term).unwrap_or_else(|| {
-                    let scraped = search_workshop(term);
-                    if scraped.is_empty() {
-                        // Scrape returned nothing useful — batch-confirm IDs
-                        let ids: Vec<String> = scraped.iter().map(|c| c.id.clone()).collect();
-                        batch_workshop_details(&ids, &api_client)
-                    } else {
-                        scraped
+                // Search each variation and merge results. Keep the
+                // highest search_score for each candidate ID.
+                let mut merged: std::collections::HashMap<String, ScoredCandidate> =
+                    std::collections::HashMap::new();
+                let mut any_from_cache = false;
+
+                for variation in &variations {
+                    if searched.contains(variation) {
+                        // Already searched this variation in another group
+                        if let Some(cached) = cache.get(variation) {
+                            for (id, title) in cached {
+                                let c = cache_to_candidate(id, title);
+                                if let Some(existing) = merged.get(id) {
+                                    if c.search_score > existing.search_score {
+                                        merged.insert(id.clone(), c);
+                                    }
+                                } else {
+                                    merged.insert(id.clone(), c);
+                                }
+                            }
+                            any_from_cache = true;
+                        }
+                        continue;
                     }
-                });
-                // Convert to cache format and persist
-                let cached: Vec<(String, String)> = rich.iter().map(candidate_to_cache).collect();
-                cache.insert(term.clone(), cached);
-                save_identity_cache(&cache);
-                (rich, false)
+
+                    let rich = search_workshop_api(variation).unwrap_or_else(|| {
+                        let scraped = search_workshop(variation);
+                        if scraped.is_empty() {
+                            let ids: Vec<String> = scraped.iter().map(|c| c.id.clone()).collect();
+                            batch_workshop_details(&ids, &api_client)
+                        } else {
+                            scraped
+                        }
+                    });
+
+                    // Merge into results, keeping the best score
+                    for c in rich {
+                        if let Some(existing) = merged.get(&c.id) {
+                            if c.search_score > existing.search_score {
+                                merged.insert(c.id.clone(), c);
+                            }
+                        } else {
+                            merged.insert(c.id.clone(), c);
+                        }
+                    }
+
+                    // Cache this variation's results
+                    let cached: Vec<(String, String)> =
+                        merged.values().map(candidate_to_cache).collect();
+                    cache.insert(variation.clone(), cached);
+                    save_identity_cache(&cache);
+                    searched.insert(variation.clone());
+
+                    // Rate-limit only real Workshop page hits
+                    if !any_from_cache {
+                        std::thread::sleep(std::time::Duration::from_millis(1100));
+                    }
+                }
+
+                let candidates: Vec<ScoredCandidate> = merged.into_values().collect();
+                // Cache under the primary term too
+                if !candidates.is_empty() {
+                    let cached: Vec<(String, String)> =
+                        candidates.iter().map(candidate_to_cache).collect();
+                    cache.insert(term.clone(), cached);
+                    save_identity_cache(&cache);
+                }
+                (candidates, any_from_cache)
             };
 
             if candidates.is_empty() {
@@ -794,7 +1323,53 @@ pub fn investigate(all: bool, online: bool) {
                     .collect();
                 scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-                // Show group summary
+                // Check title relevance of the top candidate.
+                // If the search term doesn't appear anywhere in the
+                // top candidate's title, the match is probably noise.
+                let term_lower = term.to_lowercase();
+                let top_title_lower = scored
+                    .first()
+                    .map(|(_, c)| c.title.to_lowercase())
+                    .unwrap_or_default();
+                let title_match = title_contains_term(&top_title_lower, &term_lower);
+
+                // Character-level token overlap for the top candidate
+                let top_word_score = word_overlap_score(&term_lower, &top_title_lower);
+
+                // Also check word-level token relevance
+                let term_tokens = split_camel_or_underscore(&term_lower);
+                let top_token_hits = term_tokens
+                    .iter()
+                    .filter(|t| t.len() >= 3 && title_contains_term(&top_title_lower, t))
+                    .count();
+                let token_ratio = if term_tokens.is_empty() {
+                    0.0
+                } else {
+                    top_token_hits as f64 / term_tokens.len() as f64
+                };
+
+                let weak_match = scored.first().map(|(s, _)| *s < 30.0).unwrap_or(true)
+                    || (!title_match && top_word_score < 0.5 && token_ratio < 0.5);
+
+                // Show group summary with cross-reference signals
+                // Note: cfg_author is NOT shown — in repacked mods it names
+                // the repacker, not the original mod author.
+                let mut meta = Vec::new();
+                if let Some(ref url) = group.cfg_url {
+                    // Only show Workshop-like URLs (not Twitch, GitHub, etc.)
+                    if url.contains("steamcommunity.com/sharedfiles") {
+                        meta.push(format!("url={}", url));
+                    }
+                }
+                if !group.cfg_children.is_empty() {
+                    meta.push(format!("deps=[{}]", group.cfg_children.join(", ")));
+                }
+                let meta_str = if meta.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", meta.join(", "))
+                };
+
                 let top = scored
                     .iter()
                     .take(5)
@@ -811,18 +1386,59 @@ pub fn investigate(all: bool, online: bool) {
                     })
                     .collect::<Vec<_>>();
 
-                println!(
-                    "  [group: {}] (search \"{}\"): {} candidate(s) — {}",
-                    group.pbos.join(", "),
-                    term,
-                    candidates.len(),
-                    top.join(", ")
-                );
+                if weak_match {
+                    // Weak match: search term doesn't appear in the
+                    // top candidate's title. Show "no confident match"
+                    // with the best candidate for reference.
+                    println!(
+                        "  [group: {}] (search \"{}\"): {} candidate(s){} — no confident match (best: {})",
+                        group.pbos.join(", "),
+                        term,
+                        candidates.len(),
+                        meta_str,
+                        top.first().map(|s| s.as_str()).unwrap_or("none")
+                    );
+                } else {
+                    println!(
+                        "  [group: {}] (search \"{}\"): {} candidate(s){} — {}",
+                        group.pbos.join(", "),
+                        term,
+                        candidates.len(),
+                        meta_str,
+                        top.join(", ")
+                    );
+                }
+
+                // Changelog cross-reference: if the top candidate has a
+                // changelog, check if it names mod families from our group.
+                // This catches cases where a pack lists its source mods.
+                if !from_cache && !scored.is_empty() {
+                    if let Some((_score, top_candidate)) = scored.first() {
+                        let notes = scrape_changelog(&top_candidate.id, &api_client);
+                        for note in &notes {
+                            let note_lower = note.to_lowercase();
+                            // Check if any PBO name or group key appears
+                            // in the changelog text
+                            for pbo_name in &group.pbos {
+                                let stem = pbo_name
+                                    .rsplit_once('.')
+                                    .map(|(s, _)| s)
+                                    .unwrap_or(pbo_name);
+                                let stem_lower = stem.to_lowercase();
+                                if stem_lower.len() >= 4 && note_lower.contains(&stem_lower) {
+                                    println!(
+                                        "    changelog hit: \"{}\" matches {}",
+                                        &note[..note.len().min(100)],
+                                        pbo_name
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            // Rate-limit only real Workshop page hits, not cache reads.
-            if !from_cache {
-                std::thread::sleep(std::time::Duration::from_millis(1100));
-            }
+            // Rate-limiting is handled inside the variation loop above.
         }
     }
 }
@@ -912,5 +1528,78 @@ fn check_workshop_visibility(results: Vec<(String, Option<ResolvedOrigin>)>) {
             detail.title
         };
         println!("  {} -> {} [{}]", detail.publishedfileid, title, status);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(title: &str, id: &str) -> ScoredCandidate {
+        ScoredCandidate {
+            id: id.to_string(),
+            title: title.to_string(),
+            search_score: 0.5,
+            subscriptions: 1000,
+            views: 5000,
+            favorited: 100,
+            star_rating: 4.5,
+            total_votes: 50,
+            tags: vec!["Mod".to_string()],
+            creator: String::new(),
+            creator_name: String::new(),
+            time_updated: 0,
+            short_description: String::new(),
+            children: Vec::new(),
+            file_type: 0,
+        }
+    }
+
+    fn group(term: &str, pbos: &[&str]) -> PboGroup {
+        PboGroup {
+            search_term: term.to_string(),
+            extra_terms: Vec::new(),
+            pbos: pbos.iter().map(|s| s.to_string()).collect(),
+            prefix: None,
+            author_handle: None,
+            cfg_author: None,
+            cfg_url: None,
+            cfg_name: None,
+            cfg_children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn pbo_name_boost_surfaces_descriptive_candidate() {
+        // sps_blackhornet.pbo → search term "SPS". The correct mod
+        // "SPS BlackHornet PRS" must outrank the similarly-named but
+        // wrong "SPS AI AXMC Sniper Rifle Series" because its title
+        // contains the descriptive PBO word "blackhornet".
+        let g = group("SPS", &["sps_blackhornet.pbo"]);
+        let correct = candidate("SPS BlackHornet PRS", "2457052493");
+        let wrong = candidate("SPS AI AXMC Sniper Rifle Series", "1510335080");
+        assert!(score_candidate(&correct, &g) > score_candidate(&wrong, &g));
+    }
+
+    #[test]
+    fn pbo_name_boost_splits_camelcase_stems() {
+        // FranksMarkers.pbo → the stem splits into ["franks", "markers"].
+        // "NATO Markers+" contains "markers" and must outrank
+        // "Crye Gen 3 Uniforms (NATO Retexture)" which contains neither.
+        let g = group("NATO", &["FranksMarkers.pbo"]);
+        let markers = candidate("NATO Markers+", "1340701737");
+        let uniforms = candidate("Crye Gen 3 Uniforms (NATO Retexture)", "724064220");
+        assert!(score_candidate(&markers, &g) > score_candidate(&uniforms, &g));
+    }
+
+    #[test]
+    fn short_term_rejects_prefix_noise() {
+        // "sty" must not match "Bodycam Style Aiming" — "sty" is a
+        // prefix of "style", not a word or suffix in the title.
+        let g = group("sty", &["sty_equipment.pbo"]);
+        let noise = candidate("Bodycam Style Aiming", "3514524021");
+        let g2 = group("sty", &["sty_equipment.pbo"]);
+        let unrelated = candidate("S.T.Y. Equipment", "999");
+        assert!(score_candidate(&noise, &g) < score_candidate(&unrelated, &g2));
     }
 }
