@@ -235,6 +235,9 @@ pub fn pbo_identity(path: &Path) -> Option<String> {
 /// Used for cross-referencing PBOs against Workshop candidates.
 #[derive(Debug, Clone, Default)]
 pub struct CfgPatchesInfo {
+    /// The CfgPatches class name (e.g. "ffaa_data", "ade").
+    /// This is the addon's identity — used as a search term.
+    pub name: Option<String>,
     /// The `author` field: mod author name (e.g. "UnderSiege Productionz").
     pub author: Option<String>,
     /// The `url` field: sometimes a direct Workshop page URL.
@@ -266,7 +269,27 @@ pub fn pbo_cfg_patches(path: &Path) -> CfgPatchesInfo {
         .collect();
     let text = strings.join("\n");
 
-    // 1. author = "Name"
+    // 1. CfgPatches class name: "class CfgPatches" followed by
+    //    "class <name> {". This is the addon's identity.
+    if let Some(idx) = text.find("CfgPatches") {
+        let after_cfg = &text[idx + "CfgPatches".len()..];
+        // Find the next "class " after CfgPatches
+        if let Some(class_idx) = after_cfg.find("class ") {
+            let after_class = &after_cfg[class_idx + "class ".len()..];
+            // Take until whitespace, brace, or semicolon
+            let end = after_class
+                .find(|c: char| c.is_whitespace() || c == '{' || c == ';')
+                .unwrap_or(after_class.len());
+            if end >= 2 {
+                let name = after_class[..end].trim().to_string();
+                if !name.is_empty() && name != "CfgPatches" {
+                    info.name = Some(name);
+                }
+            }
+        }
+    }
+
+    // 2. author = "Name"
     for s in text.lines() {
         let s = s.trim();
         if let Some(idx) = s.find("author") {

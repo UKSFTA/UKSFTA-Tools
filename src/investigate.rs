@@ -48,11 +48,17 @@ struct PboGroup {
     /// term is "SPS" but extras include "sps_blackhornet", "blackhornet".
     extra_terms: Vec<String>,
     pbos: Vec<String>,
+    /// The full PBO prefix path (e.g. "z\ace\addons\grenades").
+    /// Used for prefix path search in descriptions.
+    prefix: Option<String>,
     author_handle: Option<String>,
     /// CfgPatches `author` field: full author name (e.g. "UnderSiege Productionz").
     cfg_author: Option<String>,
     /// CfgPatches `url` field: sometimes the exact Workshop page URL.
     cfg_url: Option<String>,
+    /// CfgPatches class name: the addon's identity (e.g. "ffaa_data", "ade").
+    /// Used as an additional search term.
+    cfg_name: Option<String>,
     /// Required addons from CfgPatches: dependency mod families.
     cfg_children: Vec<String>,
 }
@@ -163,6 +169,19 @@ fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
         }
     }
 
+    // 6b. CfgPatches class name match — if the candidate title contains
+    //     the addon class name or its root, strong structural signal.
+    //     "ffaa_data" → "ffaa" in "FFAA MOD" → +30 pts
+    if let Some(ref cfg_name) = group.cfg_name {
+        let cfg_lower = cfg_name.to_lowercase();
+        let cfg_root = cfg_lower.split('_').next().unwrap_or(&cfg_lower);
+        if title_lower.contains(&cfg_lower) {
+            score += 30.0;
+        } else if cfg_root.len() >= 3 && title_lower.contains(cfg_root) {
+            score += 20.0;
+        }
+    }
+
     // 7. Tag filter — bonus for mods, penalty for non-mods
     if candidate.tags.iter().any(|t| t.eq_ignore_ascii_case("Mod")) {
         score += 10.0;
@@ -178,6 +197,34 @@ fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
             if child_lower.contains(known) {
                 score += 5.0;
             }
+        }
+    }
+
+    // 9. Description content match — if the candidate's description
+    //     contains PBO names from our group, strong confirmation signal.
+    //     Some modders list their PBO contents in the description.
+    let desc_lower = candidate.short_description.to_lowercase();
+    let mut desc_hits = 0;
+    for pbo_name in &group.pbos {
+        let stem = pbo_name
+            .strip_suffix(".pbo")
+            .unwrap_or(pbo_name)
+            .to_lowercase();
+        if stem.len() >= 4 && desc_lower.contains(&stem) {
+            desc_hits += 1;
+        }
+    }
+    if desc_hits > 0 {
+        score += 20.0 * desc_hits as f64;
+    }
+
+    // 10. Prefix path in description — some modders include the exact
+    //     prefix path (e.g. "z\ace\addons\grenades") in their description.
+    //     This is a near-certain match when found.
+    if let Some(ref prefix) = group.prefix {
+        let prefix_lower = prefix.to_lowercase();
+        if desc_lower.contains(&prefix_lower) {
+            score += 60.0;
         }
     }
 
@@ -386,9 +433,11 @@ fn group_pbos_by_term(
                 search_term,
                 extra_terms,
                 pbos: Vec::new(),
+                prefix: prefix.clone(),
                 author_handle: None,
                 cfg_author: cfg.author.clone(),
                 cfg_url: cfg.url.clone(),
+                cfg_name: cfg.name.clone(),
                 cfg_children: cfg.required_addons.clone(),
             }
         });
@@ -402,12 +451,15 @@ fn group_pbos_by_term(
                 group.author_handle = Some(ah.clone());
             }
         }
-        // If the first PBO had no author/url, try this one
+        // If the first PBO had no author/url/name, try this one
         if group.cfg_author.is_none() && cfg.author.is_some() {
             group.cfg_author = cfg.author;
         }
         if group.cfg_url.is_none() && cfg.url.is_some() {
             group.cfg_url = cfg.url;
+        }
+        if group.cfg_name.is_none() && cfg.name.is_some() {
+            group.cfg_name = cfg.name;
         }
     }
 
@@ -1078,6 +1130,24 @@ pub fn investigate(all: bool, online: bool) {
             for extra in &group.extra_terms {
                 if !variations.contains(extra) {
                     variations.push(extra.clone());
+                }
+            }
+            // Add CfgPatches class name as a search term.
+            // "ffaa_data" → search "ffaa" (the mod family)
+            if let Some(ref cfg_name) = group.cfg_name {
+                let cfg_root = cfg_name.split('_').next().unwrap_or(cfg_name);
+                if cfg_root.len() >= 3 && !variations.contains(&cfg_root.to_string()) {
+                    variations.push(cfg_root.to_string());
+                }
+                if !variations.contains(cfg_name) {
+                    variations.push(cfg_name.clone());
+                }
+            }
+            // Add author handle as a search term when distinctive.
+            // "TFB" → search "TFB" — Workshop titles often include author names.
+            if let Some(ref author) = group.author_handle {
+                if !variations.contains(author) {
+                    variations.push(author.clone());
                 }
             }
 
