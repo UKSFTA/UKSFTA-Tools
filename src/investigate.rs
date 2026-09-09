@@ -87,7 +87,8 @@ fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
     //    terms where the full string doesn't match but words do.
     let term_lower = group.search_term.to_lowercase();
     let title_lower = candidate.title.to_lowercase();
-    let title_relevant = title_lower.contains(&term_lower);
+    // Short terms must match as a whole word, longer terms as substring
+    let title_relevant = title_contains_term(&title_lower, &term_lower);
 
     // Word-level overlap: split term into words, check how many
     // appear in the title. "aceax" → ["aceax"] → 1.0 if "ACEAX" in title.
@@ -98,7 +99,7 @@ fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
     let term_tokens: Vec<&str> = split_camel_or_underscore(&term_lower);
     let matching_tokens = term_tokens
         .iter()
-        .filter(|t| t.len() >= 3 && title_lower.contains(**t))
+        .filter(|t| t.len() >= 3 && title_contains_term(&title_lower, t))
         .count();
     let token_ratio = if term_tokens.is_empty() {
         0.0
@@ -218,6 +219,29 @@ fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
         score += 20.0 * desc_hits as f64;
     }
 
+    // 9b. PBO-name word match — check the candidate title against every
+    //     PBO stem word in the group, not just the search term. Catches
+    //     cases where the derived search term is a generic author prefix
+    //     ("JAS") but the PBO name is descriptive ("NVG_Parts" → "nvg"
+    //     suffix-matches "GPNVG18"). Words equal to the search term are
+    //     skipped — title relevance already scored them.
+    let mut pbo_name_hits = 0;
+    for pbo_name in &group.pbos {
+        // Split BEFORE lowercasing: camelCase boundaries ("FranksMarkers"
+        // → ["Franks", "Markers"]) are lost if we lowercase first.
+        let stem = pbo_name.strip_suffix(".pbo").unwrap_or(pbo_name);
+        for word in split_camel_or_underscore(stem) {
+            let word = word.to_lowercase();
+            if word.len() >= 3 && word != term_lower && title_contains_term(&title_lower, &word) {
+                pbo_name_hits += 1;
+                break;
+            }
+        }
+    }
+    if pbo_name_hits > 0 {
+        score += 25.0 * pbo_name_hits as f64;
+    }
+
     // 10. Prefix path in description — some modders include the exact
     //     prefix path (e.g. "z\ace\addons\grenades") in their description.
     //     This is a near-certain match when found.
@@ -277,11 +301,21 @@ fn split_camel_or_underscore(s: &str) -> Vec<&str> {
     }
 }
 
-/// Character-level token overlap score between a search term and a title.
-/// Breaks the search term into individual characters, checks how many
-/// appear in the title. Returns a ratio (0.0 to 1.0).
-///
-/// "aceax" → {a,c,e,x} → "ACE3 Arsenal Extended" has a,c,e,x → 4/4 = 1.0
+/// True when `term` appears in `title` as a meaningful match.
+/// Short terms (< 5 chars) must match as a whole word or as a suffix
+/// of a longer word. Suffix allows compound acronyms: "nvg" in
+/// "GPNVG-18" is a real match. Prefix matches are rejected: "sty"
+/// in "style" is noise, not a match.
+fn title_contains_term(title_lower: &str, term_lower: &str) -> bool {
+    if term_lower.len() < 5 {
+        title_lower
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == term_lower || (w.len() > term_lower.len() && w.ends_with(term_lower)))
+    } else {
+        title_lower.contains(term_lower)
+    }
+}
+
 /// Word-level overlap score between a search term and a title.
 /// Splits both into words, checks how many search-term words appear
 /// in the title. More discriminative than character-level matching
@@ -290,6 +324,8 @@ fn split_camel_or_underscore(s: &str) -> Vec<&str> {
 /// "aceax" → ["aceax"] → if "ACEAX" in title → 1.0
 /// "zulu_custom_slicksters" → ["zulu","custom","slicksters"] → "A2 Declassified: Fireteam Zulu" has "zulu" → 1/3 = 0.33
 /// "usasoc_backpacks" → ["usasoc","backpacks"] → "121 USASOC Sniper Rifles Pack" has "usasoc" → 1/2 = 0.5
+///
+/// Short words (< 5 chars) must match exactly. "sty" is not "style".
 fn word_overlap_score(term_lower: &str, title_lower: &str) -> f64 {
     let term_words: Vec<&str> = split_camel_or_underscore(term_lower);
     if term_words.is_empty() {
@@ -304,7 +340,21 @@ fn word_overlap_score(term_lower: &str, title_lower: &str) -> f64 {
 
     let hits = term_words
         .iter()
-        .filter(|tw| tw.len() >= 3 && title_words.iter().any(|t| *t == **tw || t.contains(*tw)))
+        .filter(|tw| {
+            if tw.len() < 3 {
+                return false;
+            }
+            title_words.iter().any(|t| {
+                if tw.len() < 5 {
+                    // Short words must match exactly or as a suffix of a
+                    // longer word. "gpnvg" contains "nvg" (compound), but
+                    // "style" must not count as "sty" (prefix noise).
+                    *t == **tw || (t.len() > tw.len() && t.ends_with(*tw))
+                } else {
+                    *t == **tw || t.contains(*tw)
+                }
+            })
+        })
         .count();
 
     hits as f64 / term_words.len() as f64
@@ -1281,7 +1331,7 @@ pub fn investigate(all: bool, online: bool) {
                     .first()
                     .map(|(_, c)| c.title.to_lowercase())
                     .unwrap_or_default();
-                let title_match = top_title_lower.contains(&term_lower);
+                let title_match = title_contains_term(&top_title_lower, &term_lower);
 
                 // Character-level token overlap for the top candidate
                 let top_word_score = word_overlap_score(&term_lower, &top_title_lower);
@@ -1290,7 +1340,7 @@ pub fn investigate(all: bool, online: bool) {
                 let term_tokens = split_camel_or_underscore(&term_lower);
                 let top_token_hits = term_tokens
                     .iter()
-                    .filter(|t| t.len() >= 3 && top_title_lower.contains(**t))
+                    .filter(|t| t.len() >= 3 && title_contains_term(&top_title_lower, t))
                     .count();
                 let token_ratio = if term_tokens.is_empty() {
                     0.0
@@ -1478,5 +1528,78 @@ fn check_workshop_visibility(results: Vec<(String, Option<ResolvedOrigin>)>) {
             detail.title
         };
         println!("  {} -> {} [{}]", detail.publishedfileid, title, status);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(title: &str, id: &str) -> ScoredCandidate {
+        ScoredCandidate {
+            id: id.to_string(),
+            title: title.to_string(),
+            search_score: 0.5,
+            subscriptions: 1000,
+            views: 5000,
+            favorited: 100,
+            star_rating: 4.5,
+            total_votes: 50,
+            tags: vec!["Mod".to_string()],
+            creator: String::new(),
+            creator_name: String::new(),
+            time_updated: 0,
+            short_description: String::new(),
+            children: Vec::new(),
+            file_type: 0,
+        }
+    }
+
+    fn group(term: &str, pbos: &[&str]) -> PboGroup {
+        PboGroup {
+            search_term: term.to_string(),
+            extra_terms: Vec::new(),
+            pbos: pbos.iter().map(|s| s.to_string()).collect(),
+            prefix: None,
+            author_handle: None,
+            cfg_author: None,
+            cfg_url: None,
+            cfg_name: None,
+            cfg_children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn pbo_name_boost_surfaces_descriptive_candidate() {
+        // sps_blackhornet.pbo → search term "SPS". The correct mod
+        // "SPS BlackHornet PRS" must outrank the similarly-named but
+        // wrong "SPS AI AXMC Sniper Rifle Series" because its title
+        // contains the descriptive PBO word "blackhornet".
+        let g = group("SPS", &["sps_blackhornet.pbo"]);
+        let correct = candidate("SPS BlackHornet PRS", "2457052493");
+        let wrong = candidate("SPS AI AXMC Sniper Rifle Series", "1510335080");
+        assert!(score_candidate(&correct, &g) > score_candidate(&wrong, &g));
+    }
+
+    #[test]
+    fn pbo_name_boost_splits_camelcase_stems() {
+        // FranksMarkers.pbo → the stem splits into ["franks", "markers"].
+        // "NATO Markers+" contains "markers" and must outrank
+        // "Crye Gen 3 Uniforms (NATO Retexture)" which contains neither.
+        let g = group("NATO", &["FranksMarkers.pbo"]);
+        let markers = candidate("NATO Markers+", "1340701737");
+        let uniforms = candidate("Crye Gen 3 Uniforms (NATO Retexture)", "724064220");
+        assert!(score_candidate(&markers, &g) > score_candidate(&uniforms, &g));
+    }
+
+    #[test]
+    fn short_term_rejects_prefix_noise() {
+        // "sty" must not match "Bodycam Style Aiming" — "sty" is a
+        // prefix of "style", not a word or suffix in the title.
+        let g = group("sty", &["sty_equipment.pbo"]);
+        let noise = candidate("Bodycam Style Aiming", "3514524021");
+        let g2 = group("sty", &["sty_equipment.pbo"]);
+        let unrelated = candidate("S.T.Y. Equipment", "999");
+        assert!(score_candidate(&noise, &g) < score_candidate(&unrelated, &g2));
     }
 }
