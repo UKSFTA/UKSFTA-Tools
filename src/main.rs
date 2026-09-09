@@ -868,7 +868,7 @@ name = "CBA_A3"
         // Point the cache at the test dir so we do not touch .uksfta in
         // the workspace; run the round-trip via direct file IO.
         let path = dir.join("identities.json");
-        let mut cache: IdentityCache = HashMap::new();
+        let mut cache: IdentityCache<(String, String)> = HashMap::new();
         cache.insert(
             "TFL".to_string(),
             vec![(
@@ -878,7 +878,7 @@ name = "CBA_A3"
         );
         let json = serde_json::to_string_pretty(&cache).unwrap();
         fs::write(&path, json).unwrap();
-        let loaded: IdentityCache =
+        let loaded: IdentityCache<(String, String)> =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             loaded.get("TFL").unwrap(),

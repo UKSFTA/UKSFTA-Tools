@@ -14,10 +14,47 @@ use crate::pbo::{
 use crate::steam::find_all_workshop_caches;
 use crate::util::{urlencode, workshop_url};
 
+// ── Output helpers ─────────────────────────────────────────────────────
+
+/// ANSI colour codes, applied only when stdout is a terminal.
+/// Piped output stays plain so logs and CI are not polluted.
+const C_RESET: &str = "\x1b[0m";
+const C_GREEN: &str = "\x1b[32m";
+const C_YELLOW: &str = "\x1b[33m";
+const C_RED: &str = "\x1b[31m";
+const C_DIM: &str = "\x1b[2m";
+const C_BOLD: &str = "\x1b[1m";
+
+/// True when stdout is a terminal, so colour codes are safe to use.
+fn stdout_is_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+}
+
+/// Wrap text in a colour, or return it unchanged when colour is off.
+fn paint(use_colour: bool, code: &str, text: &str) -> String {
+    if use_colour {
+        format!("{}{}{}", code, text, C_RESET)
+    } else {
+        text.to_string()
+    }
+}
+
+/// Format a count for humans: 47770 → "47.8k", 1541757 → "1.5M".
+fn human_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 // ── Data structures ────────────────────────────────────────────────────
 
 /// A Workshop search candidate with all ranking signals.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)] // fields stored for completeness; scored/displayed selectively
 struct ScoredCandidate {
     id: String,
@@ -412,19 +449,11 @@ fn search_variation_terms(term: &str) -> Vec<String> {
     variations
 }
 
-/// Convert a ScoredCandidate to the cache format (id, title).
-fn candidate_to_cache(c: &ScoredCandidate) -> (String, String) {
-    (c.id.clone(), c.title.clone())
-}
-
-/// Convert a cached (id, title) pair to a minimal ScoredCandidate.
-fn cache_to_candidate(id: &str, title: &str) -> ScoredCandidate {
-    ScoredCandidate {
-        id: id.to_string(),
-        title: title.to_string(),
-        search_score: 0.0, // cached entries have no score data
-        ..Default::default()
-    }
+/// Convert a ScoredCandidate to a cache entry. The full candidate is
+/// stored so offline scoring matches online scoring exactly — a cached
+/// search must not silently change confidence.
+fn candidate_to_cache(c: &ScoredCandidate) -> ScoredCandidate {
+    c.clone()
 }
 
 // ── PBO grouping ───────────────────────────────────────────────────────
@@ -565,7 +594,7 @@ pub fn investigate_report() {
                         let best = &hits[0];
                         println!(
                             "  {:<45} -> {} ({}) [term \"{}\"]",
-                            name, best.1, best.0, term
+                            name, best.title, best.id, term
                         );
                         shown += 1;
                     }
@@ -588,7 +617,7 @@ fn identity_cache_path() -> PathBuf {
     Path::new(".uksfta").join("identities.json")
 }
 
-fn load_identity_cache() -> IdentityCache {
+fn load_identity_cache() -> IdentityCache<ScoredCandidate> {
     let path = identity_cache_path();
     let content = match fs::read_to_string(&path) {
         Ok(c) => c,
@@ -597,13 +626,18 @@ fn load_identity_cache() -> IdentityCache {
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-fn save_identity_cache(cache: &IdentityCache) {
+fn save_identity_cache(cache: &IdentityCache<ScoredCandidate>) {
     let path = identity_cache_path();
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
     if let Ok(json) = serde_json::to_string_pretty(cache) {
-        let _ = fs::write(&path, json);
+        // Write to a temp file then rename, so a killed run never leaves
+        // a truncated cache that forces a full re-search next time.
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, json).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
     }
 }
 
@@ -1098,13 +1132,14 @@ pub fn investigate(all: bool, online: bool) {
     }
 
     // Report
+    let use_colour = stdout_is_tty();
     println!("Untracked PBO Investigation:");
     println!("  {} PBO(s) examined", results.len());
     let mut unknown_count = 0;
     for (pbo, origin) in &results {
         let Some(origin) = origin else {
             unknown_count += 1;
-            println!("  [UNKNOWN] {}", pbo);
+            println!("  {} {}", paint(use_colour, C_RED, "[UNKNOWN]"), pbo);
             continue;
         };
         let id = &origin.id;
@@ -1120,7 +1155,8 @@ pub fn investigate(all: bool, online: bool) {
         };
         if origin.is_pack {
             println!(
-                "  {} -> {} ({}) {} [pack: prefix {} — verify source]",
+                "  {} {} -> {} ({}) {} [pack: prefix {} — verify source]",
+                paint(use_colour, C_GREEN, "[PACK]"),
                 pbo,
                 name,
                 id,
@@ -1128,7 +1164,14 @@ pub fn investigate(all: bool, online: bool) {
                 origin.prefix.as_deref().unwrap_or("unknown")
             );
         } else {
-            println!("  {} -> {} ({}) {}", pbo, name, id, workshop_url(id));
+            println!(
+                "  {} {} -> {} ({}) {}",
+                paint(use_colour, C_GREEN, "[RESOLVED]"),
+                pbo,
+                name,
+                id,
+                workshop_url(id)
+            );
         }
     }
     if unknown_count > 0 {
@@ -1172,14 +1215,20 @@ pub fn investigate(all: bool, online: bool) {
         }
 
         let groups = group_pbos_by_term(&searchable, addons_dir);
+        let total_groups = groups.len();
         let mut cache = load_identity_cache();
         let api_client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .expect("Failed to build HTTP client");
         let mut searched = HashSet::new();
+        let mut confident_groups = 0;
+        let mut weak_groups = 0;
+        let mut no_candidate_groups = 0;
+        let mut cached_groups = 0;
 
-        for group in &groups {
+        for (group_idx, group) in groups.iter().enumerate() {
+            let progress = format!("[{}/{}]", group_idx + 1, total_groups);
             let term = &group.search_term;
             if searched.contains(term) {
                 continue;
@@ -1229,17 +1278,14 @@ pub fn investigate(all: bool, online: bool) {
                 cache.get(term)
             {
                 println!(
-                    "  [group: {}] (search \"{}\"): from cache",
+                    "  {} {} [group: {}] (search \"{}\"): from cache",
+                    paint(use_colour, C_DIM, &progress),
+                    paint(use_colour, C_DIM, "[cached]"),
                     group.pbos.join(", "),
                     term
                 );
-                (
-                    cached
-                        .iter()
-                        .map(|(id, title)| cache_to_candidate(id, title))
-                        .collect(),
-                    true,
-                )
+                cached_groups += 1;
+                (cached.clone(), true)
             } else {
                 // Search each variation and merge results. Keep the
                 // highest search_score for each candidate ID.
@@ -1251,14 +1297,13 @@ pub fn investigate(all: bool, online: bool) {
                     if searched.contains(variation) {
                         // Already searched this variation in another group
                         if let Some(cached) = cache.get(variation) {
-                            for (id, title) in cached {
-                                let c = cache_to_candidate(id, title);
-                                if let Some(existing) = merged.get(id) {
+                            for c in cached {
+                                if let Some(existing) = merged.get(&c.id) {
                                     if c.search_score > existing.search_score {
-                                        merged.insert(id.clone(), c);
+                                        merged.insert(c.id.clone(), c.clone());
                                     }
                                 } else {
-                                    merged.insert(id.clone(), c);
+                                    merged.insert(c.id.clone(), c.clone());
                                 }
                             }
                             any_from_cache = true;
@@ -1288,7 +1333,7 @@ pub fn investigate(all: bool, online: bool) {
                     }
 
                     // Cache this variation's results
-                    let cached: Vec<(String, String)> =
+                    let cached: Vec<ScoredCandidate> =
                         merged.values().map(candidate_to_cache).collect();
                     cache.insert(variation.clone(), cached);
                     save_identity_cache(&cache);
@@ -1303,7 +1348,7 @@ pub fn investigate(all: bool, online: bool) {
                 let candidates: Vec<ScoredCandidate> = merged.into_values().collect();
                 // Cache under the primary term too
                 if !candidates.is_empty() {
-                    let cached: Vec<(String, String)> =
+                    let cached: Vec<ScoredCandidate> =
                         candidates.iter().map(candidate_to_cache).collect();
                     cache.insert(term.clone(), cached);
                     save_identity_cache(&cache);
@@ -1312,8 +1357,15 @@ pub fn investigate(all: bool, online: bool) {
             };
 
             if candidates.is_empty() {
+                no_candidate_groups += 1;
                 for pbo in &group.pbos {
-                    println!("  {}: no candidates for \"{}\"", pbo, term);
+                    println!(
+                        "  {} {} {}: no candidates for \"{}\"",
+                        paint(use_colour, C_DIM, &progress),
+                        paint(use_colour, C_RED, "[none]"),
+                        pbo,
+                        term
+                    );
                 }
             } else {
                 // Score and rank candidates for this group
@@ -1377,7 +1429,9 @@ pub fn investigate(all: bool, online: bool) {
                         let stats = if c.subscriptions > 0 || c.views > 0 {
                             format!(
                                 " [score={:.0}, {} subs, {} views]",
-                                score, c.subscriptions, c.views
+                                score,
+                                human_count(c.subscriptions),
+                                human_count(c.views)
                             )
                         } else {
                             format!(" [score={:.0}]", score)
@@ -1386,27 +1440,37 @@ pub fn investigate(all: bool, online: bool) {
                     })
                     .collect::<Vec<_>>();
 
-                if weak_match {
-                    // Weak match: search term doesn't appear in the
-                    // top candidate's title. Show "no confident match"
-                    // with the best candidate for reference.
-                    println!(
-                        "  [group: {}] (search \"{}\"): {} candidate(s){} — no confident match (best: {})",
-                        group.pbos.join(", "),
-                        term,
-                        candidates.len(),
-                        meta_str,
-                        top.first().map(|s| s.as_str()).unwrap_or("none")
-                    );
+                // Group header: status symbol, progress, PBOs, search meta.
+                let header_meta = if meta_str.is_empty() {
+                    format!(", {} candidate(s)", candidates.len())
                 } else {
+                    format!(", {} candidate(s){}", candidates.len(), meta_str)
+                };
+
+                if weak_match {
+                    weak_groups += 1;
                     println!(
-                        "  [group: {}] (search \"{}\"): {} candidate(s){} — {}",
+                        "  {} {} (search \"{}\"{})",
+                        paint(use_colour, C_YELLOW, &format!("? {}", progress)),
                         group.pbos.join(", "),
                         term,
-                        candidates.len(),
-                        meta_str,
-                        top.join(", ")
+                        header_meta
                     );
+                    if let Some(best) = top.first() {
+                        println!("      best: {} — no confident match", best);
+                    }
+                } else {
+                    confident_groups += 1;
+                    println!(
+                        "  {} {} (search \"{}\"{})",
+                        paint(use_colour, C_GREEN, &format!("\u{2713} {}", progress)),
+                        group.pbos.join(", "),
+                        term,
+                        header_meta
+                    );
+                    for candidate in top {
+                        println!("      \u{2192} {}", candidate);
+                    }
                 }
 
                 // Changelog cross-reference: if the top candidate has a
@@ -1439,6 +1503,30 @@ pub fn investigate(all: bool, online: bool) {
                 }
             }
             // Rate-limiting is handled inside the variation loop above.
+        }
+
+        // Final summary
+        println!();
+        println!("{}", paint(use_colour, C_BOLD, "Summary:"));
+        println!(
+            "  {} confident match(es) — the top candidate's title matches the search term",
+            confident_groups
+        );
+        println!(
+            "  {} weak match(es) — no confident match, best candidate shown for reference",
+            weak_groups
+        );
+        println!("  {} group(s) with no candidates", no_candidate_groups);
+        if cached_groups > 0 {
+            println!(
+                "  {} group(s) served from the local cache ({} total)",
+                cached_groups,
+                paint(
+                    use_colour,
+                    C_DIM,
+                    "run 'uksfta investigate --online' to refresh"
+                )
+            );
         }
     }
 }

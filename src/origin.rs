@@ -84,9 +84,11 @@ pub struct ResolvedOrigin {
     pub is_pack: bool,
 }
 
-/// The local identity cache type: search term -> confirmed (id, title)
-/// pairs, persisted to .uksfta/identities.json.
-pub type IdentityCache = HashMap<String, Vec<(String, String)>>;
+/// The local identity cache type: search term -> candidate entries,
+/// persisted to .uksfta/identities.json. The entry type is generic so
+/// each consumer stores the data it needs (ScoredCandidate in the
+/// investigate command, plain id/title pairs in tests).
+pub type IdentityCache<T> = HashMap<String, Vec<T>>;
 
 /// Build a single-pass index of every PBO name to the mod folders that
 /// contain it. This is the expensive cache walk; resolving then becomes
