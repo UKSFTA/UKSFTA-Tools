@@ -122,6 +122,29 @@ pub fn search_term_from_prefix(prefix: &str) -> String {
     }
 }
 
+/// Extract additional search terms from the full prefix path.
+/// For "x\SPS\Vehicles\sps_blackhornet", the primary term is "SPS" but
+/// we also want to search "sps_blackhornet" and "blackhornet" — the
+/// distinctive parts of the prefix that Workshop search might match.
+pub fn extra_search_terms_from_prefix(prefix: &str) -> Vec<String> {
+    let parts: Vec<&str> = prefix.split('\\').collect();
+    let mut extras = Vec::new();
+    let skip = ["addons", "scripts", "functions", "models", "data", "config"];
+    for part in &parts {
+        if part.len() >= 4 && !skip.contains(part) {
+            extras.push(part.to_string());
+        }
+    }
+    // Also try the last two segments joined (e.g. "Vehicles_sps_blackhornet")
+    if parts.len() >= 3 {
+        let tail = parts[parts.len() - 2..].join("_");
+        if tail.len() >= 4 {
+            extras.push(tail);
+        }
+    }
+    extras
+}
+
 /// Extract a mod identity from a PBO's packed config content.
 /// The config carries richer identity than the header prefix: mod-family
 /// string-table tokens ("$STR_RHSUSF_AUTHOR_FULL" -> "RHSUSF") and short
