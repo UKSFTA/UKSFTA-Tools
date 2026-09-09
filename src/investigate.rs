@@ -13,6 +13,163 @@ use crate::pbo::{
 use crate::steam::find_all_workshop_caches;
 use crate::util::{urlencode, workshop_url};
 
+// ── Data structures ────────────────────────────────────────────────────
+
+/// A Workshop search candidate with all ranking signals.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // fields stored for completeness; scored/displayed selectively
+struct ScoredCandidate {
+    id: String,
+    title: String,
+    search_score: f64,
+    subscriptions: u64,
+    views: u64,
+    favorited: u64,
+    star_rating: f64,
+    total_votes: u32,
+    tags: Vec<String>,
+    creator: String,
+    creator_name: String,
+    time_updated: u64,
+    short_description: String,
+    children: Vec<String>,
+    file_type: u32,
+}
+
+/// A group of PBOs that share the same search term.
+/// Arma groups PBOs by `@ModName/` folder — all PBOs in one folder
+/// load as one mod. Grouping by search term means we search once per
+/// mod family instead of once per PBO.
+struct PboGroup {
+    search_term: String,
+    pbos: Vec<String>,
+    author_handle: Option<String>,
+}
+
+// ── Scoring ────────────────────────────────────────────────────────────
+
+/// Score a candidate against a group of PBOs using multiple signals.
+/// Higher is better. Signals weighted by reliability:
+///   search_score (Steam's own relevance): 100 pts
+///   popularity (subscriptions + views):   ~45 pts
+///   quality (star rating):                20 pts
+///   author match:                         50 pts
+///   tag filter (Mod tag):                 10 pts
+///   file_type penalty (non-mod):         -50 pts
+fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
+    let mut score = 0.0;
+
+    // 1. Steam's own search_score (0-1 range)
+    score += candidate.search_score * 100.0;
+
+    // 2. Popularity (log-scaled to prevent domination by mega-mods)
+    score += (candidate.subscriptions as f64 + 1.0).ln() * 15.0;
+    score += (candidate.views as f64 + 1.0).ln() * 10.0;
+    score += (candidate.favorited as f64 + 1.0).ln() * 5.0;
+
+    // 3. Quality
+    score += candidate.star_rating * 20.0;
+
+    // 4. Author match — strong signal when author handle present
+    if let Some(ref author) = group.author_handle {
+        let author_lower = author.to_lowercase();
+        if candidate
+            .creator_name
+            .to_lowercase()
+            .contains(&author_lower)
+        {
+            score += 50.0;
+        }
+    }
+
+    // 5. Tag filter — bonus for mods, penalty for non-mods
+    if candidate.tags.iter().any(|t| t.eq_ignore_ascii_case("Mod")) {
+        score += 10.0;
+    }
+    if candidate.file_type != 0 {
+        score -= 50.0;
+    }
+
+    // 6. Dependency verification — if candidate lists children that
+    //    match known mod families (ace, rhs, cba), boost score
+    for child in &candidate.children {
+        let child_lower = child.to_lowercase();
+        for known in &["ace", "rhs", "cba", "tf", "tfl"] {
+            if child_lower.contains(known) {
+                score += 5.0;
+            }
+        }
+    }
+
+    score
+}
+
+/// Convert a ScoredCandidate to the cache format (id, title).
+fn candidate_to_cache(c: &ScoredCandidate) -> (String, String) {
+    (c.id.clone(), c.title.clone())
+}
+
+/// Convert a cached (id, title) pair to a minimal ScoredCandidate.
+fn cache_to_candidate(id: &str, title: &str) -> ScoredCandidate {
+    ScoredCandidate {
+        id: id.to_string(),
+        title: title.to_string(),
+        search_score: 0.0, // cached entries have no score data
+        ..Default::default()
+    }
+}
+
+// ── PBO grouping ───────────────────────────────────────────────────────
+
+/// Group PBOs by their search term. All PBOs with the same prefix root
+/// are grouped together — this matches how Arma loads them (one mod
+/// family = one search). The best author handle from the group is used
+/// for scoring.
+fn group_pbos_by_term(
+    pbos: &[(String, Option<ResolvedOrigin>)],
+    addons_dir: &Path,
+) -> Vec<PboGroup> {
+    let mut groups: HashMap<String, PboGroup> = HashMap::new();
+
+    for (name, _origin) in pbos {
+        let pbo_path = addons_dir.join(name);
+        // Extract the search term using the same priority chain as before:
+        // 1. requiredAddons root from plain-text config
+        // 2. string-table token from config
+        // 3. short author handle from config
+        // 4. header prefix
+        let term = pbo_config_identity(&pbo_path)
+            .or_else(|| pbo_identity(&pbo_path))
+            .or_else(|| pbo_prefix(&pbo_path))
+            .unwrap_or_else(|| name.clone());
+        let term = search_term_from_prefix(&term);
+
+        // Extract author handle for scoring (short tokens like DANZ, TFB)
+        let author_handle = pbo_config_identity(&pbo_path).filter(|t| t.len() < 6 && t.len() >= 2);
+
+        let group = groups.entry(term.clone()).or_insert_with(|| PboGroup {
+            search_term: term,
+            pbos: Vec::new(),
+            author_handle: None,
+        });
+        group.pbos.push(name.clone());
+        // Keep the best author handle (longest = most specific)
+        if let Some(ref ah) = author_handle {
+            if group
+                .author_handle
+                .as_ref()
+                .is_none_or(|existing| ah.len() > existing.len())
+            {
+                group.author_handle = Some(ah.clone());
+            }
+        }
+    }
+
+    groups.into_values().collect()
+}
+
+// ── Cache ──────────────────────────────────────────────────────────────
+
 /// Print the resolved identity inventory from the local cache.
 /// For each untracked PBO in addons/, derive its search term (same logic
 /// as the online search) and show the cached candidate mods, if any.
@@ -89,13 +246,164 @@ fn save_identity_cache(cache: &IdentityCache) {
     }
 }
 
+// ── Workshop search (keyless scrape) ───────────────────────────────────
+
+/// Search the Steam Workshop browse page for a query and return candidate
+/// ScoredCandidates. Parses the SSR JSON blob for rich data (tags,
+/// subscriptions, creator name, etc.) instead of just extracting IDs.
+/// Returns an empty vec on network or parse failure.
+fn search_workshop(query: &str) -> Vec<ScoredCandidate> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("Failed to build HTTP client");
+    let url = format!(
+        "https://steamcommunity.com/workshop/browse/?appid=107410&searchtext={}",
+        urlencode(query)
+    );
+    let html = match client.get(&url).send().ok().and_then(|r| r.text().ok()) {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+
+    // Try to extract the SSR JSON blob first (rich data).
+    if let Some(candidates) = parse_ssr_blob(&html) {
+        return candidates;
+    }
+
+    // Fallback: regex ID extraction (original approach, no ranking data).
+    // Enrich via batch details so titles and stats are available.
+    let mut ids = Vec::new();
+    for id in html.split("filedetails/?id=").skip(1) {
+        let id: String = id.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !id.is_empty() && !ids.contains(&id) {
+            ids.push(id);
+            if ids.len() >= 10 {
+                break;
+            }
+        }
+    }
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    batch_workshop_details(&ids, &client)
+}
+
+/// Parse the `window.SSR.renderContext` JSON blob from the Workshop
+/// browse page. This blob contains 30 items per page with full metadata
+/// (tags, subscriptions, creator name, star rating, etc.) that the
+/// regex approach misses entirely.
+fn parse_ssr_blob(html: &str) -> Option<Vec<ScoredCandidate>> {
+    // The blob is embedded as: window.SSR.renderContext=JSON.parse("...")
+    let prefix = "window.SSR.renderContext=JSON.parse(\"";
+    let start = html.find(prefix)? + prefix.len();
+    let end = html[start..].find("\");")? + start;
+    let escaped = &html[start..end];
+
+    // Unescape the JSON string: \" -> ", \\ -> \
+    let json_str = escaped.replace("\\\"", "\"").replace("\\\\", "\\");
+
+    #[derive(serde::Deserialize)]
+    struct SsrContext {
+        #[serde(rename = "workshop_browse")]
+        workshop_browse: Option<WorkshopBrowse>,
+    }
+    #[derive(serde::Deserialize)]
+    struct WorkshopBrowse {
+        results: Vec<SsrItem>,
+    }
+    #[derive(serde::Deserialize)]
+    struct SsrItem {
+        #[serde(default)]
+        publishedfileid: String,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        subscriptions: u64,
+        #[serde(default)]
+        views: u64,
+        #[serde(default)]
+        favorited: u64,
+        #[serde(default)]
+        star_rating: f64,
+        #[serde(default)]
+        total_votes: u32,
+        #[serde(default)]
+        tags: Vec<SsrTag>,
+        #[serde(default)]
+        creator: String,
+        #[serde(default)]
+        short_description: String,
+        #[serde(default)]
+        time_updated: u64,
+        #[serde(default)]
+        file_type: u32,
+        #[serde(default)]
+        creator_player_link_details: Option<CreatorDetails>,
+        #[serde(default)]
+        children: Option<Vec<SsrChild>>,
+    }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct SsrTag {
+        #[serde(default)]
+        tag: String,
+        #[serde(default)]
+        display_name: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct CreatorDetails {
+        #[serde(default)]
+        persona_name: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct SsrChild {
+        #[serde(default)]
+        publishedfileid: String,
+    }
+
+    let ctx: SsrContext = serde_json::from_str(&json_str).ok()?;
+    let browse = ctx.workshop_browse?;
+    let mut results = Vec::new();
+    for item in browse.results {
+        results.push(ScoredCandidate {
+            id: item.publishedfileid,
+            title: item.title,
+            search_score: 0.0, // SSR blob has no search_score field
+            subscriptions: item.subscriptions,
+            views: item.views,
+            favorited: item.favorited,
+            star_rating: item.star_rating,
+            total_votes: item.total_votes,
+            tags: item.tags.into_iter().map(|t| t.display_name).collect(),
+            creator: item.creator.clone(),
+            creator_name: item
+                .creator_player_link_details
+                .map(|d| d.persona_name)
+                .unwrap_or_default(),
+            time_updated: item.time_updated,
+            short_description: item.short_description,
+            children: item
+                .children
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| c.publishedfileid)
+                .collect(),
+            file_type: item.file_type,
+        });
+    }
+    Some(results)
+}
+
+// ── Workshop search (keyed QueryFiles API) ─────────────────────────────
+
 /// Batch-confirm a list of Workshop item IDs via the keyless
-/// GetPublishedFileDetails API. Returns (id, title) pairs for the items
+/// GetPublishedFileDetails API. Returns ScoredCandidates for the items
 /// that exist. Empty on network or parse failure.
-fn batch_workshop_titles(
+fn batch_workshop_details(
     ids: &[String],
     client: &reqwest::blocking::Client,
-) -> Vec<(String, String)> {
+) -> Vec<ScoredCandidate> {
     let mut form = String::from("itemcount=");
     form.push_str(&ids.len().to_string());
     for (i, id) in ids.iter().enumerate() {
@@ -127,6 +435,26 @@ fn batch_workshop_titles(
         result: u32,
         #[serde(default)]
         title: String,
+        #[serde(default)]
+        subscriptions: u64,
+        #[serde(default)]
+        views: u64,
+        #[serde(default)]
+        favorited: u64,
+        #[serde(default)]
+        time_updated: u64,
+        #[serde(default)]
+        tags: Vec<TagDetail>,
+        #[serde(default)]
+        creator: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct TagDetail {
+        #[serde(default)]
+        tag: String,
+        #[serde(default)]
+        display_name: String,
     }
 
     let parsed: ApiResponse = match serde_json::from_str(&body) {
@@ -138,9 +466,128 @@ fn batch_workshop_titles(
         .publishedfiledetails
         .into_iter()
         .filter(|d| d.result == 1)
-        .map(|d| (d.publishedfileid, d.title))
+        .map(|d| ScoredCandidate {
+            id: d.publishedfileid,
+            title: d.title,
+            subscriptions: d.subscriptions,
+            views: d.views,
+            favorited: d.favorited,
+            time_updated: d.time_updated,
+            tags: d.tags.into_iter().map(|t| t.display_name).collect(),
+            creator: d.creator,
+            ..Default::default()
+        })
         .collect()
 }
+
+/// Search the Workshop via the keyed IPublishedFileService/QueryFiles API.
+/// Requires STEAM_API_KEY in the environment. Returns ScoredCandidates
+/// with full ranking signals. None when the key is absent or the API
+/// call fails, so callers can fall back to the scrape.
+fn search_workshop_api(query: &str) -> Option<Vec<ScoredCandidate>> {
+    let key = std::env::var("STEAM_API_KEY").ok()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("Failed to build HTTP client");
+
+    let params = [
+        ("key", key.as_str()),
+        ("format", "json"),
+        ("appid", "107410"),
+        ("numperpage", "10"),
+        ("query_type", "12"), // k_PublishedFileQueryType_RankedByTextSearch
+        ("return_short_description", "1"),
+        ("return_tags", "1"),
+        ("return_children", "1"),
+        ("return_metadata", "1"),
+        ("search_text", query),
+    ];
+    let url = format!(
+        "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/?{}",
+        urlencode_pairs(&params)
+    );
+
+    let body = client.get(&url).send().ok()?.text().ok()?;
+
+    #[derive(serde::Deserialize)]
+    struct ApiResponse {
+        response: ResponseInner,
+    }
+    #[derive(serde::Deserialize)]
+    struct ResponseInner {
+        publishedfiledetails: Vec<FileDetail>,
+    }
+    #[derive(serde::Deserialize)]
+    struct FileDetail {
+        publishedfileid: String,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        subscriptions: u64,
+        #[serde(default)]
+        views: u64,
+        #[serde(default)]
+        favorited: u64,
+        #[serde(default)]
+        time_updated: u64,
+        #[serde(default)]
+        tags: Vec<TagDetail>,
+        #[serde(default)]
+        creator: String,
+        #[serde(default)]
+        short_description: String,
+        #[serde(default)]
+        children: Vec<ChildDetail>,
+    }
+    #[derive(serde::Deserialize)]
+    struct TagDetail {
+        #[serde(default)]
+        #[allow(dead_code)]
+        tag: String,
+        #[serde(default)]
+        display_name: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct ChildDetail {
+        #[serde(default)]
+        publishedfileid: String,
+    }
+
+    let parsed: ApiResponse = serde_json::from_str(&body).ok()?;
+    Some(
+        parsed
+            .response
+            .publishedfiledetails
+            .into_iter()
+            .map(|d| ScoredCandidate {
+                id: d.publishedfileid,
+                title: d.title,
+                subscriptions: d.subscriptions,
+                views: d.views,
+                favorited: d.favorited,
+                time_updated: d.time_updated,
+                tags: d.tags.into_iter().map(|t| t.display_name).collect(),
+                creator: d.creator.clone(),
+                creator_name: d.creator.clone(), // QueryFiles doesn't return display name
+                short_description: d.short_description,
+                children: d.children.into_iter().map(|c| c.publishedfileid).collect(),
+                ..Default::default()
+            })
+            .collect(),
+    )
+}
+
+/// Percent-encode a list of (key, value) pairs for a query string.
+pub fn urlencode_pairs(pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, urlencode(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+// ── Main investigate flow ──────────────────────────────────────────────
 
 /// Trace the Workshop origin of untracked PBOs in addons/.
 pub fn investigate(all: bool, online: bool) {
@@ -158,8 +605,7 @@ pub fn investigate(all: bool, online: bool) {
     let mut mod_dirs = build_mod_dirs(&caches);
 
     // If the current directory is itself a Workshop mod folder (e.g. we are
-    // investigating a pack's own contents), exclude it from candidates.
-    // A folder cannot be the origin of its own PBOs.
+    // investigating a pack's own contents), exclude it as a candidate.
     if let Some(self_id) = self_workshop_id(&caches) {
         println!(
             "Investigating Workshop mod {} — excluding it as a candidate.",
@@ -182,7 +628,7 @@ pub fn investigate(all: bool, online: bool) {
         })
         .collect();
 
-    let mut results: Vec<(String, Option<ResolvedOrigin>)> = Vec::new(); // (pbo, origin)
+    let mut results: Vec<(String, Option<ResolvedOrigin>)> = Vec::new();
 
     if let Ok(entries) = fs::read_dir(addons_dir) {
         for entry in entries.flatten() {
@@ -261,194 +707,131 @@ pub fn investigate(all: bool, online: bool) {
     if online {
         check_workshop_visibility(results.clone());
 
-        // For PBOs with no local origin OR whose origin is itself an aggregate
-        // pack, search the Workshop by prefix and report the best candidate
-        // matches. This is a best-effort search: Workshop text search is
-        // imprecise, so candidates are shown for the user to verify rather
-        // than asserted.
-        let searchable: Vec<(String, String)> = results
+        // ── Grouped Workshop search ────────────────────────────────
+        // Group PBOs by search term so we search once per mod family
+        // instead of once per PBO. This eliminates duplicate searches
+        // and cross-match noise (e.g. 3 PBOs from one mod no longer
+        // search independently and potentially match 3 different mods).
+        let searchable: Vec<(String, Option<ResolvedOrigin>)> = results
             .iter()
             .filter(|(_, origin)| match origin {
                 None => true,
                 Some(o) => o.is_pack,
             })
-            .map(|(name, _)| {
-                let pbo_path = addons_dir.join(name);
-                // Prefer the richest identity in order:
-                // 1. requiredAddons root from plain-text config (certified
-                //    mod family: rhsusf, MRHMilsimTools)
-                // 2. string-table token from config ($STR_RHSUSF_... ->
-                //    RHSUSF)
-                // 3. short author handle from config (DANZ, TFB)
-                // 4. header prefix (last resort)
-                let term = pbo_config_identity(&pbo_path)
-                    .or_else(|| pbo_identity(&pbo_path))
-                    .or_else(|| pbo_prefix(&pbo_path))
-                    .unwrap_or_else(|| name.clone());
-                (name.clone(), term)
-            })
+            .cloned()
             .collect();
 
-        if !searchable.is_empty() {
-            println!(
-                "\nSearching Workshop for {} PBO(s) whose origin is unknown or a pack...",
-                searchable.len()
-            );
-            let mut searched = HashSet::new();
-            let mut cache = load_identity_cache();
-            let api_client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .expect("Failed to build HTTP client");
-            for (name, term) in searchable {
-                let term = search_term_from_prefix(&term);
-                if searched.contains(&term) {
-                    continue;
-                }
-                searched.insert(term.clone());
+        if searchable.is_empty() {
+            return;
+        }
 
-                // Check the local cache first; only hit the Workshop for
-                // terms we have not already searched.
-                let (titles, from_cache): (Vec<(String, String)>, bool) =
-                    if let Some(cached) = cache.get(&term) {
-                        println!("  {} (search \"{}\"): from cache", name, term);
-                        (cached.clone(), true)
-                    } else {
-                        // Prefer the keyed QueryFiles API when STEAM_API_KEY
-                        // is set (returns titles directly); fall back to
-                        // the keyless browse-page scrape + batch confirm.
-                        let confirmed = search_workshop_api(&term).unwrap_or_else(|| {
-                            let candidates = search_workshop(&term);
-                            batch_workshop_titles(&candidates, &api_client)
-                        });
-                        cache.insert(term.clone(), confirmed.clone());
-                        save_identity_cache(&cache);
-                        (confirmed, false)
-                    };
+        println!(
+            "\nSearching Workshop for {} PBO(s) whose origin is unknown or a pack...",
+            searchable.len()
+        );
 
-                if titles.is_empty() {
-                    println!("  {}: no candidates for \"{}\"", name, term);
-                } else {
-                    let shown = titles
+        let groups = group_pbos_by_term(&searchable, addons_dir);
+        let mut cache = load_identity_cache();
+        let api_client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("Failed to build HTTP client");
+        let mut searched = HashSet::new();
+
+        for group in &groups {
+            let term = &group.search_term;
+            if searched.contains(term) {
+                continue;
+            }
+            searched.insert(term.clone());
+
+            // Check the local cache first; only hit the Workshop for
+            // terms we have not already searched.
+            let (candidates, from_cache): (Vec<ScoredCandidate>, bool) = if let Some(cached) =
+                cache.get(term)
+            {
+                println!(
+                    "  [group: {}] (search \"{}\"): from cache",
+                    group.pbos.join(", "),
+                    term
+                );
+                (
+                    cached
                         .iter()
-                        .take(3)
-                        .map(|(id, title)| format!("{} ({})", title, id))
-                        .collect::<Vec<_>>();
-                    println!(
-                        "  {} (search \"{}\"): {} candidate(s) — {}",
-                        name,
-                        term,
-                        titles.len(),
-                        shown.join(", ")
-                    );
+                        .map(|(id, title)| cache_to_candidate(id, title))
+                        .collect(),
+                    true,
+                )
+            } else {
+                // Prefer the keyed QueryFiles API when STEAM_API_KEY
+                // is set; fall back to the keyless browse-page scrape.
+                let rich = search_workshop_api(term).unwrap_or_else(|| {
+                    let scraped = search_workshop(term);
+                    if scraped.is_empty() {
+                        // Scrape returned nothing useful — batch-confirm IDs
+                        let ids: Vec<String> = scraped.iter().map(|c| c.id.clone()).collect();
+                        batch_workshop_details(&ids, &api_client)
+                    } else {
+                        scraped
+                    }
+                });
+                // Convert to cache format and persist
+                let cached: Vec<(String, String)> = rich.iter().map(candidate_to_cache).collect();
+                cache.insert(term.clone(), cached);
+                save_identity_cache(&cache);
+                (rich, false)
+            };
+
+            if candidates.is_empty() {
+                for pbo in &group.pbos {
+                    println!("  {}: no candidates for \"{}\"", pbo, term);
                 }
-                // Rate-limit only real Workshop page hits, not cache reads.
-                if !from_cache {
-                    std::thread::sleep(std::time::Duration::from_millis(1100));
-                }
+            } else {
+                // Score and rank candidates for this group
+                let mut scored: Vec<(f64, &ScoredCandidate)> = candidates
+                    .iter()
+                    .map(|c| (score_candidate(c, group), c))
+                    .collect();
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+                // Show group summary
+                let top = scored
+                    .iter()
+                    .take(5)
+                    .map(|(score, c)| {
+                        let stats = if c.subscriptions > 0 || c.views > 0 {
+                            format!(
+                                " [score={:.0}, {} subs, {} views]",
+                                score, c.subscriptions, c.views
+                            )
+                        } else {
+                            format!(" [score={:.0}]", score)
+                        };
+                        format!("{} ({}){}", c.title, c.id, stats)
+                    })
+                    .collect::<Vec<_>>();
+
+                println!(
+                    "  [group: {}] (search \"{}\"): {} candidate(s) — {}",
+                    group.pbos.join(", "),
+                    term,
+                    candidates.len(),
+                    top.join(", ")
+                );
+            }
+            // Rate-limit only real Workshop page hits, not cache reads.
+            if !from_cache {
+                std::thread::sleep(std::time::Duration::from_millis(1100));
             }
         }
     }
 }
 
-/// Search the Steam Workshop browse page for a query and return candidate
-/// item IDs. Returns an empty vec on network or parse failure.
-fn search_workshop(query: &str) -> Vec<String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .expect("Failed to build HTTP client");
-    let url = format!(
-        "https://steamcommunity.com/workshop/browse/?appid=107410&searchtext={}",
-        urlencode(query)
-    );
-    let html = match client.get(&url).send().ok().and_then(|r| r.text().ok()) {
-        Some(h) => h,
-        None => return Vec::new(),
-    };
-    // The browse page links items as filedetails/?id=NNN. Deduplicate.
-    let mut ids = Vec::new();
-    for id in html.split("filedetails/?id=").skip(1) {
-        let id: String = id.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if !id.is_empty() && !ids.contains(&id) {
-            ids.push(id);
-            if ids.len() >= 10 {
-                break;
-            }
-        }
-    }
-    ids
-}
-
-/// Search the Workshop via the keyed IPublishedFileService/QueryFiles API.
-/// Requires STEAM_API_KEY in the environment. Returns (id, title) pairs
-/// directly (no separate confirm call needed). None when the key is
-/// absent or the API call fails, so callers can fall back to the scrape.
-///
-/// The key must never be embedded in the binary or repo — it is read
-/// from the environment only. QueryFiles search_text matches the item's
-/// title or description (the only text search Steam offers); it cannot
-/// search by file name or content.
-fn search_workshop_api(query: &str) -> Option<Vec<(String, String)>> {
-    let key = std::env::var("STEAM_API_KEY").ok()?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .expect("Failed to build HTTP client");
-
-    let params = [
-        ("key", key.as_str()),
-        ("format", "json"),
-        ("appid", "107410"),
-        ("numperpage", "10"),
-        ("query_type", "12"), // k_PublishedFileQueryType_RankedByTextSearch
-        ("return_short_description", "1"),
-        ("search_text", query),
-    ];
-    let url = format!(
-        "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/?{}",
-        urlencode_pairs(&params)
-    );
-
-    let body = client.get(&url).send().ok()?.text().ok()?;
-    #[derive(serde::Deserialize)]
-    struct ApiResponse {
-        response: ResponseInner,
-    }
-    #[derive(serde::Deserialize)]
-    struct ResponseInner {
-        publishedfiledetails: Vec<FileDetail>,
-    }
-    #[derive(serde::Deserialize)]
-    struct FileDetail {
-        publishedfileid: String,
-        #[serde(default)]
-        title: String,
-    }
-    let parsed: ApiResponse = serde_json::from_str(&body).ok()?;
-    Some(
-        parsed
-            .response
-            .publishedfiledetails
-            .into_iter()
-            .map(|d| (d.publishedfileid, d.title))
-            .collect(),
-    )
-}
-
-/// Percent-encode a list of (key, value) pairs for a query string.
-pub fn urlencode_pairs(pairs: &[(&str, &str)]) -> String {
-    pairs
-        .iter()
-        .map(|(k, v)| format!("{}={}", k, urlencode(v)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
+// ── Workshop visibility check ──────────────────────────────────────────
 
 /// Query the Steam Workshop API for each investigated mod's visibility.
 /// Keyless: ISteamRemoteStorage/GetPublishedFileDetails needs no API key.
 fn check_workshop_visibility(results: Vec<(String, Option<ResolvedOrigin>)>) {
-    // Collect unique origin IDs
     let mut ids: Vec<String> = results
         .iter()
         .filter_map(|(_, origin)| origin.as_ref().map(|o| o.id.clone()))
@@ -491,8 +874,6 @@ fn check_workshop_visibility(results: Vec<(String, Option<ResolvedOrigin>)>) {
         }
     };
 
-    // Parse the response. Result 1 = exists (public or visible), 9 = not
-    // publicly visible (removed or private).
     #[derive(serde::Deserialize)]
     struct ApiResponse {
         response: ResponseInner,
