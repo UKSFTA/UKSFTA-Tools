@@ -228,6 +228,19 @@ fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
         }
     }
 
+    // 11. Dependency graph signal — if the PBO's required addons contain
+    //     a root that matches the group's search term, the mod family is
+    //     confirmed. E.g. PBO requires "rhsusf_c_weapons" and group
+    //     searches for "rhsusf" → the mod is RHS.
+    for required in &group.cfg_children {
+        let req_lower = required.to_lowercase();
+        let req_root = req_lower.split('_').next().unwrap_or(&req_lower);
+        if req_root.len() >= 3 && term_lower.contains(req_root) {
+            score += 25.0;
+            break;
+        }
+    }
+
     score
 }
 
@@ -1148,6 +1161,15 @@ pub fn investigate(all: bool, online: bool) {
             if let Some(ref author) = group.author_handle {
                 if !variations.contains(author) {
                     variations.push(author.clone());
+                }
+            }
+            // Add required addon roots as search terms.
+            // If PBO requires "rhsusf_c_weapons", search "rhsusf" —
+            // the dependency's mod family often appears in the title.
+            for required in &group.cfg_children {
+                let req_root = required.split('_').next().unwrap_or(required);
+                if req_root.len() >= 3 && !variations.contains(&req_root.to_string()) {
+                    variations.push(req_root.to_string());
                 }
             }
 
