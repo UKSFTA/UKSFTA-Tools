@@ -8,8 +8,8 @@ use crate::origin::{
     ResolvedOrigin,
 };
 use crate::pbo::{
-    get_mod_metadata, pbo_cfg_patches, pbo_config_identity, pbo_identity, pbo_prefix,
-    search_term_from_prefix,
+    extra_search_terms_from_prefix, get_mod_metadata, pbo_cfg_patches, pbo_config_identity,
+    pbo_identity, pbo_prefix, search_term_from_prefix,
 };
 use crate::steam::find_all_workshop_caches;
 use crate::util::{urlencode, workshop_url};
@@ -43,6 +43,10 @@ struct ScoredCandidate {
 /// mod family instead of once per PBO.
 struct PboGroup {
     search_term: String,
+    /// Additional search terms derived from the full prefix path.
+    /// E.g. for prefix "x\SPS\Vehicles\sps_blackhornet", the primary
+    /// term is "SPS" but extras include "sps_blackhornet", "blackhornet".
+    extra_terms: Vec<String>,
     pbos: Vec<String>,
     author_handle: Option<String>,
     /// CfgPatches `author` field: full author name (e.g. "UnderSiege Productionz").
@@ -72,16 +76,19 @@ struct PboGroup {
 fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
     let mut score = 0.0;
 
-    // 0. Title relevance — the strongest signal. If the search term
-    //    (or meaningful parts of it) appear in the candidate title,
-    //    it's likely the right mod. If nothing matches, the candidate
-    //    is probably noise from a popular but unrelated mod.
+    // 0. Title relevance — multiple signals combined.
+    //    Substring match is strongest, word overlap catches compound
+    //    terms where the full string doesn't match but words do.
     let term_lower = group.search_term.to_lowercase();
     let title_lower = candidate.title.to_lowercase();
     let title_relevant = title_lower.contains(&term_lower);
 
-    // Split compound search terms into tokens for partial matching.
-    // "ZuluCustomSlicksters" → ["zulu", "custom", "slicksters"]
+    // Word-level overlap: split term into words, check how many
+    // appear in the title. "aceax" → ["aceax"] → 1.0 if "ACEAX" in title.
+    // "zulu_custom" → ["zulu","custom"] → 0.5 if only "Zulu" matches.
+    let word_score = word_overlap_score(&term_lower, &title_lower);
+
+    // Word-level token split for compound terms
     let term_tokens: Vec<&str> = split_camel_or_underscore(&term_lower);
     let matching_tokens = term_tokens
         .iter()
@@ -93,19 +100,20 @@ fn score_candidate(candidate: &ScoredCandidate, group: &PboGroup) -> f64 {
         matching_tokens as f64 / term_tokens.len() as f64
     };
 
+    // Combine signals: substring is definitive, word overlap catches
+    // compound terms, token ratio catches partial matches.
     if title_relevant {
-        // Exact substring match — very strong signal
         score += 80.0;
+    } else if word_score >= 0.8 {
+        // Most words match — strong signal
+        score += 50.0 + word_score * 20.0;
     } else if token_ratio >= 0.5 {
-        // Most tokens match — strong signal
-        score += 60.0 * token_ratio;
-    } else if token_ratio > 0.0 {
-        // Some tokens match — weak signal
-        score += 30.0 * token_ratio;
+        score += 40.0 * token_ratio;
+    } else if word_score > 0.3 || token_ratio > 0.0 {
+        // Some overlap — weak but non-zero signal
+        score += 20.0 * word_score + 15.0 * token_ratio;
     } else {
-        // No tokens match — heavy penalty. This candidate is
-        // probably a popular mod that shares no naming with the
-        // search term.
+        // No overlap at all — heavy penalty
         score -= 40.0;
     }
 
@@ -209,6 +217,91 @@ fn split_camel_or_underscore(s: &str) -> Vec<&str> {
     }
 }
 
+/// Character-level token overlap score between a search term and a title.
+/// Breaks the search term into individual characters, checks how many
+/// appear in the title. Returns a ratio (0.0 to 1.0).
+///
+/// "aceax" → {a,c,e,x} → "ACE3 Arsenal Extended" has a,c,e,x → 4/4 = 1.0
+/// Word-level overlap score between a search term and a title.
+/// Splits both into words, checks how many search-term words appear
+/// in the title. More discriminative than character-level matching
+/// because it avoids false positives from common letters.
+///
+/// "aceax" → ["aceax"] → if "ACEAX" in title → 1.0
+/// "zulu_custom_slicksters" → ["zulu","custom","slicksters"] → "A2 Declassified: Fireteam Zulu" has "zulu" → 1/3 = 0.33
+/// "usasoc_backpacks" → ["usasoc","backpacks"] → "121 USASOC Sniper Rifles Pack" has "usasoc" → 1/2 = 0.5
+fn word_overlap_score(term_lower: &str, title_lower: &str) -> f64 {
+    let term_words: Vec<&str> = split_camel_or_underscore(term_lower);
+    if term_words.is_empty() {
+        return 0.0;
+    }
+
+    // Split title on non-alphanumeric boundaries
+    let title_words: Vec<&str> = title_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    let hits = term_words
+        .iter()
+        .filter(|tw| tw.len() >= 3 && title_words.iter().any(|t| *t == **tw || t.contains(*tw)))
+        .count();
+
+    hits as f64 / term_words.len() as f64
+}
+
+/// Generate multiple search variations from a single search term.
+/// "sps_blackhornet" → ["sps blackhornet", "blackhornet", "sps"]
+/// "ZuluCustomSlicksters" → ["zulu custom slicksters", "slicksters",
+///   "zulu", "custom", "zulu custom", "custom slicksters"]
+/// The idea: one term may not match the Workshop title, but a
+/// substring or reordering might. We try all of them and merge.
+fn search_variation_terms(term: &str) -> Vec<String> {
+    let tokens = split_camel_or_underscore(term);
+    let mut variations = Vec::new();
+
+    if tokens.len() <= 1 {
+        // Single token: try it as-is
+        variations.push(term.to_string());
+        return variations;
+    }
+
+    // 1. All tokens joined with spaces (full term)
+    let full = tokens.join(" ");
+    if full != term {
+        variations.push(full);
+    }
+
+    // 2. Individual tokens (>= 3 chars to avoid noise)
+    for t in &tokens {
+        if t.len() >= 3 {
+            variations.push(t.to_string());
+        }
+    }
+
+    // 3. Pairs of adjacent tokens
+    for w in tokens.windows(2) {
+        variations.push(w.join(" "));
+    }
+
+    // 4. Last token first (reversal — "blackhornet sps")
+    if tokens.len() >= 2 {
+        let mut rev: Vec<&str> = tokens.iter().rev().copied().collect();
+        rev.truncate(3); // cap at 3 tokens
+        variations.push(rev.join(" "));
+    }
+
+    // 5. First token only (if >= 4 chars — the family root)
+    if tokens[0].len() >= 4 {
+        // Already added in step 2, skip
+    }
+
+    // Deduplicate while preserving order
+    let mut seen = std::collections::HashSet::new();
+    variations.retain(|v| seen.insert(v.clone()));
+    variations
+}
+
 /// Convert a ScoredCandidate to the cache format (id, title).
 fn candidate_to_cache(c: &ScoredCandidate) -> (String, String) {
     (c.id.clone(), c.title.clone())
@@ -286,13 +379,18 @@ fn group_pbos_by_term(
         // Read from the first PBO in each group (free cross-reference signals).
         let cfg = pbo_cfg_patches(&pbo_path);
 
-        let group = groups.entry(group_key.clone()).or_insert_with(|| PboGroup {
-            search_term,
-            pbos: Vec::new(),
-            author_handle: None,
-            cfg_author: cfg.author.clone(),
-            cfg_url: cfg.url.clone(),
-            cfg_children: cfg.required_addons.clone(),
+        let group = groups.entry(group_key.clone()).or_insert_with(|| {
+            let full_prefix = prefix.clone().unwrap_or_default();
+            let extra_terms = extra_search_terms_from_prefix(&full_prefix);
+            PboGroup {
+                search_term,
+                extra_terms,
+                pbos: Vec::new(),
+                author_handle: None,
+                cfg_author: cfg.author.clone(),
+                cfg_url: cfg.url.clone(),
+                cfg_children: cfg.required_addons.clone(),
+            }
         });
         group.pbos.push(name.clone());
         if let Some(ref ah) = author_handle {
@@ -973,6 +1071,16 @@ pub fn investigate(all: bool, online: bool) {
             }
             searched.insert(term.clone());
 
+            // Generate multiple search variations to cast a wider net.
+            // "sps_blackhornet" → ["sps blackhornet", "blackhornet", "sps"]
+            // Plus extra terms from the full prefix path.
+            let mut variations = search_variation_terms(term);
+            for extra in &group.extra_terms {
+                if !variations.contains(extra) {
+                    variations.push(extra.clone());
+                }
+            }
+
             // Check the local cache first; only hit the Workshop for
             // terms we have not already searched.
             let (candidates, from_cache): (Vec<ScoredCandidate>, bool) = if let Some(cached) =
@@ -991,23 +1099,74 @@ pub fn investigate(all: bool, online: bool) {
                     true,
                 )
             } else {
-                // Prefer the keyed QueryFiles API when STEAM_API_KEY
-                // is set; fall back to the keyless browse-page scrape.
-                let rich = search_workshop_api(term).unwrap_or_else(|| {
-                    let scraped = search_workshop(term);
-                    if scraped.is_empty() {
-                        // Scrape returned nothing useful — batch-confirm IDs
-                        let ids: Vec<String> = scraped.iter().map(|c| c.id.clone()).collect();
-                        batch_workshop_details(&ids, &api_client)
-                    } else {
-                        scraped
+                // Search each variation and merge results. Keep the
+                // highest search_score for each candidate ID.
+                let mut merged: std::collections::HashMap<String, ScoredCandidate> =
+                    std::collections::HashMap::new();
+                let mut any_from_cache = false;
+
+                for variation in &variations {
+                    if searched.contains(variation) {
+                        // Already searched this variation in another group
+                        if let Some(cached) = cache.get(variation) {
+                            for (id, title) in cached {
+                                let c = cache_to_candidate(id, title);
+                                if let Some(existing) = merged.get(id) {
+                                    if c.search_score > existing.search_score {
+                                        merged.insert(id.clone(), c);
+                                    }
+                                } else {
+                                    merged.insert(id.clone(), c);
+                                }
+                            }
+                            any_from_cache = true;
+                        }
+                        continue;
                     }
-                });
-                // Convert to cache format and persist
-                let cached: Vec<(String, String)> = rich.iter().map(candidate_to_cache).collect();
-                cache.insert(term.clone(), cached);
-                save_identity_cache(&cache);
-                (rich, false)
+
+                    let rich = search_workshop_api(variation).unwrap_or_else(|| {
+                        let scraped = search_workshop(variation);
+                        if scraped.is_empty() {
+                            let ids: Vec<String> = scraped.iter().map(|c| c.id.clone()).collect();
+                            batch_workshop_details(&ids, &api_client)
+                        } else {
+                            scraped
+                        }
+                    });
+
+                    // Merge into results, keeping the best score
+                    for c in rich {
+                        if let Some(existing) = merged.get(&c.id) {
+                            if c.search_score > existing.search_score {
+                                merged.insert(c.id.clone(), c);
+                            }
+                        } else {
+                            merged.insert(c.id.clone(), c);
+                        }
+                    }
+
+                    // Cache this variation's results
+                    let cached: Vec<(String, String)> =
+                        merged.values().map(candidate_to_cache).collect();
+                    cache.insert(variation.clone(), cached);
+                    save_identity_cache(&cache);
+                    searched.insert(variation.clone());
+
+                    // Rate-limit only real Workshop page hits
+                    if !any_from_cache {
+                        std::thread::sleep(std::time::Duration::from_millis(1100));
+                    }
+                }
+
+                let candidates: Vec<ScoredCandidate> = merged.into_values().collect();
+                // Cache under the primary term too
+                if !candidates.is_empty() {
+                    let cached: Vec<(String, String)> =
+                        candidates.iter().map(candidate_to_cache).collect();
+                    cache.insert(term.clone(), cached);
+                    save_identity_cache(&cache);
+                }
+                (candidates, any_from_cache)
             };
 
             if candidates.is_empty() {
@@ -1032,7 +1191,10 @@ pub fn investigate(all: bool, online: bool) {
                     .unwrap_or_default();
                 let title_match = top_title_lower.contains(&term_lower);
 
-                // Also check token-level relevance
+                // Character-level token overlap for the top candidate
+                let top_word_score = word_overlap_score(&term_lower, &top_title_lower);
+
+                // Also check word-level token relevance
                 let term_tokens = split_camel_or_underscore(&term_lower);
                 let top_token_hits = term_tokens
                     .iter()
@@ -1045,7 +1207,7 @@ pub fn investigate(all: bool, online: bool) {
                 };
 
                 let weak_match = scored.first().map(|(s, _)| *s < 30.0).unwrap_or(true)
-                    || (!title_match && token_ratio < 0.5);
+                    || (!title_match && top_word_score < 0.5 && token_ratio < 0.5);
 
                 // Show group summary with cross-reference signals
                 // Note: cfg_author is NOT shown — in repacked mods it names
@@ -1134,10 +1296,7 @@ pub fn investigate(all: bool, online: bool) {
                     }
                 }
             }
-            // Rate-limit only real Workshop page hits, not cache reads.
-            if !from_cache {
-                std::thread::sleep(std::time::Duration::from_millis(1100));
-            }
+            // Rate-limiting is handled inside the variation loop above.
         }
     }
 }
