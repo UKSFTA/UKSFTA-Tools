@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::error::UksftaError;
 use crate::util::{extract_quoted, extract_quoted_tokens};
+use crate::workshop_api::{build_client, fetch_published_file_details};
 
 pub const STEAM_APP_ID: &str = "107410";
 
@@ -209,4 +211,62 @@ pub fn find_all_workshop_caches() -> Vec<PathBuf> {
         }
     }
     caches
+}
+
+/// Find a mod folder by Workshop id across the given caches. The first
+/// cache that holds the id wins.
+pub fn find_mod_in_caches(caches: &[PathBuf], id: &str) -> Option<PathBuf> {
+    caches
+        .iter()
+        .map(|cache| cache.join(id))
+        .find(|path| path.exists())
+}
+
+/// Load Workshop item metadata (size, time_updated) from every Steam
+/// library's appworkshop ACF. An id present in more than one library keeps
+/// the last value seen.
+pub fn load_workshop_items() -> HashMap<String, WorkshopItem> {
+    let mut items = HashMap::new();
+    for cache in find_all_workshop_caches() {
+        // cache = .../workshop/content/107410
+        if let Some(workshop_dir) = cache.parent().and_then(|p| p.parent()) {
+            let acf = workshop_dir.join(format!("appworkshop_{}.acf", STEAM_APP_ID));
+            if let Ok(content) = fs::read_to_string(&acf) {
+                items.extend(parse_acf(&content));
+            }
+        }
+    }
+    items
+}
+
+/// Fetch Workshop item sizes in bytes for the given ids via the keyless
+/// GetPublishedFileDetails API. Batches of 100 are handled by the shared
+/// API helper. Only ids the API reports as available are returned.
+pub fn fetch_workshop_sizes(ids: &[String]) -> HashMap<String, u64> {
+    let mut sizes = HashMap::new();
+    if ids.is_empty() {
+        return sizes;
+    }
+
+    let client = build_client();
+    match fetch_published_file_details(ids, &client) {
+        Ok(details) => {
+            for detail in details {
+                if detail.result == 1 {
+                    if let Ok(size) = detail.file_size.parse::<u64>() {
+                        sizes.insert(detail.publishedfileid, size);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let label = if matches!(e, UksftaError::Parse(_)) {
+                "failed to parse Workshop size response"
+            } else {
+                "failed to fetch Workshop sizes"
+            };
+            eprintln!("Warning: {}: {}", label, e);
+        }
+    }
+    sizes
 }

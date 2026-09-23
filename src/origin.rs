@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::pbo::pbo_prefix;
+use crate::prefix::prefix_root;
 use crate::util::{file_sha256, find_pbos};
 
 /// A Workshop mod folder plus precomputed statistics used to arbitrate
@@ -47,13 +48,6 @@ pub fn build_mod_dirs(caches: &[PathBuf]) -> Vec<ModDir> {
     dirs
 }
 
-/// The root of an addon prefix: the first path component before a
-/// backslash (e.g. "z\ace\addons\grenades" -> "z"). A standalone mod's
-/// PBOs share few roots; an aggregate pack spans many.
-fn prefix_root(prefix: &str) -> &str {
-    prefix.split('\\').next().unwrap_or(prefix)
-}
-
 /// The Workshop ID of the current directory, if the current directory is
 /// itself a mod folder inside a Workshop cache (e.g. investigating a pack's
 /// own contents). Such a folder must not be a candidate for its own PBOs.
@@ -61,7 +55,9 @@ pub fn self_workshop_id(caches: &[PathBuf]) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let cwd = fs::canonicalize(&cwd).ok()?;
     for cache in caches {
-        let cache = fs::canonicalize(cache).ok()?;
+        let Ok(cache) = fs::canonicalize(cache) else {
+            continue;
+        };
         if cwd.starts_with(&cache) {
             // The mod folder is cwd relative to cache
             if let Ok(rel) = cwd.strip_prefix(&cache) {
@@ -126,13 +122,21 @@ pub fn resolve_pbo_from_index(
     // Score each candidate. Prefix match is the primary signal and is
     // cheap (512-byte header read). Byte-hash is a fallback used only
     // when the prefix path fails, since hashing reads the whole PBO.
+    // The target hash is computed once: a single unreadable target
+    // leaves every byte-hash candidate unscored but does not abort.
+    let target_hash = match target_prefix {
+        Some(_) => None,
+        None => Some(file_sha256(pbo_path)?),
+    };
     let mut scored: Vec<(&ModDir, u8)> = Vec::new();
     for dir in candidates {
-        let cached_path = dir.pbos.iter().find(|pbo| {
+        let Some(cached_path) = dir.pbos.iter().find(|pbo| {
             pbo.file_name()
                 .map(|n| n == pbo_name.as_str())
                 .unwrap_or(false)
-        })?;
+        }) else {
+            continue;
+        };
         let mut score = 0u8;
         if let Some(target) = target_prefix {
             if pbo_prefix(cached_path).as_deref() == Some(target) {
@@ -140,8 +144,7 @@ pub fn resolve_pbo_from_index(
             }
         } else {
             // No prefix available: fall back to byte identity.
-            let target_hash = file_sha256(pbo_path)?;
-            if file_sha256(cached_path) == Some(target_hash) {
+            if file_sha256(cached_path) == target_hash {
                 score += 1;
             }
         }
@@ -174,4 +177,175 @@ pub fn resolve_pbo_from_index(
         prefix: target_prefix.map(|s| s.to_string()),
         is_pack,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a fake PBO with a header carrying the given prefix.
+    fn write_pbo(path: &Path, prefix: &str, payload: &[u8]) {
+        // Mimic the real PBO header: b"\x00sreV" then "prefix\0{prefix}\0".
+        let mut data = b"\x00sreV\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        data.extend_from_slice(b"prefix\x00");
+        data.extend_from_slice(prefix.as_bytes());
+        data.push(0);
+        data.extend_from_slice(payload);
+        fs::write(path, data).unwrap();
+    }
+
+    #[test]
+    fn resolve_pbo_origin_prefers_standalone_over_pack() {
+        let dir = std::env::temp_dir().join("uksfta-origin-test");
+        fs::create_dir_all(&dir).unwrap();
+
+        // mod 111 (standalone, 1 PBO) and mod 222 (pack, 50 PBOs) both
+        // contain an identical copy of common.pbo
+        let standalone = dir.join("111").join("addons");
+        let pack = dir.join("222").join("addons");
+        fs::create_dir_all(&standalone).unwrap();
+        fs::create_dir_all(&pack).unwrap();
+        let content = b"identical pbo bytes";
+        fs::write(standalone.join("common.pbo"), content).unwrap();
+        fs::write(pack.join("common.pbo"), content).unwrap();
+        for i in 0..50 {
+            fs::write(pack.join(format!("pack_{}.pbo", i)), format!("pack{}", i)).unwrap();
+        }
+
+        let mod_dirs = vec![
+            ModDir {
+                id: "222".to_string(),
+                path: dir.join("222"),
+                pbos: find_pbos(&dir.join("222")),
+                root_count: 50,
+            },
+            ModDir {
+                id: "111".to_string(),
+                path: dir.join("111"),
+                pbos: find_pbos(&dir.join("111")),
+                root_count: 1,
+            },
+        ];
+        let index = build_pbo_index(&mod_dirs);
+
+        let target = dir.join("common.pbo");
+        fs::write(&target, content).unwrap();
+
+        // Arbitration must pick the standalone mod (111) with fewer roots
+        let candidates = index.get("common.pbo").map(|v| v.as_slice()).unwrap_or(&[]);
+        assert_eq!(
+            resolve_pbo_from_index(&target, candidates, pbo_prefix(&target).as_deref())
+                .unwrap()
+                .id,
+            "111".to_string()
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_pbo_origin_no_match_returns_none() {
+        let dir = std::env::temp_dir().join("uksfta-origin-none");
+        fs::create_dir_all(&dir).unwrap();
+        let mod_dir = dir.join("111").join("addons");
+        fs::create_dir_all(&mod_dir).unwrap();
+        fs::write(mod_dir.join("other.pbo"), b"different").unwrap();
+
+        let target = dir.join("target.pbo");
+        fs::write(&target, b"no match anywhere").unwrap();
+
+        let mod_dirs = vec![ModDir {
+            id: "111".to_string(),
+            path: dir.join("111"),
+            pbos: find_pbos(&dir.join("111")),
+            root_count: 1,
+        }];
+        let index = build_pbo_index(&mod_dirs);
+        let candidates = index.get("target.pbo").map(|v| v.as_slice()).unwrap_or(&[]);
+        assert_eq!(
+            resolve_pbo_from_index(&target, candidates, pbo_prefix(&target).as_deref()),
+            None
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_pbo_origin_matches_by_prefix_over_differing_bytes() {
+        // Two folders hold same-named PBOs with the same prefix but
+        // different bytes (a pack repacked the mod's copy). The origin
+        // must be the folder with fewer roots (the standalone mod).
+        let dir = std::env::temp_dir().join("uksfta-prefix-origin");
+        fs::create_dir_all(&dir).unwrap();
+        let standalone = dir.join("111").join("addons");
+        let pack = dir.join("222").join("addons");
+        fs::create_dir_all(&standalone).unwrap();
+        fs::create_dir_all(&pack).unwrap();
+        write_pbo(
+            &standalone.join("common.pbo"),
+            "z\\ace\\addons\\common",
+            b"version-a",
+        );
+        write_pbo(
+            &pack.join("common.pbo"),
+            "z\\ace\\addons\\common",
+            b"version-b",
+        );
+
+        let mod_dirs = vec![
+            ModDir {
+                id: "222".to_string(),
+                path: dir.join("222"),
+                pbos: find_pbos(&dir.join("222")),
+                root_count: 50,
+            },
+            ModDir {
+                id: "111".to_string(),
+                path: dir.join("111"),
+                pbos: find_pbos(&dir.join("111")),
+                root_count: 1,
+            },
+        ];
+        let index = build_pbo_index(&mod_dirs);
+
+        let target = dir.join("common.pbo");
+        write_pbo(&target, "z\\ace\\addons\\common", b"version-a");
+
+        let candidates = index.get("common.pbo").map(|v| v.as_slice()).unwrap_or(&[]);
+        let origin =
+            resolve_pbo_from_index(&target, candidates, pbo_prefix(&target).as_deref()).unwrap();
+        assert_eq!(origin.id, "111".to_string());
+        assert!(!origin.is_pack);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn identity_cache_round_trips() {
+        let dir = std::env::temp_dir().join("uksfta-idcache-test");
+        fs::create_dir_all(&dir).unwrap();
+        // Point the cache at the test dir so we do not touch .uksfta in
+        // the workspace; run the round-trip via direct file IO.
+        let path = dir.join("identities.json");
+        let mut cache: IdentityCache<(String, String)> = HashMap::new();
+        cache.insert(
+            "TFL".to_string(),
+            vec![(
+                "3797815099".to_string(),
+                "@THE TFL AIO CAG PACK".to_string(),
+            )],
+        );
+        let json = serde_json::to_string_pretty(&cache).unwrap();
+        fs::write(&path, json).unwrap();
+        let loaded: IdentityCache<(String, String)> =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            loaded.get("TFL").unwrap(),
+            &vec![(
+                "3797815099".to_string(),
+                "@THE TFL AIO CAG PACK".to_string()
+            )]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

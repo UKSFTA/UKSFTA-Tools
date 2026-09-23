@@ -12,16 +12,22 @@ pub struct ModCpp {
     pub publishedid: Option<String>,
 }
 
+/// The trimmed left side of an `=` assignment, or None when the line has
+/// no `=`. Exact-key matching stops `namespace` from matching `name`.
+fn key_of(line: &str) -> Option<&str> {
+    line.split_once('=').map(|(key, _)| key.trim())
+}
+
 fn parse_mod_cpp(path: &Path) -> ModCpp {
     let mut result = ModCpp::default();
     if let Ok(content) = fs::read_to_string(path) {
         for line in content.lines() {
             let line = line.trim();
             if let Some(val) = extract_quoted(line) {
-                if line.starts_with("name") {
-                    result.name = val;
-                } else if line.starts_with("author") {
-                    result.author = val;
+                match key_of(line) {
+                    Some("name") => result.name = val,
+                    Some("author") => result.author = val,
+                    _ => {}
                 }
             }
         }
@@ -35,10 +41,10 @@ fn parse_meta_cpp(path: &Path) -> ModCpp {
         for line in content.lines() {
             let line = line.trim();
             if let Some(val) = extract_quoted(line) {
-                if line.starts_with("publishedid") {
-                    result.publishedid = Some(val);
-                } else if line.starts_with("name") {
-                    result.name = val;
+                match key_of(line) {
+                    Some("publishedid") => result.publishedid = Some(val),
+                    Some("name") => result.name = val,
+                    _ => {}
                 }
             }
         }
@@ -100,7 +106,7 @@ pub fn search_term_from_prefix(prefix: &str) -> String {
     // Split the namespace: for "z\ace\addons\grenades" the parts are
     // z, ace, addons, grenades. The mod identity is usually the second
     // component ("ace"); the first ("z") is a generic convention.
-    let parts: Vec<&str> = prefix.split('\\').collect();
+    let parts: Vec<&str> = crate::prefix::split_backslash(prefix);
     let candidate = if parts.len() >= 2 {
         // "z\ace" -> "ace"; skip a too-short first component
         if parts[0].len() < 3 && parts[1].len() >= 3 {
@@ -111,7 +117,7 @@ pub fn search_term_from_prefix(prefix: &str) -> String {
     } else {
         parts[0]
     };
-    let first = candidate.split('_').next().unwrap_or(candidate);
+    let first = crate::prefix::first_underscore_token(candidate);
     // Use the first underscore token when it is a plausible mod identity;
     // otherwise fall back to the full candidate. No upper cap: mod names
     // like NAVSPECWARGRU2 legitimately exceed a short token limit.
@@ -432,4 +438,180 @@ pub fn pbo_config_identity(path: &Path) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_of_returns_trimmed_left_side() {
+        assert_eq!(key_of("name = \"x\""), Some("name"));
+        assert_eq!(key_of("  author=\"y\""), Some("author"));
+        assert_eq!(key_of("no assignment"), None);
+    }
+
+    #[test]
+    fn parse_mod_cpp_matches_exact_keys_only() {
+        let dir = std::env::temp_dir().join("uksfta-pbo-modcpp");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mod.cpp");
+        fs::write(
+            &path,
+            "namespace = \"wrong\"\nname = \"Right\"\nauthorName = \"wrong\"\nauthor = \"Auth\"\n",
+        )
+        .unwrap();
+        let meta = parse_mod_cpp(&path);
+        assert_eq!(meta.name, "Right");
+        assert_eq!(meta.author, "Auth");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parse_meta_cpp_matches_exact_keys_only() {
+        let dir = std::env::temp_dir().join("uksfta-pbo-metacpp");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("meta.cpp");
+        fs::write(
+            &path,
+            "publishedid = \"1234567890\"\nname = \"Right\"\nnamespace = \"wrong\"\n",
+        )
+        .unwrap();
+        let meta = parse_meta_cpp(&path);
+        assert_eq!(meta.publishedid.as_deref(), Some("1234567890"));
+        assert_eq!(meta.name, "Right");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Write a fake PBO with a header carrying the given prefix.
+    fn write_pbo(path: &Path, prefix: &str, payload: &[u8]) {
+        // Mimic the real PBO header: b"\x00sreV" then "prefix\0{prefix}\0".
+        let mut data = b"\x00sreV\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        data.extend_from_slice(b"prefix\x00");
+        data.extend_from_slice(prefix.as_bytes());
+        data.push(0);
+        data.extend_from_slice(payload);
+        fs::write(path, data).unwrap();
+    }
+
+    #[test]
+    fn pbo_prefix_extracts_canonical_path() {
+        let dir = std::env::temp_dir().join("uksfta-prefix-test");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        write_pbo(&f, "z\\ace\\addons\\grenades", b"data");
+        assert_eq!(
+            pbo_prefix(&f).unwrap(),
+            "z\\ace\\addons\\grenades".to_string()
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_prefix_no_prefix_returns_none() {
+        let dir = std::env::temp_dir().join("uksfta-prefix-none");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        fs::write(&f, b"\x00sreVno prefix here").unwrap();
+        assert_eq!(pbo_prefix(&f), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn search_term_from_prefix_uses_distinctive_token() {
+        // Bare prefix: first underscore token is the mod identity
+        assert_eq!(search_term_from_prefix("TFL_Headgear"), "TFL");
+        assert_eq!(
+            search_term_from_prefix("NAVSPECWARGRU2_TACDEV"),
+            "NAVSPECWARGRU2"
+        );
+        // Namespaced prefix: second component is the mod identity
+        assert_eq!(search_term_from_prefix("z\\ace\\addons\\grenades"), "ace");
+        // Too-generic root falls back to the full root
+        assert_eq!(search_term_from_prefix("z"), "z");
+        assert_eq!(search_term_from_prefix("x\\zen\\addons\\ai"), "zen");
+    }
+
+    /// Write a fake PBO whose packed config contains the given text.
+    fn write_pbo_with_config(path: &Path, config: &str) {
+        let mut data = b"\x00sreV\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        data.extend_from_slice(b"prefix\x00test\x00");
+        data.extend_from_slice(config.as_bytes());
+        fs::write(path, data).unwrap();
+    }
+
+    #[test]
+    fn pbo_identity_prefers_string_table_token() {
+        let dir = std::env::temp_dir().join("uksfta-identity-token");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        // A $STR_ token (mod family) beats a long author name
+        write_pbo_with_config(
+            &f,
+            r#"author = "Red Hammer Studios"; author = "$STR_RHSUSF_AUTHOR_FULL";"#,
+        );
+        assert_eq!(pbo_identity(&f).unwrap(), "RHSUSF");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_identity_falls_back_to_short_author() {
+        let dir = std::env::temp_dir().join("uksfta-identity-author");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        write_pbo_with_config(&f, r#"author = "DANZ";"#);
+        assert_eq!(pbo_identity(&f).unwrap(), "DANZ");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_identity_rejects_long_author_names() {
+        let dir = std::env::temp_dir().join("uksfta-identity-long");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        // Long multi-word author names don't match mod titles -> ignored
+        write_pbo_with_config(&f, r#"author = "UnderSiege Productionz";"#);
+        assert_eq!(pbo_identity(&f), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_identity_rejects_two_char_author_handles() {
+        // Two-letter handles (KM) are too generic to search by; the
+        // prefix should win instead.
+        let dir = std::env::temp_dir().join("uksfta-identity-km");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        write_pbo_with_config(&f, r#"author = "KM";"#);
+        assert_eq!(pbo_identity(&f), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_config_identity_extracts_required_addon_root() {
+        let dir = std::env::temp_dir().join("uksfta-config-identity");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        // A config with requiredAddons naming a mod family
+        write_pbo_with_config(
+            &f,
+            r#"class CfgPatches { requiredAddons[] = { "A3_Weapons_F", "rhsusf_c_weapons" }; };"#,
+        );
+        assert_eq!(pbo_config_identity(&f).unwrap(), "rhsusf");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_config_identity_skips_vanilla_and_cba() {
+        let dir = std::env::temp_dir().join("uksfta-config-vanilla");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        // Only vanilla + cba deps: not a usable identity
+        write_pbo_with_config(
+            &f,
+            r#"class CfgPatches { requiredAddons[] = { "A3_Weapons_F", "cba_main" }; };"#,
+        );
+        assert_eq!(pbo_config_identity(&f), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }
