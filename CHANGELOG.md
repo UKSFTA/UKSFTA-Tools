@@ -5,6 +5,63 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-09-24
+
+### Added
+
+- `size` command: list every mod's download size from an Arma 3 launcher
+  preset (HTML) and the total. Add `--online` to fetch sizes for mods
+  that are not installed locally from the keyless Workshop API. On a
+  terminal, sizes are coloured by their share of the total.
+- Typed errors that map to documented exit codes: 0 for success, 1 for a
+  failed check, 2 for missing or unparseable input. This lets `verify`
+  and `audit` gate a build in CI.
+
+### Changed
+
+- `mods.lock` and `mod_sources.txt` are written atomically with a `.bak`
+  backup. A corrupt lock is a hard error and is never replaced by an
+  empty one.
+- The legacy `[ignore]` marker is matched exactly, so a mod comment that
+  mentions it no longer drops the mod. Migration to TOML v2 runs only
+  from `sync` and `import`, never from a read-only command.
+- `sync --offline` skips dependency resolution instead of being ignored.
+- Online `investigate` caches results only on success, so a network
+  failure is retried on the next run.
+- Scraped and API text is truncated on character boundaries and stripped
+  of terminal control characters before printing.
+- The Workshop API calls share one client, one request builder and one
+  100-id batching rule.
+
+### Fixed
+
+- Modlist import into a CRLF `mod_sources.txt` no longer corrupts the
+  file.
+- `extract_id` no longer mistakes `steamid=` or `valid=` for a Workshop
+  id, and `toml_escape` escapes DEL.
+- PBO config keys are matched exactly, so `namespace` and `authorName`
+  no longer shadow `name` and `author`.
+- A single unreadable cache, candidate or subdirectory no longer aborts
+  a whole command.
+- `file_sha256` updated for the sha2 0.11 digest API, which repairs the
+  build after the sha2 dependency bump.
+
+### Security
+
+- Release blobs are signed with keyless sigstore over GitHub OIDC. The
+  installers verify the bundle with cosign when it is available.
+- CI builds with `--locked`, runs `cargo deny`, pins scanner versions
+  and applies least-privilege token permissions.
+- Dependency upgrades: rustls 0.23.45 for a TLS advisory, and
+  indicatif 0.18 which removes the unmaintained `number_prefix` crate.
+
+### Miscellaneous
+
+- `investigate`, `sync` and `modlist` are split into focused modules.
+  `main.rs` now holds only the CLI. Shared `workshop_api`, `atomic`,
+  `prefix` and `version` modules remove duplicated logic.
+- Added `rust-toolchain.toml`, `deny.toml` and package metadata.
+
 ## [0.6.0] - 2026-09-09
 
 ### Added
