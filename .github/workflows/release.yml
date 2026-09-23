@@ -5,10 +5,40 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: read
+
 jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
   build:
     name: Build (${{ matrix.name }})
+    needs: test
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -33,7 +63,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build Release Binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v7
@@ -48,6 +78,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -79,6 +110,20 @@ jobs:
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Sign release artifacts
+        run: |
+          # Keyless signing through the GitHub OIDC token. One bundle per
+          # binary, named after the binary, so an installer can verify the
+          # exact file it downloaded.
+          for asset in dist/uksfta dist/uksfta.exe; do
+            if [ -f "$asset" ]; then
+              cosign sign-blob --yes --bundle "$asset.sigstore.json" "$asset"
+            fi
+          done
 
       - name: Stage Installers
         run: |

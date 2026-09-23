@@ -33,5 +33,10 @@ Thumbs.db
 .omo/
 .opencode/
 
+# Tool caches and local keys
+.codegraph/
+.ruff_cache/
+keys/
+
 # Local identity cache (never pushed)
 .uksfta/

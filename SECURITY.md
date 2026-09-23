@@ -26,8 +26,10 @@ surfaces are:
 
 - HTML and TOML injection from untrusted mod names or modlist files.
   These are escaped on output.
-- Network calls to Steam Workshop and the Steam API. All requests stay
-  on Steam's domain; IDs are digit-filtered.
+- Network calls to `steamcommunity.com` and `api.steampowered.com`, and to
+  `api.github.com` for the daily update check. IDs are digit-filtered.
+- Terminal escape sequences in scraped Workshop text. Control characters
+  are stripped before the text is printed.
 
 ## Supported versions
 

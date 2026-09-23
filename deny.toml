@@ -1,0 +1,38 @@
+# cargo-deny configuration. The dependency scan workflow runs
+# `cargo deny check` against this file.
+#
+# The licence allowlist below covers the permissive licences the dependency
+# tree is expected to use. Confirm it with one `cargo deny check` run
+# (cargo-deny is not installed in this workspace): add any licence the run
+# reports as missing, and remove any entry the tree does not use.
+
+[advisories]
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+deny = []
+skip = []
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+]
+exceptions = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

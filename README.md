@@ -22,6 +22,9 @@ uksfta sync --modlist --modlist-path ./my-modlist.html
 # Also resolve dependencies from Steam Workshop pages
 uksfta sync --modlist --resolve-deps
 
+# Skip dependency resolution and stay offline
+uksfta sync --offline
+
 # Show which PBOs came from which Workshop mod
 uksfta identify
 
@@ -54,6 +57,12 @@ uksfta import ./my-modlist.html
 
 # Preview what would be imported without changing mod_sources.txt
 uksfta import ./my-modlist.html --dry-run
+
+# Show each mod's size from a launcher modlist HTML, and the total
+uksfta size ./my-modlist.html
+
+# Also fetch sizes for mods not installed locally (Workshop API)
+uksfta size ./my-modlist.html --online
 ```
 
 ## Input Format
@@ -109,12 +118,25 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=887302721 # Boat Mod
 - `mods.lock` — JSON manifest of synced mods (files, name, tags, dependencies, last-updated timestamp)
 
 The tool reads the Workshop cache and its `appworkshop_107410.acf` metadata
-directly from your Steam libraries. It performs no Steam API calls.
+directly from your Steam libraries. It is offline by default. `investigate
+--online`, `size --online`, and `sync --resolve-deps` use the network, as
+does the daily update check, which calls the GitHub API.
 
 The `audit` command also flags orphan PBOs: files in `addons/` that belong
 to no mod listed in `mod_sources.txt`. These are leftovers from removed
 mods and can be cleaned up. It exits with a non-zero status when any
 expected PBO is missing, so it can gate a build in CI.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Success, including "nothing to do". |
+| 1 | A check failed. `verify` or `audit` found a missing PBO. |
+| 2 | Input or environment failure. A required file is missing or unreadable, or `mod_sources.txt` or `mods.lock` is unparseable. |
+
+Network failures during `--online` commands are warnings and exit 0. Those
+commands are best-effort.
 
 ## Missing mods
 
@@ -152,6 +174,29 @@ Each Steam mod is appended as `{id} # {name}`. Mods already present in
 `mod_sources.txt` (including the `[ignore]` section) are skipped. Local
 mods without a Workshop ID are skipped with a warning. New entries are
 inserted before the `[ignore]` section if one exists.
+
+## Modlist size
+
+Use `size` to list the download size of every mod in an Arma 3 launcher
+preset file (HTML) and the total:
+
+```bash
+uksfta size ./my-modlist.html
+```
+
+Sizes come from the local Workshop cache (`appworkshop_107410.acf`), so
+no network access is needed. A mod that is not installed locally is listed
+as `unknown` and is left out of the total. Local mods without a Workshop
+ID have no size and are reported separately.
+
+Add `--online` to fetch sizes for mods not installed locally from the
+keyless Steam Workshop API (`GetPublishedFileDetails`). One request covers
+the whole list, up to 100 ids per call. Without the flag the command stays
+offline.
+
+When the output is a terminal, each size is coloured by its share of the
+total: green under 5%, yellow under 20%, red at or above 20%. Mods with no
+known size are shown in grey.
 
 ## Investigating PBO origins
 
