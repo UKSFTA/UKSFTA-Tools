@@ -130,7 +130,7 @@ expected PBO is missing, so it can gate a build in CI.
 ## Exit codes
 
 | Code | Meaning |
-|---|---|
+| --- | --- |
 | 0 | Success, including "nothing to do". |
 | 1 | A check failed. `verify` or `audit` found a missing PBO. |
 | 2 | Input or environment failure. A required file is missing or unreadable, or `mod_sources.txt` or `mods.lock` is unparseable. |
