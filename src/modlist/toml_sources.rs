@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::error::UksftaError;
+
 /// TOML v2 schema for mod_sources.txt
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct TomlModSources {
@@ -45,4 +47,10 @@ pub(crate) fn is_default_role(role: &str) -> bool {
 
 pub(crate) fn is_default_enabled(enabled: &bool) -> bool {
     *enabled
+}
+
+/// Serialise the v2 schema back to TOML text.
+pub(crate) fn to_toml_string(src: &TomlModSources) -> Result<String, UksftaError> {
+    toml::to_string(src)
+        .map_err(|e| UksftaError::Parse(format!("failed to serialise TOML mod sources: {e}")))
 }

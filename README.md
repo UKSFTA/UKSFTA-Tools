@@ -98,7 +98,8 @@ Fields per mod:
 - `tags` — optional array of tags
 - `role` — `mod` (default) or `ignore`
 - `enabled` — set `false` to exclude without deleting the entry
-- `dependencies` — optional array of Workshop IDs
+- `dependencies` — array of required Workshop IDs. `sync --resolve-deps`
+  writes discovered ids here automatically, sorted and de-duplicated.
 
 The legacy format (v1) is still accepted: one Workshop mod per line (URL
 or bare ID), with an optional tag after `#`. Mods under `[ignore]` are
@@ -132,7 +133,7 @@ expected PBO is missing, so it can gate a build in CI.
 | Code | Meaning |
 | --- | --- |
 | 0 | Success, including "nothing to do". |
-| 1 | A check failed. `verify` or `audit` found a missing PBO. |
+| 1 | A check failed. `verify` or `audit` found a missing PBO, or `sync` found a required dependency absent from the cache. |
 | 2 | Input or environment failure. A required file is missing or unreadable, or `mod_sources.txt` or `mods.lock` is unparseable. |
 
 Network failures during `--online` commands are warnings and exit 0. Those
@@ -151,11 +152,20 @@ lists all missing mods. Open the file in the launcher to batch-subscribe
 to every missing mod at once. The output defaults to `missing-mods.html`;
 override with `--modlist-path`.
 
-Add `--resolve-deps` to also fetch each missing mod's Workshop page and
-discover dependencies not listed in `mod_sources.txt`. Discovered
-dependencies are reported in the missing-mod warning and included in the
-generated modlist. This requires a network connection and adds a
-one-second delay per mod for rate limiting.
+Add `--resolve-deps` to fetch the Workshop page of every enabled mod. It
+discovers dependencies not listed in `mod_sources.txt`. Resolution covers
+every enabled mod, not only the missing ones.
+
+A discovered dependency that is already in the Workshop cache is repacked
+into `addons/` and recorded in `mods.lock`. A later plain `sync` keeps it.
+A discovered dependency that is absent from the cache is reported missing
+and added to the modlist.
+
+If a required dependency is absent from the cache, `sync` fails with exit
+code 1. It fails before it copies any PBO, so a broken mod is never
+published. The non-mod Steam app ids `107410` and `228800` are ignored.
+This requires a network connection and adds a one-second delay per mod for
+rate limiting.
 
 ## Importing a modlist
 

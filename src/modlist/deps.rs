@@ -1,6 +1,13 @@
-use std::collections::{HashMap, HashSet};
-
 use crate::util::workshop_url;
+
+/// Workshop app ids that are applications, not mods. Steam lists them as
+/// required items on some pages, but they must never be repacked as mods.
+pub const NON_MOD_APP_IDS: [&str; 2] = ["107410", "228800"];
+
+/// True when `id` is a non-mod Steam application id.
+pub fn is_non_mod_app_id(id: &str) -> bool {
+    NON_MOD_APP_IDS.contains(&id)
+}
 
 /// Parse a Workshop page's "Required Items" section.
 /// Returns Vec<(id, name)>. Empty if the section is absent.
@@ -9,15 +16,18 @@ pub fn parse_required_items(html: &str) -> Vec<(String, String)> {
 
     // Steam renders required items in a div with id="RequiredItems"
     // Each item is a link: <a href="...?id=NNN">Name</a>
-    let Some(required_section) = document
-        .select(&scraper::Selector::parse("#RequiredItems").unwrap())
-        .next()
-    else {
+    let Ok(required_selector) = scraper::Selector::parse("#RequiredItems") else {
+        return Vec::new();
+    };
+    let Some(required_section) = document.select(&required_selector).next() else {
+        return Vec::new();
+    };
+    let Ok(link_selector) = scraper::Selector::parse("a") else {
         return Vec::new();
     };
 
     let mut deps = Vec::new();
-    for link in required_section.select(&scraper::Selector::parse("a").unwrap()) {
+    for link in required_section.select(&link_selector) {
         let href = link.value().attr("href").unwrap_or("");
         // Extract id=NNN from the href
         let id = href
@@ -25,7 +35,7 @@ pub fn parse_required_items(html: &str) -> Vec<(String, String)> {
             .nth(1)
             .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
             .unwrap_or("");
-        if id.is_empty() {
+        if id.is_empty() || is_non_mod_app_id(id) {
             continue;
         }
         let name = link.text().collect::<String>().trim().to_string();
@@ -38,13 +48,19 @@ pub fn parse_required_items(html: &str) -> Vec<(String, String)> {
 
 /// Fetch a Workshop item's page and return its required dependencies as
 /// Vec<(id, name)>. Returns empty on network error or if no deps exist.
-fn fetch_workshop_dependencies(workshop_id: &str) -> Vec<(String, String)> {
+pub(crate) fn fetch_workshop_dependencies(workshop_id: &str) -> Vec<(String, String)> {
     let url = workshop_url(workshop_id);
     // A stalled connection must not hang the CLI indefinitely.
-    let client = reqwest::blocking::Client::builder()
+    let client = match reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .expect("Failed to build HTTP client");
+    {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("Warning: failed to build HTTP client: {}", e);
+            return Vec::new();
+        }
+    };
     let body = match client.get(&url).send() {
         Ok(r) => r,
         Err(e) => {
@@ -66,82 +82,6 @@ fn fetch_workshop_dependencies(workshop_id: &str) -> Vec<(String, String)> {
         }
     };
     parse_required_items(&html)
-}
-
-/// Resolve transitive dependencies for a list of missing mods.
-/// Returns (expanded list, direct deps per fetched mod).
-/// The expanded list is missing mods + discovered deps not already known.
-/// Deps already present in the workshop cache are skipped entirely.
-type DepResolution = (
-    Vec<(String, String)>,
-    HashMap<String, Vec<(String, String)>>,
-);
-
-pub fn resolve_transitive_deps(
-    missing: &[(String, String)],
-    known_ids: &HashSet<String>,
-    cached_ids: &HashSet<String>,
-) -> DepResolution {
-    let mut result = Vec::new();
-    let mut deps_by_mod: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    let mut fetched: HashSet<String> = HashSet::new();
-    let mut queue: Vec<(String, String)> = missing.to_vec();
-
-    while let Some((id, name)) = queue.pop() {
-        if fetched.contains(&id) {
-            continue;
-        }
-        fetched.insert(id.clone());
-
-        // Missing mods always go in the result
-        result.push((id.clone(), name));
-
-        let deps = fetch_workshop_dependencies(&id);
-        // Keep only deps we do not already have: not cached, not known
-        let missing_deps: Vec<(String, String)> = deps
-            .into_iter()
-            .filter(|(dep_id, _)| !cached_ids.contains(dep_id) && !known_ids.contains(dep_id))
-            .collect();
-        // Record for tree display
-        deps_by_mod.insert(id.clone(), missing_deps.clone());
-        for (dep_id, dep_name) in missing_deps {
-            if !fetched.contains(&dep_id) {
-                queue.push((dep_id, dep_name));
-            }
-        }
-        // Rate limit: 1 request per second
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    }
-    (result, deps_by_mod)
-}
-
-/// Print a mod's missing dependency tree with tree-style indentation.
-/// Only shows deps that were themselves fetched (i.e. also missing).
-pub fn print_dep_tree(
-    id: &str,
-    deps_by_mod: &HashMap<String, Vec<(String, String)>>,
-    prefix: &str,
-    visited: &mut HashSet<String>,
-) {
-    let Some(deps) = deps_by_mod.get(id) else {
-        return;
-    };
-    let missing: Vec<&(String, String)> = deps
-        .iter()
-        .filter(|(dep_id, _)| deps_by_mod.contains_key(dep_id) && !visited.contains(dep_id))
-        .collect();
-    for (i, (dep_id, dep_name)) in missing.iter().enumerate() {
-        let is_last = i == missing.len() - 1;
-        let connector = if is_last { "└─ " } else { "├─ " };
-        eprintln!("{}{}{} ({})", prefix, connector, dep_name, dep_id);
-        visited.insert(dep_id.clone());
-        let child_prefix = if is_last {
-            format!("{}   ", prefix)
-        } else {
-            format!("{}│  ", prefix)
-        };
-        print_dep_tree(dep_id, deps_by_mod, &child_prefix, visited);
-    }
 }
 
 #[cfg(test)]
@@ -179,17 +119,16 @@ mod tests {
         assert!(parse_required_items("<html><body>no deps</body></html>").is_empty());
     }
 
-    // --- resolve_transitive_deps (logic, no network: deps map is empty) ---
     #[test]
-    fn resolve_deps_includes_missing_and_excludes_known_and_cached() {
-        let missing = vec![("111".to_string(), "Mod A".to_string())];
-        let known: HashSet<String> = ["222".to_string()].into_iter().collect();
-        let cached: HashSet<String> = ["333".to_string()].into_iter().collect();
-        // fetch_workshop_dependencies will fail (network) and return empty,
-        // so only the missing root is returned. This verifies filtering
-        // invariants under no-network conditions.
-        let (result, deps_by_mod) = resolve_transitive_deps(&missing, &known, &cached);
-        assert_eq!(result, vec![("111".to_string(), "Mod A".to_string())]);
-        assert!(deps_by_mod.contains_key("111"));
+    fn parse_required_items_filters_non_mod_app_ids() {
+        let html = r#"<div id="RequiredItems">
+<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=107410"><div class="requiredItem">Arma 3</div></a>
+<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=228800"><div class="requiredItem">DayZ</div></a>
+<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=450814997"><div class="requiredItem">CBA_A3</div></a>
+</div>"#;
+        assert_eq!(
+            parse_required_items(html),
+            vec![("450814997".to_string(), "CBA_A3".to_string())]
+        );
     }
 }

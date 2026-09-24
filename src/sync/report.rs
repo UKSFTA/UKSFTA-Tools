@@ -1,7 +1,20 @@
 use crate::util::workshop_url;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::plan::SyncPlan;
+use crate::modlist::{DepMap, ModEntry};
+use crate::sync::fill::SatisfiedDep;
+
+/// Print one line per dependency the launcher modlist satisfies. Those
+/// dependencies are tracked as ignored and are not repacked.
+pub fn print_satisfied_deps(satisfied: &[SatisfiedDep]) {
+    for s in satisfied {
+        eprintln!(
+            "Dependency {} ({}) required by {} ({}): provided by the modlist, tracked as ignore",
+            s.name, s.id, s.required_by_name, s.required_by
+        );
+    }
+}
 
 /// Print the dry-run diff preview and the missing-mod list.
 pub fn print_dry_run(plan: &SyncPlan, modlist: bool, modlist_path: &Path) {
@@ -72,4 +85,33 @@ pub fn print_summary(plan: &SyncPlan) {
         plan.unchanged,
         plan.removed.len()
     );
+}
+
+/// Print one line per discovered dependency, to stderr so it shows in
+/// both the dry-run and the applied run. The line states whether the
+/// dependency is already cached or must be added to the missing list.
+pub fn print_discovered_deps(roots: &[ModEntry], discovered: &DepMap, caches: &[PathBuf]) {
+    for (root_id, deps) in discovered {
+        if deps.is_empty() {
+            continue;
+        }
+        let root_name = roots
+            .iter()
+            .find(|m| &m.id == root_id)
+            .map(|m| m.name.as_str())
+            .unwrap_or(root_id);
+        for (dep_id, dep_name) in deps {
+            if crate::steam::find_mod_in_caches(caches, dep_id).is_some() {
+                eprintln!(
+                    "Dependency {} ({}) required by {} ({}): repacking into addons/",
+                    dep_name, dep_id, root_name, root_id
+                );
+            } else {
+                eprintln!(
+                    "Dependency {} ({}) required by {} ({}): not in Workshop cache, added to missing list",
+                    dep_name, dep_id, root_name, root_id
+                );
+            }
+        }
+    }
 }
