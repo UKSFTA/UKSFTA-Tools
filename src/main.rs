@@ -52,9 +52,12 @@ enum Commands {
         /// Output path for the modlist HTML (default: missing-mods.html)
         #[arg(long, default_value = "missing-mods.html")]
         modlist_path: PathBuf,
-        /// Resolve missing mods' dependencies from Workshop pages
+        /// Resolve every mod's dependencies from Workshop pages
         #[arg(long)]
         resolve_deps: bool,
+        /// Satisfy discovered dependencies from an Arma 3 launcher modlist HTML file
+        #[arg(long, value_name = "PATH")]
+        fill_from: Option<PathBuf>,
     },
     /// Show which PBOs came from which Workshop mod
     Identify,
@@ -125,6 +128,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             modlist,
             modlist_path,
             resolve_deps,
+            fill_from,
         } => {
             let sources_path = Path::new("mod_sources.txt");
             migrate_legacy_if_needed(sources_path, dry_run)?;
@@ -138,15 +142,16 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             if offline && resolve_deps {
                 eprintln!("Warning: --offline ignores --resolve-deps.");
             }
-            sync_mods(
-                &mods,
-                &ignored,
+            let opts = SyncOptions {
+                sources_path,
                 dry_run,
                 offline,
                 modlist,
-                &modlist_path,
+                modlist_path: &modlist_path,
                 resolve_deps,
-            )?;
+                fill_from: fill_from.as_deref(),
+            };
+            sync_mods(&mods, &ignored, &opts)?;
         }
         Commands::Identify => identify()?,
         Commands::Verify => verify()?,

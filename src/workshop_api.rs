@@ -7,6 +7,9 @@ use crate::error::UksftaError;
 const GET_PUBLISHED_FILE_DETAILS_URL: &str =
     "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
 
+const GET_COLLECTION_DETAILS_URL: &str =
+    "https://api.steampowered.com/ISteamRemoteStorage/GetCollectionDetails/v1/";
+
 /// Build the HTTP client used for every Workshop API call: one 15-second
 /// timeout, no automatic retries.
 pub fn build_client() -> reqwest::blocking::Client {
@@ -90,4 +93,59 @@ pub fn fetch_published_file_details(
         details.extend(parsed.response.publishedfiledetails);
     }
     Ok(details)
+}
+
+#[derive(serde::Deserialize)]
+struct CollectionDetailsResponse {
+    response: CollectionResponseInner,
+}
+
+#[derive(serde::Deserialize)]
+struct CollectionResponseInner {
+    #[serde(default)]
+    collectiondetails: Vec<CollectionDetail>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)] // `publishedfileid` and `result` describe the collection itself
+pub struct CollectionDetail {
+    pub publishedfileid: String,
+    pub result: u32,
+    /// Collection members carry the id only. A Workshop item that is not a
+    /// collection returns an empty list.
+    #[serde(default)]
+    pub children: Vec<CollectionChild>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct CollectionChild {
+    pub publishedfileid: String,
+}
+
+/// Fetch the member ids of a Steam Workshop collection. Returns Err on
+/// transport, read, or parse failure so the caller can fall back to the
+/// direct ids. An item that is not a collection yields an empty list.
+pub fn fetch_collection_members(
+    collection_id: &str,
+    client: &reqwest::blocking::Client,
+) -> Result<Vec<String>, UksftaError> {
+    let form = format!("collectioncount=1&publishedfileids[0]={collection_id}");
+    let body = client
+        .post(GET_COLLECTION_DETAILS_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form)
+        .send()
+        .ok()
+        .and_then(|r| r.text().ok())
+        .ok_or_else(|| UksftaError::Input("GetCollectionDetails request failed".to_string()))?;
+
+    let parsed: CollectionDetailsResponse = serde_json::from_str(&body)
+        .map_err(|e| UksftaError::Parse(format!("GetCollectionDetails response: {e}")))?;
+    let mut members = Vec::new();
+    for detail in parsed.response.collectiondetails {
+        for child in detail.children {
+            members.push(child.publishedfileid);
+        }
+    }
+    Ok(members)
 }

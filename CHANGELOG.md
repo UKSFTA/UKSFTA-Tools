@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-09-24
+
+### Added
+
+- Dependency resolution for every enabled mod with `sync --resolve-deps`.
+  A cached dependency is repacked into `addons/` and recorded in
+  `mods.lock`. Discovered ids are persisted to the parent mod's
+  `dependencies` array in `mod_sources.txt`.
+- `sync --fill-from <MODLIST.html>`: satisfy discovered dependencies from
+  an Arma 3 launcher modlist. A dependency the modlist provides is
+  tracked as ignore and is not repacked. Workshop collections contribute
+  their member ids from the Steam API.
+- The non-mod Steam app ids `107410` and `228800` are filtered from
+  required items.
+
+### Changed
+
+- A plain `sync` replays the persisted dependencies with no network.
+
+### Fixed
+
+- Required items of a fully cached mod, such as RHS Plus, were neither
+  reported nor repacked. A required dependency absent from the cache now
+  fails the run before any PBO is copied.
+- `audit` now includes declared dependencies and no longer reports their
+  PBOs as orphans.
+
 ## [0.7.0] - 2026-09-24
 
 ### Added

@@ -1,10 +1,12 @@
 mod deps;
+mod discovery;
 mod html;
 mod import;
 mod legacy;
 mod migrate;
 mod parse_html;
 mod toml_sources;
+mod writer;
 
 use std::fs;
 use std::path::Path;
@@ -15,12 +17,14 @@ use crate::util::extract_id;
 use legacy::parse_legacy_mod_sources;
 use toml_sources::TomlModSources;
 
-pub use deps::{parse_required_items, print_dep_tree, resolve_transitive_deps};
+pub use deps::{is_non_mod_app_id, parse_required_items};
+pub use discovery::{print_dep_tree, resolve_all_required, transitive_closure, DepMap};
 pub use html::{generate_modlist, modlist_row_html};
 pub use import::import_modlist;
 pub use legacy::toml_from_legacy;
 pub use migrate::migrate_legacy_if_needed;
 pub use parse_html::parse_modlist_html;
+pub use writer::{persist_dependencies, persist_ignored};
 
 // --- Mod list parsing ---
 
