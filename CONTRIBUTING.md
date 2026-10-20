@@ -26,6 +26,7 @@ cargo clippy -- -D warnings
 ## Project layout
 
 - `src/main.rs` — CLI definition, dispatch, and module wiring
+- `src/docs/` — `docs` command: project discovery, version, description, changelog, name lookup, composition state
 - `src/investigate/` — PBO origin tracing, Workshop search, scoring
 - `src/sync/` — cache sync, audit, verify, identify, updates, size
 - `src/modlist/` — `mod_sources` parsing, migration, import, HTML modlists

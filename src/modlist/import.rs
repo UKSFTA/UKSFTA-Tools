@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 
 /// Import mods from an Arma 3 launcher modlist HTML file into mod_sources.txt.
-/// Appends each Steam mod as "{id} # {name}" (legacy) or a [[mods]] block
+/// Appends each Steam mod as "{id} # {name}" (legacy) or a `[[mods]]` block
 /// (TOML). Local mods and duplicates are skipped with a message.
 pub fn import_modlist(modlist_file: &Path, dry_run: bool) -> Result<(), UksftaError> {
     let content = fs::read_to_string(modlist_file).map_err(|e| {
