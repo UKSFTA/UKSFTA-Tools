@@ -7,7 +7,7 @@ use crate::error::UksftaError;
 
 // --- Lock file ---
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LockFile {
     #[serde(default = "default_lock_version")]
     pub version: u32,

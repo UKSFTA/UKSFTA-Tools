@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 pub use std::collections::{HashMap, HashSet};
 
 mod atomic;
+mod docs;
 mod error;
 mod investigate;
 mod lock;
@@ -19,6 +20,7 @@ mod workshop_api;
 
 use crate::error::UksftaError;
 
+pub use crate::docs::*;
 pub use crate::investigate::*;
 pub use crate::lock::*;
 pub use crate::modlist::*;
@@ -102,6 +104,27 @@ enum Commands {
     },
     /// Show the installed version and check for updates
     Version,
+    /// Update the description and changelog files named in [hemtt.publish]
+    Docs {
+        /// Scan this directory for HEMTT projects instead of the current one
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        /// Show the generated text without changing files
+        #[arg(long, conflicts_with = "check")]
+        dry_run: bool,
+        /// Fail when a configured file is missing or out of date
+        #[arg(long)]
+        check: bool,
+        /// Look up missing mod names from the Steam Workshop API
+        #[arg(long)]
+        online: bool,
+        /// Refetch cached Workshop names instead of using the cache
+        #[arg(long, requires = "online")]
+        refresh_names: bool,
+        /// Replace files and sections that uksfta did not generate
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() {
@@ -177,6 +200,21 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             }
         }
         Commands::Version => version(),
+        Commands::Docs {
+            root,
+            dry_run,
+            check,
+            online,
+            refresh_names,
+            force,
+        } => docs(&DocsOptions {
+            root: root.as_deref(),
+            dry_run,
+            check,
+            online,
+            refresh_names,
+            force,
+        })?,
     }
     Ok(())
 }
