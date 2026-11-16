@@ -43,11 +43,17 @@ uksfta updates
 # Trace untracked PBOs in addons/ back to their Workshop origin
 uksfta investigate
 
-# Check each origin against the Steam Workshop API (network)
+# Resolve each PBO's identity online; a title prints only when confirmed
 uksfta investigate --online
 
 # Investigate all PBOs, including tracked ones
 uksfta investigate --all
+
+# Refresh the online resolution, then print the status lines
+uksfta investigate --report --online
+
+# Print the stored resolution lines with no network
+uksfta investigate --report
 
 # Show the installed version and force a fresh update check
 uksfta version
@@ -310,11 +316,14 @@ from removed mods, merged packs, or manual copies:
 # Trace untracked PBOs to their source Workshop mod
 uksfta investigate
 
-# Check each origin against the Steam Workshop API (network)
+# Resolve each PBO's identity online and confirm the name
 uksfta investigate --online
 
 # Investigate every PBO, including tracked ones
 uksfta investigate --all
+
+# Refresh the online resolution, then print the status lines
+uksfta investigate --report --online
 ```
 
 Each PBO is matched by its **header prefix** (the addon's canonical path,
@@ -327,37 +336,115 @@ prefix roots). PBOs with no matching copy are reported as unknown — they
 may come from a deleted or private mod, or be manually placed. A result
 whose best match is itself a pack is flagged `[pack: verify source]`.
 
-With `--online`, the tool calls Steam's `GetPublishedFileDetails` API
+With `--online`, the tool also calls Steam's `GetPublishedFileDetails` API
 (no key required) to report whether each origin still exists and is
 publicly visible. An item that is not publicly visible is either removed
 or set private — the API cannot tell the two apart without the owner
-authenticating. For PBOs with no local origin (or a pack-only origin),
-`--online` also searches the Workshop and lists the top candidate mods
-with their titles, so you can trace where a repacked or deleted mod's
-content came from. The search term is extracted from the PBO's content
-in order of reliability: a non-vanilla `requiredAddons[]` root from the
-plain-text config (`rhsusf_c_weapons` → `rhsusf`), a mod-family
-string-table token (`$STR_RHSUSF_...` → `RHSUSF`), a short author
-handle (`DANZ`, `TFB`), then the header prefix. These distinctive
-tokens match mod titles far better than PBO filenames. This is a
-best-effort search — Workshop text search is imprecise, so candidates
-are shown for verification rather than asserted.
+authenticating.
 
-If the `STEAM_API_KEY` environment variable is set, `--online` uses
-Steam's official `QueryFiles` API instead of scraping the browse page.
-The keyed search ranks results properly and surfaces mods the page
-scrape buries (for example `Zulu Custom`). The key is read from the
-environment only and never embedded in the binary. Without a key the
-tool falls back to the keyless browse-page scrape.
+The same run then resolves the identity of every examined PBO from its own
+content. It reads the `CfgMods` name, a bracketed author tag, the
+`CfgPatches` class and URL, the display names, and other title-shaped
+strings that are rare in the pack. It plans at most three Workshop text
+searches per PBO, most specific first, and stops at the first confirmed
+match.
 
-Search results are cached locally in `.uksfta/identities.json`
-(gitignored, never pushed) so repeat investigations reuse prior
-searches instead of re-hitting the Workshop.
+A search result confirms only when the title covers the query phrase, the
+head noun agrees, the result set is narrow, and the best candidate leads
+the next one by a wide margin. A PBO whose config carries its own Workshop
+URL confirms on that id alone.
+
+Evidence comes from every authored-text entry, not only the config. Strings
+that are rare in the local pack, stringtable values reached through
+`$STR_*` references, and facts recovered from a binarised `\0raP` config
+all feed the same gates. A query token of three to six letters may match a
+contiguous run of title initials, so `ADE` can match `Advanced Diving
+Environment`. The category of a `CBA_fnc_addKeybind` registration is read
+as a mod-name source of its own, because modders usually put the title or
+the Workshop name there. Two distinct queries that agree on the same item confirm it
+even when the per-query margin is a tie, provided the agreed item also has
+a strong title match or something in the PBO corroborates it. Popularity
+never orders or confirms a candidate.
+
+A tie is resolved by content where possible: the tied candidates' item
+pages are checked for the PBO's stem, prefix or `CfgPatches` class, then
+for the uploader name. Exactly one match confirms the id. Otherwise the
+line keeps the shared title. Unconfirmed clusters with a specific query may
+fetch page 2 of the Workshop search, and rarity is learned from every
+installed Workshop PBO rather than the pack alone.
+
+When several candidates tie on the same exact title, the line reports the
+words they share as a shared title and prints no id, so a family name is
+never turned into a guessed Workshop id.
+
+The item page supplies the uploader's name. It is used only as
+corroboration, and only when every title gate already passes, because the
+uploader is often a repacker rather than the original author. Each item
+costs one read however many PBOs point at it.
+
+The store also records the top ten candidates for each PBO. After a run,
+`tools/calibrate.py` compares those against `.uksfta/labels.json` and
+prints precision at rank 1, 3 and 10 by status. A run reuses a fresh
+record while the PBO fingerprint matches, and orders the rest by oldest
+attempt. A scan has no request ceiling: it paces every query, waits out a
+rate limit with an exponential backoff, and continues until the pack is
+done. One line is rewritten in place while it runs, with the completed
+queries, the percentage, the elapsed time, the estimated time remaining and
+the PBO in hand:
+
+```text
+  [ 41/163  25%] 03:12 elapsed  ETA 09:31  esp_objects
+```
+
+The output is one line per PBO. A confirmed match prints the title and the
+Workshop id:
+
+```text
+[confirmed] ade_core.pbo -> "ADE - Advanced Diving Environment" (1891978580) [query "Diving Mask", M=1.00 Q=0.83 margin=1.00]
+```
+
+Every other PBO prints a status, a score, and no name. The status is one of
+`[ambiguous]`, `[no-query]`, `[no-result]`, `[rate-limited]`, or
+`[unresolved]`. A name appears only when it is confirmed, so a doubtful
+candidate never prints as a mod title. The summary counts each status.
+
+The browse endpoint is paced at one request every four seconds, so a large
+pack with many unseen PBOs takes minutes per run. A rate limit waits and
+retries with a growing delay, up to five times, and only then records that
+PBO as rate limited. The rest of the scan continues.
+
+Every resolution is written to `.uksfta/identities.json`, so a later run
+prints the same lines with no network. The file is keyed by PBO file name
+and guarded by the PBO fingerprint, and it is gitignored. A record carries
+a title only when the match was confirmed.
 
 ```bash
-# Print the resolved identity inventory from the cache (no network)
+# Print the stored resolution lines, offline
 uksfta investigate --report
+
+# Resolve first, then print (refreshes what the run reached)
+uksfta investigate --report --online
 ```
+
+`--report` reads `.uksfta/identities.json` and nothing else. A PBO that
+the file does not describe, or describes under a different fingerprint
+because the file changed, prints `[unresolved]` with no query. A missing
+file prints
+
+```text
+No cached resolutions. Run 'uksfta investigate --online' first.
+```
+
+and exits 0. The store records which ranking produced each decision. A
+schema or score-version bump therefore discards the whole file instead of
+converting it, and the next `--online` run rebuilds it from scratch. A
+`[rate-limited]` or `[no-result]` record retries on the next online run.
+
+The store also records the top ten candidates each PBO ranked, so a
+mismatch can be examined after the run. `tools/calibrate.py` scores the
+store against `.uksfta/labels.json`, which lists the Workshop id a person
+has verified for a PBO. It reports precision at rank 1, 3 and 10 for each
+stored status, and exits 1 only when a confirmed row names the wrong id.
 
 The `identify` command uses the same byte-hash matching, so its origin
 reports are now deterministic too.
