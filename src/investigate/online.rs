@@ -1,96 +1,340 @@
-//! The online phase: visibility check, grouped Workshop search, summary.
+//! The investigate phase: local origin block, then online resolution.
+//!
+//! The local block is byte-compatible with the pre-v2 output: it maps each
+//! examined PBO to a cached Workshop folder and prints `[UNKNOWN]`,
+//! `[RESOLVED]` or `[PACK]`. Only `--online` adds identity resolution, and
+//! only a confirmed match prints a Workshop title.
+//!
+//! Every resolution is written to the identity store, so `--report`
+//! prints the same lines offline from the same decisions.
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{BTreeSet, HashSet};
+use std::fs;
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use super::bikey::scan_bikey_names;
-use super::cache::load_identity_cache;
-use super::group::group_pbos_by_term;
-use super::online_group::{search_group, GroupCounters};
+use super::evidence::build_evidence_pool;
+use super::http::{LiveHttp, RateLimiter};
+use super::identity::extract_identity;
+use super::plan::build_corpus_stats_many;
+use super::render::{render_all, render_progress, render_summary, summary_of};
+use super::resolve::{resolve_all, split_fresh, PboResolution, Progress, ResolveContext, SeenItem};
+use super::store::{
+    load_store, now_secs, record_run, report_resolutions, save_store, store_path, IdentityStore,
+};
 use super::visibility::check_workshop_visibility;
-use crate::origin::ResolvedOrigin;
-use crate::util::{paint, C_BOLD, C_DIM};
-use crate::workshop_api::build_client;
+use crate::error::UksftaError;
+use crate::lock::load_lock;
+use crate::origin::{
+    build_mod_dirs, build_pbo_index, resolve_pbo_from_index, self_workshop_id, ModDir,
+    ResolvedOrigin,
+};
+use crate::pbo::{get_mod_metadata, pbo_fingerprint, pbo_prefix};
+use crate::steam::find_all_workshop_caches;
+use crate::util::{paint, stdout_is_tty, workshop_url, C_GREEN, C_RED};
 
-/// Check each resolved origin against the Workshop, then search the
-/// Workshop for every PBO whose origin is unknown or an aggregate pack.
-pub(crate) fn search_online(
-    results: &[(String, Option<ResolvedOrigin>)],
-    addons_dir: &Path,
-    use_colour: bool,
-) {
-    check_workshop_visibility(results.to_vec());
-
-    // ── Grouped Workshop search ────────────────────────────────
-    // Group PBOs by search term so we search once per mod family
-    // instead of once per PBO. This eliminates duplicate searches
-    // and cross-match noise (e.g. 3 PBOs from one mod no longer
-    // search independently and potentially match 3 different mods).
-    let searchable: Vec<(String, Option<ResolvedOrigin>)> = results
-        .iter()
-        .filter(|(_, origin)| match origin {
-            None => true,
-            Some(o) => o.is_pack,
-        })
-        .cloned()
-        .collect();
-
-    if searchable.is_empty() {
-        return;
+/// Trace the Workshop origin of untracked PBOs in addons/, then, when
+/// `online` is set, resolve each PBO's identity and print one line per PBO.
+///
+/// `report` without `online` renders the stored decisions and needs no
+/// network. `report` with `online` resolves, saves, then prints the same
+/// lines the store now holds.
+pub fn investigate(all: bool, online: bool, report: bool) -> Result<(), UksftaError> {
+    if report && !online {
+        return investigate_report();
     }
 
-    println!(
-        "\nSearching Workshop for {} PBO(s) whose origin is unknown or a pack...",
-        searchable.len()
-    );
+    let caches = find_all_workshop_caches();
+    if caches.is_empty() {
+        return Err(UksftaError::Input("Workshop cache not found".to_string()));
+    }
+    let addons_dir = Path::new("addons");
+    if !addons_dir.exists() {
+        return Err(UksftaError::Input("No addons/ directory".to_string()));
+    }
 
-    // Scan for bikey files — author team signal
+    let mut mod_dirs = build_mod_dirs(&caches);
+
+    // If the current directory is itself a Workshop mod folder (e.g. we are
+    // investigating a pack's own contents), exclude it as a candidate.
+    if let Some(self_id) = self_workshop_id(&caches) {
+        println!(
+            "Investigating Workshop mod {} — excluding it as a candidate.",
+            self_id
+        );
+        mod_dirs.retain(|d| d.id != self_id);
+    }
+
+    // Tracked PBO filenames: from mods.lock if present, else all are untracked
+    let lock_path = Path::new("mods.lock");
+    let lock = load_lock(lock_path)?;
+    let tracked: HashSet<String> = lock
+        .mods
+        .values()
+        .flat_map(|m| m.files.iter())
+        .filter_map(|f| {
+            Path::new(f)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+        })
+        .collect();
+
+    let mut results: Vec<(String, Option<ResolvedOrigin>)> = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(addons_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "pbo").unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !all && tracked.contains(&name) {
+                    continue;
+                }
+                results.push((name, None));
+            }
+        }
+    }
+
+    if results.is_empty() {
+        println!("No untracked PBOs in addons/.");
+        return Ok(());
+    }
+
+    // Build a single-pass index of every cached PBO name to its folders
+    let index = build_pbo_index(&mod_dirs);
+
+    // Match each untracked PBO against the index and arbitrate the origin
+    for (pbo_name, origin) in &mut results {
+        let pbo_path = addons_dir.join(pbo_name.as_str());
+        let target_prefix = pbo_prefix(&pbo_path);
+        let candidates = index
+            .get(pbo_name.as_str())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        *origin = resolve_pbo_from_index(&pbo_path, candidates, target_prefix.as_deref());
+    }
+
+    // Report
+    let use_colour = stdout_is_tty();
+    println!("Untracked PBO Investigation:");
+    println!("  {} PBO(s) examined", results.len());
+    let mut unknown_count = 0;
+    for (pbo, origin) in &results {
+        let Some(origin) = origin else {
+            unknown_count += 1;
+            println!("  {} {}", paint(use_colour, C_RED, "[UNKNOWN]"), pbo);
+            continue;
+        };
+        let id = &origin.id;
+        let meta = mod_dirs
+            .iter()
+            .find(|d| &d.id == id)
+            .map(|d| get_mod_metadata(&d.path))
+            .unwrap_or_default();
+        let name = if meta.name.is_empty() {
+            format!("Mod {}", id)
+        } else {
+            meta.name
+        };
+        if origin.is_pack {
+            println!(
+                "  {} {} -> {} ({}) {} [pack: prefix {} — verify source]",
+                paint(use_colour, C_GREEN, "[PACK]"),
+                pbo,
+                name,
+                id,
+                workshop_url(id),
+                origin.prefix.as_deref().unwrap_or("unknown")
+            );
+        } else {
+            println!(
+                "  {} {} -> {} ({}) {}",
+                paint(use_colour, C_GREEN, "[RESOLVED]"),
+                pbo,
+                name,
+                id,
+                workshop_url(id)
+            );
+        }
+    }
+    if unknown_count > 0 {
+        println!(
+            "\n{} PBO(s) could not be matched to any Workshop cache entry.",
+            unknown_count
+        );
+        println!("They may come from a deleted or private mod, or be manually placed.");
+    }
+
+    if !online {
+        return Ok(());
+    }
+
+    let pbo_names: Vec<String> = results.iter().map(|(name, _)| name.clone()).collect();
+    check_workshop_visibility(results);
+    resolve_identities(&pbo_names, addons_dir, &mod_dirs, use_colour);
+    Ok(())
+}
+
+/// Print the status lines from the store, offline.
+///
+/// The PBO list decides which files are described; the store decides what
+/// is said about each. A PBO the store does not describe, or describes
+/// under another fingerprint, prints as unresolved and carries no name.
+fn investigate_report() -> Result<(), UksftaError> {
+    let addons_dir = Path::new("addons");
+    if !addons_dir.exists() {
+        return Err(UksftaError::Input("No addons/ directory".to_string()));
+    }
+
+    let store = load_store(&store_path());
+    if store.pbo.is_empty() {
+        println!("No cached resolutions. Run 'uksfta investigate --online' first.");
+        return Ok(());
+    }
+
+    let examined = examined_fingerprints(addons_dir);
+    if examined.is_empty() {
+        println!("No PBOs in addons/.");
+        return Ok(());
+    }
+
+    let use_colour = stdout_is_tty();
+    let resolutions = report_resolutions(&store, &examined);
+    println!("\n{}", render_all(&resolutions, use_colour));
+    println!(
+        "\n{}",
+        render_summary(&summary_of(&resolutions), use_colour)
+    );
+    Ok(())
+}
+
+/// Every PBO in addons/ with its current fingerprint, in file-name order.
+fn examined_fingerprints(addons_dir: &Path) -> Vec<(String, String)> {
+    let mut examined: Vec<(String, String)> = Vec::new();
+    if let Ok(entries) = fs::read_dir(addons_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "pbo").unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let fingerprint = pbo_fingerprint(&path).unwrap_or_default();
+                examined.push((name, fingerprint));
+            }
+        }
+    }
+    examined.sort();
+    examined
+}
+
+/// Print the online phase: identity resolution and summary.
+fn resolve_identities(
+    pbo_names: &[String],
+    addons_dir: &Path,
+    mod_dirs: &[ModDir],
+    use_colour: bool,
+) {
     let bikey_names = scan_bikey_names(addons_dir);
     if !bikey_names.is_empty() {
         println!("  Signing keys found: {}", bikey_names.join(", "));
     }
 
-    let groups = group_pbos_by_term(&searchable, addons_dir);
-    let total_groups = groups.len();
-    let mut cache = load_identity_cache();
-    let api_client = build_client();
-    let mut searched = HashSet::new();
-    let mut counters = GroupCounters::default();
+    println!(
+        "\nResolving {} PBO(s) online. The evidence read takes about a minute and \
+         Workshop browse requests are paced at one every 4 s, so a run takes minutes.",
+        pbo_names.len()
+    );
 
-    for (group_idx, group) in groups.iter().enumerate() {
-        let progress = format!("[{}/{}]", group_idx + 1, total_groups);
-        search_group(
-            group,
-            &progress,
-            use_colour,
-            &api_client,
-            &mut cache,
-            &mut searched,
-            &mut counters,
-        );
+    // Rarity is learned from every installed Workshop PBO, not from this
+    // pack alone: a token common across the caches is a family word. A
+    // mod directory holds its PBOs in subdirectories, so the corpus is
+    // built from the directories that actually hold them.
+    let mut corpus_dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    corpus_dirs.insert(addons_dir.to_path_buf());
+    for pbo in mod_dirs.iter().flat_map(|dir| dir.pbos.iter()) {
+        if let Some(parent) = pbo.parent() {
+            corpus_dirs.insert(parent.to_path_buf());
+        }
     }
+    let corpus = build_corpus_stats_many(&corpus_dirs.into_iter().collect::<Vec<_>>());
+    let pool = build_evidence_pool(addons_dir);
+    let evidence: Vec<_> = pbo_names
+        .iter()
+        .map(|name| extract_identity(&addons_dir.join(name)))
+        .collect();
 
-    // Final summary
-    println!();
-    println!("{}", paint(use_colour, C_BOLD, "Summary:"));
-    println!(
-        "  {} confident match(es) — the top candidate's title matches the search term",
-        counters.confident
-    );
-    println!(
-        "  {} weak match(es) — no confident match, best candidate shown for reference",
-        counters.weak
-    );
-    println!("  {} group(s) with no candidates", counters.no_candidate);
-    if counters.cached > 0 {
+    let store = load_store(&store_path());
+    let now = now_secs();
+    let (kept, pending) = split_fresh(&store, evidence, now);
+    if !kept.is_empty() {
         println!(
-            "  {} group(s) served from the local cache ({} total)",
-            counters.cached,
-            paint(
-                use_colour,
-                C_DIM,
-                "run 'uksfta investigate --online' to refresh"
-            )
+            "  {} PBO(s) still hold a fresh record; no request is spent on them.",
+            kept.len()
         );
     }
+
+    let http = LiveHttp::new();
+    let mut limiter = RateLimiter::new(std::thread::sleep);
+    let mut ctx = ResolveContext::new(&http, &mut limiter, &corpus, Some(&pool));
+    ctx.schedule_from(&store);
+    // The scan is paced, so a long pack would otherwise print nothing for
+    // minutes. One line is rewritten in place until the scan ends.
+    let scanning = !pending.is_empty();
+    if scanning {
+        let started = Instant::now();
+        // A captured log keeps one line per step. A terminal rewrites the
+        // line in place.
+        let terminal = std::io::stdout().is_terminal();
+        ctx.set_progress(Box::new(move |progress: &Progress| {
+            let line = render_progress(
+                progress.done,
+                progress.total,
+                started.elapsed(),
+                &progress.label,
+            );
+            let mut out = std::io::stdout();
+            let _ = if terminal {
+                write!(out, "\r{line}\x1b[K")
+            } else {
+                writeln!(out, "{line}")
+            };
+            let _ = out.flush();
+        }));
+    }
+    let resolutions = resolve_all(pending, &mut ctx);
+    if scanning {
+        println!();
+    }
+    let items = ctx.seen_items();
+    drop(ctx);
+
+    let resolutions = persist(&resolutions, &items, now, kept);
+
+    println!("\n{}", render_all(&resolutions, use_colour));
+    println!(
+        "\n{}",
+        render_summary(&summary_of(&resolutions), use_colour)
+    );
+}
+
+/// Merge this run into the store, save it, and return the records the
+/// store now holds for exactly these PBOs.
+///
+/// A record reused from the store is rendered from the store rather than
+/// merged again, so its attempt time still dates the query that produced
+/// it and an unresolved record keeps its seven-day clock.
+fn persist(
+    resolutions: &[PboResolution],
+    items: &[SeenItem],
+    now: u64,
+    kept: Vec<PboResolution>,
+) -> Vec<PboResolution> {
+    let path = store_path();
+    let mut store: IdentityStore = load_store(&path);
+    let mut rendered = record_run(&mut store, resolutions, items, now);
+    rendered.extend(kept);
+    rendered.sort_by(|left, right| left.pbo.cmp(&right.pbo));
+    if let Err(error) = save_store(&path, &store) {
+        eprintln!("Warning: could not save {}: {error}", path.display());
+    }
+    rendered
 }

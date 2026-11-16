@@ -94,11 +94,10 @@ enum Commands {
         /// Investigate all PBOs, including tracked ones
         #[arg(long)]
         all: bool,
-        /// Check each origin against the Steam Workshop API (network)
+        /// Check origins and resolve identities against the Workshop (network)
         #[arg(long)]
         online: bool,
-        /// Print the resolved identity inventory from the local cache
-        /// (no network)
+        /// Print the resolution report; with --online, resolve first
         #[arg(long)]
         report: bool,
     },
@@ -192,13 +191,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             all,
             online,
             report,
-        } => {
-            if report {
-                investigate_report()?;
-            } else {
-                investigate(all, online)?;
-            }
-        }
+        } => investigate(all, online, report)?,
         Commands::Version => version(),
         Commands::Docs {
             root,
