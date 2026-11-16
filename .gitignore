@@ -35,6 +35,7 @@ Thumbs.db
 
 # Tool caches and local keys
 .codegraph/
+__pycache__/
 .ruff_cache/
 keys/
 
