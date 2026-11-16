@@ -89,6 +89,11 @@ This project uses [Semantic Versioning](https://semver.org/).
   eleven minutes. A `429` that carries `Retry-After` is honoured, capped
   at five minutes.
 
+### Security
+
+- Two certificate-validation advisories are cleared by updating
+  `rustls-webpki` to 0.103.17 and `webpki-root-certs` to 1.0.12.
+
 ### Removed
 
 - The v1 identity derivation: prefix and `$STR_` search terms, short author
