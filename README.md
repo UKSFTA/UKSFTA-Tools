@@ -392,14 +392,14 @@ done. One line is rewritten in place while it runs, with the completed
 queries, the percentage, the elapsed time, the estimated time remaining and
 the PBO in hand:
 
-```
+```text
   [ 41/163  25%] 03:12 elapsed  ETA 09:31  esp_objects
 ```
 
 The output is one line per PBO. A confirmed match prints the title and the
 Workshop id:
 
-```
+```text
 [confirmed] ade_core.pbo -> "ADE - Advanced Diving Environment" (1891978580) [query "Diving Mask", M=1.00 Q=0.83 margin=1.00]
 ```
 
@@ -408,9 +408,10 @@ Every other PBO prints a status, a score, and no name. The status is one of
 `[unresolved]`. A name appears only when it is confirmed, so a doubtful
 candidate never prints as a mod title. The summary counts each status.
 
-The browse endpoint is rate limited, so one request costs four seconds. A
-large pack with many unseen PBOs takes minutes per run. A rate-limited run
-stops that PBO and keeps the rest.
+The browse endpoint is paced at one request every four seconds, so a large
+pack with many unseen PBOs takes minutes per run. A rate limit waits and
+retries with a growing delay, up to five times, and only then records that
+PBO as rate limited. The rest of the scan continues.
 
 Every resolution is written to `.uksfta/identities.json`, so a later run
 prints the same lines with no network. The file is keyed by PBO file name
@@ -430,7 +431,7 @@ the file does not describe, or describes under a different fingerprint
 because the file changed, prints `[unresolved]` with no query. A missing
 file prints
 
-```
+```text
 No cached resolutions. Run 'uksfta investigate --online' first.
 ```
 
