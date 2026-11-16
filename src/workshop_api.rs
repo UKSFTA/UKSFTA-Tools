@@ -22,6 +22,7 @@ pub fn build_client() -> reqwest::blocking::Client {
 /// One item from a GetPublishedFileDetails response. Fields an endpoint
 /// does not return default to empty.
 #[derive(serde::Deserialize)]
+#[allow(dead_code)] // The response is deserialised whole; only some fields are read today.
 pub struct FileDetail {
     pub publishedfileid: String,
     pub result: u32,
