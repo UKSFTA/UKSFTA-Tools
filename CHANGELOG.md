@@ -5,6 +5,105 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] - 2026-11-16
+
+### Added
+
+- A learned evidence pool. Every authored-text entry in a PBO is read,
+  title-shaped strings are ranked by how rare they are in the local pack,
+  and `$STR_*` references are resolved through CSV and XML stringtables.
+  Binarised `\0raP` configs are parsed directly, which recovers
+  `CfgPatches`, `requiredAddons`, `CfgMods` and author facts for PBOs that
+  ship no readable `config.cpp`.
+- Cross-query agreement. When two distinct queries both place the same
+  Workshop item in their top five, and no other item agrees, the match is
+  confirmed even if the per-query margin was a tie, provided the agreed
+  item also has a strong title match or something in the PBO corroborates
+  it. Two queries agreeing on a five-way tie is not enough.
+- The category from a `CBA_fnc_addKeybind` registration is now an identity
+  source of its own, ranked just below `CfgMods.name`. Modders usually put
+  the mod title or the Workshop name in that category, which is what makes
+  `ADE` resolve to `Advanced Diving Environment` instead of an item name.
+- Strict acronym matching. A query token of three to six letters may match
+  a contiguous run of title words whose initials spell it (`ADE` against
+  `Advanced Diving Environment`), with no credit for scattered initials.
+- Item-page author corroboration for the narrow case where every title
+  gate already passes but nothing corroborates the file. It can never
+  rescue a candidate that fails a title gate, and one read serves every
+  PBO that points at the item.
+- When several candidates tie on the same exact title, as five ADE variants
+  do, the line reports the words they share as a shared title and prints no
+  id. The name is useful; the id would be a guess.
+- A tie is resolved by content, not by name. When candidates share an exact
+  title, their item pages are checked for the PBO's stem, prefix or
+  `CfgPatches` class, then for the uploader name. Exactly one match
+  confirms the id. Zero or several keep the shared title.
+- An unconfirmed cluster with a specific query may fetch page 2 of the
+  Workshop search. Rare-word rarity is learned from every installed
+  Workshop PBO, not only the current pack.
+- Live progress during a scan. One line is rewritten in place with the
+  completed queries, the percentage, the elapsed time, the estimated time
+  remaining and the PBO in hand, so a full pack reports continuously
+  instead of going quiet for minutes.
+- The store records the top ten candidates per PBO, and
+  `tools/calibrate.py` measures precision at rank 1, 3 and 10 against
+  `.uksfta/labels.json`. Blank labels are skipped.
+
+### Changed
+
+- `investigate --online` now resolves each PBO's identity from the PBO's
+  own config and prints a Workshop **title only for a confirmed match**.
+  It reads `CfgMods`, a bracketed author tag, `CfgPatches`, display names,
+  and title-shaped strings that are rare in the pack, then runs at most
+  three paced Workshop searches per PBO. The unit of record is the PBO.
+  Every other PBO prints one of `[ambiguous]`, `[no-query]`, `[no-result]`,
+  `[rate-limited]`, or `[unresolved]` with a score and no name, and the
+  summary counts each status. A scan has no request ceiling. It paces
+  every query to the endpoint budget, waits out a rate limit with an
+  exponential backoff of up to five retries, and continues until the pack
+  is done, so a 203-PBO pack is covered in one run.
+- `investigate --report` now renders from `.uksfta/identities.json`. An
+  online run writes one record per PBO: its fingerprint, its evidence, the
+  queries it tried, and the decision. `--report` reads that file and prints
+  the same lines with no network, so a run can be inspected later. A PBO
+  absent from the store, or present under a different fingerprint because
+  the file changed, prints `[unresolved]` with no query. The store never
+  holds a title for a non-confirmed PBO. The file is gitignored, and a
+  schema or score-version bump discards it rather than converting records
+  that came from an older ranking.
+- The local origin block (`[UNKNOWN]`, `[RESOLVED]`, `[PACK]` lines) is
+  unchanged and still prints before the resolution lines.
+
+### Fixed
+
+- The anchor is now a hard gate on every confirmation path. A title that
+  missed the PBO's anchor token is capped, and the cap could pass the
+  evidence gate at exactly its own value, so an unanchored title could be
+  confirmed. Agreement between two queries and page-two results now also
+  require a matched anchor and a specific query.
+- A shared title is now pruned from a page-two decision as well as a
+  page-one decision, so a name prints only when the PBO's own words
+  anchor it.
+- A `503` is no longer treated as a rate limit. It gets two short retries
+  and the status, so one transient server fault cannot hold a scan for
+  eleven minutes. A `429` that carries `Retry-After` is honoured, capped
+  at five minutes.
+
+### Security
+
+- Two certificate-validation advisories are cleared by updating
+  `rustls-webpki` to 0.103.17 and `webpki-root-certs` to 1.0.12.
+
+### Removed
+
+- The v1 identity derivation: prefix and `$STR_` search terms, short author
+  handles, `requiredAddons` roots, the grouped online search, the keyed
+  `QueryFiles` path, the `changelog` cross-reference scrape, and the v1
+  `.uksfta/identities.json` cache. The v1 cache keyed on search terms, so
+  it is discarded on sight rather than converted.
+- The browse-page link scrape and the `filedetails/?id=` fallback. A page
+  without the current SSR payload is a typed error, never a list of ids.
+
 ## [0.8.0] - 2026-09-24
 
 ### Added
