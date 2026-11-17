@@ -366,9 +366,12 @@ as a mod-name source of its own, because modders usually put the title or
 the Workshop name there. Two distinct queries that agree on the same item
 confirm it even when the per-query margin is a tie, but only when a link
 ties that item to this file: a Workshop URL in its config, a dependency
-root, the uploader name, or the item page itself. Agreement on a generic
-title never confirms, and a shared word such as `markers` or `backpacks`
-is not a link. Popularity never orders or confirms a candidate.
+root, the uploader name, or the item page itself. The agreed item must also
+lead every rival in the result pool by the same margin a single query would
+need, so a family of six identically titled variants stays ambiguous.
+Agreement on a generic title never confirms, and a shared word such as
+`markers` or `backpacks` is not a link. Popularity never orders or confirms
+a candidate.
 
 
 A tie is resolved by content where possible: the tied candidates' item
