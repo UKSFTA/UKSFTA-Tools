@@ -17,9 +17,11 @@ This project uses [Semantic Versioning](https://semver.org/).
   ship no readable `config.cpp`.
 - Cross-query agreement. When two distinct queries both place the same
   Workshop item in their top five, and no other item agrees, the match is
-  confirmed even if the per-query margin was a tie, provided the agreed
-  item also has a strong title match or something in the PBO corroborates
-  it. Two queries agreeing on a five-way tie is not enough.
+  confirmed even if the per-query margin was a tie, but only when a link
+  ties the item to the file: a Workshop URL, a dependency root, the
+  uploader name, or the item page. Agreement on a generic title alone is
+  never enough, and a shared word such as `markers` is not a link.
+
 - The category from a `CBA_fnc_addKeybind` registration is now an identity
   source of its own, ranked just below `CfgMods.name`. Modders usually put
   the mod title or the Workshop name in that category, which is what makes
@@ -49,6 +51,35 @@ This project uses [Semantic Versioning](https://semver.org/).
   `tools/calibrate.py` measures precision at rank 1, 3 and 10 against
   `.uksfta/labels.json`. Blank labels are skipped.
 
+### Fixed
+
+- A scan no longer records `no-result` when Steam answers a search with an
+  empty page while throttling. Page one is fetched a second time after a
+  pause, and only then is an absence recorded. On one 203-PBO run thirteen
+  files were wrongly recorded as absent in a single seventy-second window.
+- Content corroboration no longer confirms a weak title. It could rescue a
+  title at 0.57 that shared an object name with another mod's item, and
+  print that mod's name. It may now only rescue a missing head noun or a
+  thin margin.
+- Cross-query agreement no longer confirms on a shared word. Two broad
+  queries could agree on one of ten titles containing `markers` or
+  `backpacks` and print it. Agreement now needs a link to the file, so a
+  private pack that ships its own backpacks is reported ambiguous instead
+  of being attributed to an unrelated public mod.
+- The anchor is now a hard gate on every confirmation path. A title that
+  missed the PBO's anchor token is capped, and the cap could pass the
+  evidence gate at exactly its own value, so an unanchored title could be
+  confirmed. Agreement between two queries and page-two results now also
+  require a matched anchor and a specific query.
+- A shared title is now pruned from a page-two decision as well as a
+  page-one decision, so a name prints only when the PBO's own words
+  anchor it.
+- A `503` is no longer treated as a rate limit. It gets two short retries
+  and the status, so one transient server fault cannot hold a scan for
+  eleven minutes. A `429` that carries `Retry-After` is honoured, capped
+  at five minutes.
+
+
 ### Changed
 
 - `investigate --online` now resolves each PBO's identity from the PBO's
@@ -73,21 +104,6 @@ This project uses [Semantic Versioning](https://semver.org/).
   that came from an older ranking.
 - The local origin block (`[UNKNOWN]`, `[RESOLVED]`, `[PACK]` lines) is
   unchanged and still prints before the resolution lines.
-
-### Fixed
-
-- The anchor is now a hard gate on every confirmation path. A title that
-  missed the PBO's anchor token is capped, and the cap could pass the
-  evidence gate at exactly its own value, so an unanchored title could be
-  confirmed. Agreement between two queries and page-two results now also
-  require a matched anchor and a specific query.
-- A shared title is now pruned from a page-two decision as well as a
-  page-one decision, so a name prints only when the PBO's own words
-  anchor it.
-- A `503` is no longer treated as a rate limit. It gets two short retries
-  and the status, so one transient server fault cannot hold a scan for
-  eleven minutes. A `429` that carries `Retry-After` is honoured, capped
-  at five minutes.
 
 ### Security
 
