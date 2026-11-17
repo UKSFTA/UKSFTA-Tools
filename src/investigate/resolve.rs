@@ -998,6 +998,18 @@ fn unique_agreement(seen: &BTreeMap<String, Agreement>) -> Option<(&str, &Agreem
     if agreed.next().is_some() {
         return None;
     }
+    // Agreement must also stand clear of every rival the pool saw. Six
+    // titles carry "Advanced Diving Environment" at a perfect score, and
+    // two queries surfacing one of them says nothing about which one holds
+    // this file. A rival inside the margin means the tie is still a tie.
+    let lead = seen
+        .iter()
+        .filter(|(other, _)| other.as_str() != id.as_str())
+        .map(|(_, rival)| hit.m - rival.m)
+        .fold(f64::INFINITY, f64::min);
+    if lead < MIN_MARGIN {
+        return None;
+    }
     Some((id.as_str(), hit))
 }
 
@@ -1629,14 +1641,15 @@ mod tests {
     }
 
     #[test]
-    fn cross_query_confirms_unique_agreement() {
+    fn cross_query_does_not_break_a_family_tie() {
+        // Six ADE variants share the exact title, and two queries surface
+        // several of them. One 203-PBO run confirmed a re-upload from this
+        // shape while the human label named the original, so agreement must
+        // leave the line ambiguous instead of picking a family member.
         let item = multi_query_evidence();
         let texts = planned_texts(&item);
         assert!(texts.len() >= CROSS_QUERY_MIN_QUERIES);
 
-        // Every query ranks the same id first, tied with a decoy that no
-        // other query ranks: no single query separates them, and only one
-        // id collects agreement.
         let responses = texts
             .iter()
             .enumerate()
@@ -1649,14 +1662,9 @@ mod tests {
 
         let resolved = resolve_all(vec![item], &mut ctx);
 
-        assert_eq!(http.calls().len(), texts.len());
-        assert!(resolved[0]
-            .attempts
-            .iter()
-            .all(|attempt| attempt.outcome == ResolutionStatus::Ambiguous));
-        assert_eq!(resolved[0].resolution.status, ResolutionStatus::Confirmed);
-        assert_eq!(resolved[0].resolution.id.as_deref(), Some("1"));
-        assert!(resolved[0]
+        assert_eq!(resolved[0].resolution.status, ResolutionStatus::Ambiguous);
+        assert!(resolved[0].resolution.id.is_none());
+        assert!(!resolved[0]
             .resolution
             .matched_by
             .iter()
@@ -2221,6 +2229,60 @@ mod tests {
 
         seen.get_mut("1").unwrap().anchor_matched = true;
         assert!(unique_agreement(&seen).is_some());
+    }
+
+    #[test]
+    fn cross_query_rejects_agreement_tied_with_a_rival_in_the_pool() {
+        // Six ADE variants share the exact title at a perfect score. Two
+        // queries agreeing on one of them is still a six-way tie.
+        let mut seen: BTreeMap<String, Agreement> = BTreeMap::new();
+        for id in ["1", "2", "3"] {
+            seen.insert(
+                id.to_string(),
+                Agreement {
+                    title: "Advanced Diving Environment".to_string(),
+                    m: 1.0,
+                    q: 0.9,
+                    queries: ["ade diving".to_string(), "diving mask".to_string()]
+                        .into_iter()
+                        .collect(),
+                    anchor_matched: true,
+                    corroborated: true,
+                },
+            );
+        }
+        assert!(unique_agreement(&seen).is_none());
+    }
+
+    #[test]
+    fn cross_query_accepts_agreement_that_leads_the_pool() {
+        let mut seen: BTreeMap<String, Agreement> = BTreeMap::new();
+        seen.insert(
+            "1".to_string(),
+            Agreement {
+                title: "DEVGRU Red Squadron (121)".to_string(),
+                m: 1.0,
+                q: 0.9,
+                queries: ["devgru".to_string(), "devgru redsquadron".to_string()]
+                    .into_iter()
+                    .collect(),
+                anchor_matched: true,
+                corroborated: true,
+            },
+        );
+        seen.insert(
+            "2".to_string(),
+            Agreement {
+                title: "@DEVGRU CQB Objects".to_string(),
+                m: 0.57,
+                q: 0.7,
+                queries: ["devgru".to_string()].into_iter().collect(),
+                anchor_matched: true,
+                corroborated: false,
+            },
+        );
+
+        assert_eq!(unique_agreement(&seen).map(|(id, _)| id), Some("1"));
     }
 
     #[test]

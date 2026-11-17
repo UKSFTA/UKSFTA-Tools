@@ -19,8 +19,10 @@ This project uses [Semantic Versioning](https://semver.org/).
   Workshop item in their top five, and no other item agrees, the match is
   confirmed even if the per-query margin was a tie, but only when a link
   ties the item to the file: a Workshop URL, a dependency root, the
-  uploader name, or the item page. Agreement on a generic title alone is
-  never enough, and a shared word such as `markers` is not a link.
+  uploader name, or the item page, and it must lead every rival in the pool
+  by the margin a single query needs. Agreement on a generic title alone is
+  never enough, a shared word such as `markers` is not a link, and a family
+  of identically titled variants stays ambiguous.
 
 - The category from a `CBA_fnc_addKeybind` registration is now an identity
   source of its own, ranked just below `CfgMods.name`. Modders usually put
@@ -61,6 +63,11 @@ This project uses [Semantic Versioning](https://semver.org/).
   title at 0.57 that shared an object name with another mod's item, and
   print that mod's name. It may now only rescue a missing head noun or a
   thin margin.
+- Agreement can no longer pick a family member. A 203-PBO run printed
+  `[A.D.E.] Advanced Diving Environment - Reloaded by Brigata Lancieri` for
+  `ade_core.pbo` while the human label names `ADE - Advanced Diving
+  Environment`; six variants tie at a perfect score, so the line now reports
+  the shared title with no id.
 - Cross-query agreement no longer confirms on a shared word. Two broad
   queries could agree on one of ten titles containing `markers` or
   `backpacks` and print it. Agreement now needs a link to the file, so a
