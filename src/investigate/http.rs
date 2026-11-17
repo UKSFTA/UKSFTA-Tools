@@ -130,7 +130,7 @@ impl RateLimiter {
 
     /// Sleep for one backoff step. The function is injected, so a test
     /// records the delay instead of waiting.
-    fn pause(&mut self, wait: Duration) {
+    pub(crate) fn pause(&mut self, wait: Duration) {
         (self.sleep)(wait);
     }
 }

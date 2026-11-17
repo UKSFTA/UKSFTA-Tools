@@ -9,9 +9,14 @@
 //! ordered by how long ago they were tried, so a run stopped by the
 //! operator hands the next run a different set. And a candidate that two
 //! distinct queries both rank near the top is confirmed as agreement,
-//! even when no single query separates it.
+//! but only when something in the PBO corroborates it.
+//!
+//! A first page that comes back empty is fetched once more after a pause.
+//! Steam sometimes answers a search with an empty page while it throttles,
+//! and a second paced request tells that apart from a real absence.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::time::Duration;
 
 use super::author::{author_matches, fetch_item_page, has_usable_author, ItemPage};
 use super::browse::{search_browse_page, BrowsePage, BrowseResult, SearchError};
@@ -883,7 +888,8 @@ struct Agreement {
     queries: BTreeSet<String>,
     /// Whether any query that ranked it found the anchor token in the title.
     anchor_matched: bool,
-    /// Whether anything in the PBO agrees with this item.
+    /// Whether the item is tied to this PBO by provenance rather than by a
+    /// shared word.
     corroborated: bool,
 }
 
@@ -910,9 +916,9 @@ fn record_agreement(
                 q,
                 queries: BTreeSet::new(),
                 anchor_matched: candidate.anchor_matched,
-                corroborated: strong_corroboration(&candidate.corroboration),
+                corroborated: provenance_link(&candidate.corroboration),
             });
-        entry.corroborated |= strong_corroboration(&candidate.corroboration);
+        entry.corroborated |= provenance_link(&candidate.corroboration);
         entry.anchor_matched |= candidate.anchor_matched;
         entry.queries.insert(query.to_string());
         entry.q = entry.q.max(q);
@@ -926,11 +932,15 @@ fn record_agreement(
 /// Corroboration that can carry an agreement between queries. An uploader
 /// name or a page description is not enough on its own: one author can
 /// publish several compat mods with near-identical titles.
-fn strong_corroboration(corroboration: &crate::investigate::r#match::Corroboration) -> bool {
+fn provenance_link(corroboration: &crate::investigate::r#match::Corroboration) -> bool {
+    // A shared word proves nothing at a tie: ten titles contain "markers",
+    // and a PBO stem of "Backpacks" appears in any backpack description.
+    // Only a Workshop URL, a dependency root, the uploader, or the item
+    // page itself ties the item to this file.
     corroboration.url_id_match
         || corroboration.dep_match
-        || corroboration.stem_in_description
-        || corroboration.evidence_gate()
+        || corroboration.author_match
+        || corroboration.description_match
 }
 
 /// Keep the strongest score seen for each candidate id. A later query may
@@ -972,16 +982,17 @@ fn top_candidates(seen: BTreeMap<String, CandidateRecord>) -> Vec<CandidateRecor
 /// The one candidate that two or more distinct queries agreed on, unless a
 /// second candidate has the same claim. Two agreeing names are still a tie.
 fn unique_agreement(seen: &BTreeMap<String, Agreement>) -> Option<(&str, &Agreement)> {
-    // Two queries agreeing on a five-way tie is not evidence. The agreed
-    // item must also stand on its own: a strong title match, or something
-    // in the PBO that corroborates it. A broad query cannot confirm what
-    // no single query may confirm, so each agreement also needs a
-    // specific query and an anchor the title actually matched.
+    // Agreement alone never confirms. Two queries agreeing on a generic
+    // word is not provenance: five titles containing "markers" agree just
+    // as readily. The agreed item must also carry strong corroboration
+    // from the PBO, and a broad query cannot confirm what no single query
+    // may confirm, so each agreement also needs a specific query and an
+    // anchor the title actually matched.
     let mut agreed = seen.iter().filter(|(_, hit)| {
         hit.queries.len() >= CROSS_QUERY_MIN_QUERIES
             && hit.anchor_matched
             && hit.q >= MIN_Q
-            && (hit.m >= MIN_M || hit.corroborated)
+            && hit.corroborated
     });
     let (id, hit) = agreed.next()?;
     if agreed.next().is_some() {
@@ -992,7 +1003,9 @@ fn unique_agreement(seen: &BTreeMap<String, Agreement>) -> Option<(&str, &Agreem
 
 /// Confirm a candidate that independent queries agreed on.
 ///
-/// The anchor gate is enforced by the `anchor_matched` requirement on the
+/// Agreement alone never confirms: the caller admits a hit only when
+/// something in the PBO corroborates it (see [`unique_agreement`]). The
+/// anchor gate is enforced by the `anchor_matched` requirement on the
 /// agreement, not inside `decide`. The margin is reported but not
 /// required, because agreement replaces separation here.
 fn agreed(id: &str, hit: &Agreement, all: &BTreeMap<String, Agreement>) -> Resolution {
@@ -1086,7 +1099,33 @@ fn memoised_page(
         return cached.outcome();
     }
 
-    let outcome = match fetch_page(ctx, query, page) {
+    let mut outcome = fetch_outcome(ctx, query, page);
+    // Throttle guard: Steam sometimes answers a search with an empty page
+    // while it throttles, and that looks like a real absence. A second
+    // paced request tells the two apart. Only the first page is retried,
+    // and only once.
+    if page == 1 && outcome.as_ref().is_ok_and(|held| held.total_count == 0) {
+        ctx.limiter.pause(Duration::from_secs(30));
+        outcome = fetch_outcome(ctx, query, page);
+    }
+
+    ctx.memo.insert(
+        key,
+        match &outcome {
+            Ok(page) => Memo::Page(page.clone()),
+            Err(status) => Memo::Failed(*status),
+        },
+    );
+    outcome
+}
+
+/// One request, with a throttle or transport failure mapped to a status.
+fn fetch_outcome(
+    ctx: &mut ResolveContext,
+    query: &str,
+    page: u32,
+) -> Result<BrowsePage, ResolutionStatus> {
+    match fetch_page(ctx, query, page) {
         Ok(page) => Ok(page),
         Err(error) => {
             // A silent `unresolved` hides a throttled endpoint from the
@@ -1099,16 +1138,7 @@ fn memoised_page(
                 _ => Err(ResolutionStatus::Unresolved),
             }
         }
-    };
-
-    ctx.memo.insert(
-        key,
-        match &outcome {
-            Ok(page) => Memo::Page(page.clone()),
-            Err(status) => Memo::Failed(*status),
-        },
-    );
-    outcome
+    }
 }
 
 /// The memo key for one page of one query. Page one keeps the bare text, so
@@ -1440,6 +1470,56 @@ mod tests {
         assert!(resolved[0].resolution.title.is_none());
     }
 
+    #[test]
+    fn zero_result_page_is_retried_once() {
+        // Steam answers the first search with an empty page while it
+        // throttles. The retry sees the real result, so the PBO resolves.
+        let http = FixtureHttp::new(vec![Ok(page_html(&[], 0)), Ok(confirmed_page())]);
+        let mut limiter = RateLimiter::new(no_sleep);
+        let corpus = CorpusStats::default();
+        let mut ctx = ResolveContext::new(&http, &mut limiter, &corpus, None);
+
+        let resolved = resolve_all(
+            vec![evidence(
+                "ade_core.pbo",
+                "ADE diving",
+                PhraseSource::CfgModsName,
+            )],
+            &mut ctx,
+        );
+
+        assert_eq!(http.calls().len(), 2);
+        assert_eq!(resolved[0].resolution.status, ResolutionStatus::Confirmed);
+    }
+
+    #[test]
+    fn zero_result_retry_happens_once() {
+        // Both attempts come back empty. The guard must not retry a third
+        // time, and the empty page is treated as a real absence.
+        let http = FixtureHttp::new(vec![Ok(page_html(&[], 0)), Ok(page_html(&[], 0))]);
+        let mut limiter = RateLimiter::new(no_sleep);
+        let corpus = CorpusStats::default();
+        let mut ctx = ResolveContext::new(&http, &mut limiter, &corpus, None);
+
+        let resolved = resolve_all(
+            vec![evidence(
+                "ade_core.pbo",
+                "ADE diving",
+                PhraseSource::CfgModsName,
+            )],
+            &mut ctx,
+        );
+
+        // Page one is fetched twice; the deeper page is a separate request.
+        let page_one = http
+            .calls()
+            .iter()
+            .filter(|url| !url.contains("p=2"))
+            .count();
+        assert_eq!(page_one, 2);
+        assert_eq!(resolved[0].resolution.status, ResolutionStatus::NoResult);
+    }
+
     struct PanicHttp;
     impl Http for PanicHttp {
         fn get(&self, _url: &str) -> Result<String, HttpError> {
@@ -1728,9 +1808,12 @@ mod tests {
     /// decoy is ranked by two queries.
     const DECOYS: [&str; 3] = ["91", "92", "93"];
 
-    /// Evidence whose plan holds more than one distinct query.
+    /// Evidence whose plan holds more than one distinct query. The required
+    /// addon supplies the corroboration an agreement needs, so a confirmed
+    /// line here comes from agreement rather than a strong title alone.
     fn multi_query_evidence() -> IdentityEvidence {
         let mut item = evidence("bettir.pbo", "BettIR Core", PhraseSource::CfgModsName);
+        item.required_addons = vec!["BettIR".to_string()];
         item.phrases.push(IdentityPhrase {
             text: "BIR".to_string(),
             source: PhraseSource::TagAuthor,
@@ -2139,6 +2222,65 @@ mod tests {
         seen.get_mut("1").unwrap().anchor_matched = true;
         assert!(unique_agreement(&seen).is_some());
     }
+
+    #[test]
+    fn cross_query_rejects_agreement_on_a_generic_title_without_corroboration() {
+        // Five titles carry "backpacks" at a perfect score, and two queries
+        // agree on one of them. Nothing in the PBO names any of them, so the
+        // agreement adds nothing and the line must stay ambiguous.
+        let mut seen: BTreeMap<String, Agreement> = BTreeMap::new();
+        for id in ["1", "2", "3", "4", "5"] {
+            seen.insert(
+                id.to_string(),
+                Agreement {
+                    title: format!("Backpacks {id}"),
+                    m: 1.0,
+                    q: 0.8,
+                    queries: ["backpacks".to_string()].into_iter().collect(),
+                    anchor_matched: true,
+                    corroborated: false,
+                },
+            );
+        }
+        seen.get_mut("1")
+            .unwrap()
+            .queries
+            .insert("uksf backpacks".to_string());
+
+        assert!(unique_agreement(&seen).is_none());
+    }
+
+    #[test]
+    fn agreement_ignores_a_shared_stem_or_a_shared_rare_token() {
+        let shared_stem = crate::investigate::r#match::Corroboration {
+            stem_in_description: true,
+            ..Default::default()
+        };
+        assert!(!provenance_link(&shared_stem));
+
+        let shared_words = crate::investigate::r#match::Corroboration {
+            evidence_overlap: crate::investigate::r#match::EVIDENCE_MIN_TOKENS,
+            evidence_tokens: vec!["markers".to_string()],
+            ..Default::default()
+        };
+        assert!(!provenance_link(&shared_words));
+    }
+
+    #[test]
+    fn agreement_accepts_a_dependency_or_uploader_link() {
+        let dependency = crate::investigate::r#match::Corroboration {
+            dep_match: true,
+            ..Default::default()
+        };
+        assert!(provenance_link(&dependency));
+
+        let uploader = crate::investigate::r#match::Corroboration {
+            author_match: true,
+            ..Default::default()
+        };
+        assert!(provenance_link(&uploader));
+    }
+
     #[test]
     fn tie_generic_token_does_not_discriminate() {
         let mut item = evidence("ade_core.pbo", "ADE diving", PhraseSource::CfgModsName);

@@ -351,8 +351,10 @@ match.
 
 A search result confirms only when the title covers the query phrase, the
 head noun agrees, the result set is narrow, and the best candidate leads
-the next one by a wide margin. A PBO whose config carries its own Workshop
-URL confirms on that id alone.
+the next one by a wide margin. Content corroboration may rescue a missing
+head noun or a thin margin, but never a title that matches the query
+weakly. A PBO whose config carries its own Workshop URL confirms on that id
+alone.
 
 Evidence comes from every authored-text entry, not only the config. Strings
 that are rare in the local pack, stringtable values reached through
@@ -361,10 +363,13 @@ all feed the same gates. A query token of three to six letters may match a
 contiguous run of title initials, so `ADE` can match `Advanced Diving
 Environment`. The category of a `CBA_fnc_addKeybind` registration is read
 as a mod-name source of its own, because modders usually put the title or
-the Workshop name there. Two distinct queries that agree on the same item confirm it
-even when the per-query margin is a tie, provided the agreed item also has
-a strong title match or something in the PBO corroborates it. Popularity
-never orders or confirms a candidate.
+the Workshop name there. Two distinct queries that agree on the same item
+confirm it even when the per-query margin is a tie, but only when a link
+ties that item to this file: a Workshop URL in its config, a dependency
+root, the uploader name, or the item page itself. Agreement on a generic
+title never confirms, and a shared word such as `markers` or `backpacks`
+is not a link. Popularity never orders or confirms a candidate.
+
 
 A tie is resolved by content where possible: the tied candidates' item
 pages are checked for the PBO's stem, prefix or `CfgPatches` class, then

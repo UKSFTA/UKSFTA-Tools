@@ -5,6 +5,8 @@
 //! anchor token as a hard gate. `Q` measures whether the query was
 //! specific enough to trust. `C = M * Q` orders candidates, but
 //! confirmation also needs corroboration from the PBO's own evidence.
+//! Content corroboration can rescue a missing head noun or a thin margin.
+//! It never rescues a title that fails [`MIN_M`].
 //!
 //! Nothing here ranks by popularity. Subscriptions and views only break
 //! ties between candidates that already match the text.
@@ -483,14 +485,12 @@ pub(crate) fn decide(
         && q.q >= MIN_Q
         && margin >= MIN_MARGIN
         && best.corroboration.any();
-    // Content corroboration may confirm a weak query, but never a title
-    // that fails the anchor, and never a tie. A name we cannot
-    // distinguish from another candidate is not a confirmed name.
-    // Content corroboration may confirm a weak title match, but it may
-    // not bypass query specificity: a broad query plus three common
-    // words is not evidence.
+    // Content corroboration may rescue a missing head noun or a thin
+    // margin, but never a weak title match: a title below `MIN_M` did not
+    // name the item, however many common words it shares. It may not
+    // bypass query specificity either, and a tie is never confirmed.
     let evidence_gate = best.file_type == 0
-        && best.m >= ANCHOR_CAP
+        && best.m >= MIN_M
         && best.anchor_matched
         && q.q >= MIN_Q
         && margin >= MIN_MARGIN
@@ -1118,6 +1118,38 @@ mod tests {
         assert!(q.q >= MIN_Q);
 
         let decision = decide(&ranked, &query("diving mask set", "ade"), &q, None);
+
+        assert_ne!(decision.status, ResolutionStatus::Confirmed);
+        assert!(decision.title.is_none());
+    }
+
+    #[test]
+    fn evidence_gate_rejects_a_weak_title_even_with_content_overlap() {
+        // Three rare shared tokens would confirm a title that named the
+        // item. This title does not reach `MIN_M`, so content overlap
+        // cannot carry it.
+        let ranked = vec![RankedCandidate {
+            id: "1".to_string(),
+            title: "Diving Mask Wetsuit Set".to_string(),
+            file_type: 0,
+            m: 0.70,
+            c: 0.70 * 0.83,
+            head: 0.0,
+            anchor_matched: true,
+            corroboration: Corroboration {
+                evidence_overlap: EVIDENCE_MIN_TOKENS,
+                evidence_tokens: vec!["rebreather".to_string()],
+                ..Default::default()
+            },
+        }];
+        let best = &ranked[0];
+        assert!(best.m >= ANCHOR_CAP);
+        assert!(best.m < MIN_M);
+        assert!(best.corroboration.evidence_gate());
+        let q = score("diving mask set");
+        assert!(q.q >= MIN_Q);
+
+        let decision = decide(&ranked, &query("diving mask set", "diving"), &q, None);
 
         assert_ne!(decision.status, ResolutionStatus::Confirmed);
         assert!(decision.title.is_none());

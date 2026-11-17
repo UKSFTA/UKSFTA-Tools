@@ -26,7 +26,7 @@ pub(crate) const STORE_SCHEMA: u32 = 2;
 
 /// Shape of the ranking behind a record. A bump invalidates the store,
 /// because an old score would describe a decision that no longer exists.
-pub(crate) const SCORE_VERSION: u32 = 8;
+pub(crate) const SCORE_VERSION: u32 = 9;
 
 // How long a record may stand before the next resolving run asks again.
 // A report always prints a stored line unchanged, whatever its age; only
