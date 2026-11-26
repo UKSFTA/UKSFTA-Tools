@@ -9,6 +9,12 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `uksfta deps` reports every `CfgPatches` class the pack provides and
+  every `requiredAddons` entry it needs. Each requirement is provided,
+  external (listed once in `.uksfta/external-addons.txt`) or unaccounted.
+  The check is advisory, `--strict` exits 1 on an unaccounted entry, and
+  `--suggest` prints the external-list format. `--mission` adds a
+  mission's `addons[]` list.
 - Compare and upload the whole release root at any depth, not only
   `addons/` and `keys/`. Files that start with `.`, `*.biprivatekey`,
   `*.tmp`, `*.bak` and symbolic links are excluded. `meta.cpp` and

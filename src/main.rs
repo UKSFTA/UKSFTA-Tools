@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 pub use std::collections::{HashMap, HashSet};
 
 mod atomic;
+mod deps;
 mod docs;
 mod error;
 mod investigate;
@@ -238,6 +239,31 @@ enum Commands {
         #[arg(long, group = "progress_mode")]
         no_progress: bool,
     },
+    /// Check that every required addon is provided or listed
+    ///
+    /// Compares the `CfgPatches` classes each PBO provides with the
+    /// `requiredAddons` entries it declares. A requirement is provided,
+    /// external or unaccounted. Advisory unless --strict.
+    #[command(
+        after_help = "Examples:\n  uksfta deps\n  uksfta deps --mission mission.pbo\n  uksfta deps --strict\n  uksfta deps --suggest"
+    )]
+    Deps {
+        /// Build output to scan (default: .hemttout/release, else .hemttout/build)
+        #[arg(long, value_name = "PATH")]
+        local: Option<PathBuf>,
+        /// Mission PBO whose addons[] list to include
+        #[arg(long, value_name = "PATH")]
+        mission: Option<PathBuf>,
+        /// External addon list (default: .uksfta/external-addons.txt when present)
+        #[arg(long, value_name = "PATH")]
+        external: Option<PathBuf>,
+        /// Exit 1 when any requirement is unaccounted
+        #[arg(long)]
+        strict: bool,
+        /// Print the external-list format without writing a file
+        #[arg(long)]
+        suggest: bool,
+    },
     /// Show the installed version and check for updates
     Version,
     /// Update the description and changelog files named in [hemtt.publish]
@@ -414,6 +440,19 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
                 progress: mode,
             })?
         }
+        Commands::Deps {
+            local,
+            mission,
+            external,
+            strict,
+            suggest,
+        } => deps::run(&deps::DepsOptions {
+            local: local.as_deref(),
+            mission: mission.as_deref(),
+            external: external.as_deref(),
+            strict,
+            suggest,
+        })?,
         Commands::Version => version(),
         Commands::Docs {
             root,
