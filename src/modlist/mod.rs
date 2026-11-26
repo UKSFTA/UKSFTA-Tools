@@ -1,5 +1,6 @@
 mod deps;
 mod discovery;
+mod export;
 mod html;
 mod import;
 mod legacy;
@@ -19,7 +20,8 @@ use toml_sources::TomlModSources;
 
 pub use deps::{is_non_mod_app_id, parse_required_items};
 pub use discovery::{print_dep_tree, resolve_all_required, transitive_closure, DepMap};
-pub use html::{generate_modlist, modlist_row_html};
+pub use export::export_modlist;
+pub use html::{generate_modlist, generate_preset, modlist_row_html, preset_html};
 pub use import::import_modlist;
 pub use legacy::toml_from_legacy;
 pub use migrate::migrate_legacy_if_needed;

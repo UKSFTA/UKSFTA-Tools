@@ -28,7 +28,10 @@ use crate::workshop_api::build_client;
 
 pub use self::audit::audit;
 pub use self::identify::identify;
-pub use self::size::{lookup_sizes, missing_size_ids, modlist_size, size_share_colour};
+pub use self::size::{
+    installed_size, lookup_sizes, missing_size_ids, modlist_size, pack_size, size_share_colour,
+    sort_mod_sizes, ModSize, PackSize, SortKey,
+};
 pub use self::updates::check_updates;
 pub use self::verify::verify;
 

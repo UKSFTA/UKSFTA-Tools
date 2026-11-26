@@ -5,10 +5,26 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/).
 
-## [0.10.0] - 2026-11-16
+## [0.10.1] - 2026-11-26
+
+### Fixed
+
+- Refresh the dependency tree to clear the RUSTSEC advisories in `url`,
+  `quinn-proto`, `quinn-udp` and `tokio`. `cargo audit` and `cargo deny
+  check` pass.
+
+## [0.10.0] - 2026-11-26
 
 ### Added
 
+- `uksfta size` with no argument reports the installed pack size: each
+  mod's PBOs from `mods.lock` measured in `addons/`, the share of the
+  tracked total, untracked PBOs and missing locked PBOs. `--pbo` lists
+  each PBO, and `--sort name` orders the report by name.
+- `uksfta export` writes the enabled entries from `mod_sources.txt` as an
+  Arma 3 launcher preset. The preset name defaults to the current
+  directory name and can be set with `--preset-name`. `--dry-run`
+  previews the rows.
 - A learned evidence pool. Every authored-text entry in a PBO is read,
   title-shaped strings are ranked by how rare they are in the local pack,
   and `$STR_*` references are resolved through CSV and XML stringtables.

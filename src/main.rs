@@ -81,12 +81,35 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Show each mod's size from a launcher modlist HTML, and the total
+    /// Export mod_sources.txt as an Arma 3 launcher modlist
+    Export {
+        /// Output path for the modlist HTML (default: modlist.html)
+        #[arg(value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Preset name shown in the launcher (default: current directory name)
+        #[arg(long, value_name = "NAME")]
+        preset_name: Option<String>,
+        /// Print the entries without writing the file
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show mod sizes from a modlist HTML file, or the installed pack size
     Size {
         /// Path to the modlist HTML file
-        modlist_file: PathBuf,
+        modlist_file: Option<PathBuf>,
+        /// Print one line per PBO under each mod
+        #[arg(long, conflicts_with = "modlist_file")]
+        pbo: bool,
+        /// Sort by size (default) or by name
+        #[arg(
+            long,
+            value_enum,
+            default_value = "size",
+            conflicts_with = "modlist_file"
+        )]
+        sort: SortKey,
         /// Fetch sizes for mods not installed locally from the Workshop API
-        #[arg(long)]
+        #[arg(long, requires = "modlist_file")]
         online: bool,
     },
     /// Trace the Workshop origin of PBOs not tracked in mods.lock
@@ -183,10 +206,26 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             modlist_file,
             dry_run,
         } => import_modlist(&modlist_file, dry_run)?,
+        Commands::Export {
+            output,
+            preset_name,
+            dry_run,
+        } => export_modlist(
+            Path::new("mod_sources.txt"),
+            Path::new("mods.lock"),
+            output.as_deref(),
+            preset_name.as_deref(),
+            dry_run,
+        )?,
         Commands::Size {
             modlist_file,
+            pbo,
+            sort,
             online,
-        } => modlist_size(&modlist_file, online)?,
+        } => match modlist_file {
+            Some(path) => modlist_size(&path, online)?,
+            None => installed_size(pbo, sort)?,
+        },
         Commands::Investigate {
             all,
             online,
