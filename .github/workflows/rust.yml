@@ -35,8 +35,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked -- -D warnings
 
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       - name: Run tests
-        run: cargo test --locked
+        run: cargo nextest run --locked
 
       - name: Build release
         run: cargo build --release --locked

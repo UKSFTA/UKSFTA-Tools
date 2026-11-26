@@ -8,13 +8,23 @@
 set -eu
 
 REPO="UKSFTA/UKSFTA-Tools"
-ASSET="uksfta"
 WORKFLOW="release.yml"
 
-detect_os() {
+detect_platform() {
 	case "$(uname -s)" in
-	Linux) echo "linux" ;;
-	Darwin) echo "macos" ;;
+	Linux)
+		case "$(uname -m)" in
+		x86_64 | amd64) echo "linux-x86_64" ;;
+		aarch64 | arm64) echo "linux-arm64" ;;
+		*) echo "unsupported" ;;
+		esac
+		;;
+	Darwin)
+		case "$(uname -m)" in
+		arm64 | aarch64) echo "macos-arm64" ;;
+		*) echo "unsupported" ;;
+		esac
+		;;
 	*) echo "unsupported" ;;
 	esac
 }
@@ -42,18 +52,25 @@ sha256_of() {
 	fi
 }
 
-os=$(detect_os)
-if [ "$os" = "unsupported" ]; then
-	echo "Unsupported OS: $(uname -s). Linux and macOS are supported." >&2
+platform=$(detect_platform)
+case "$platform" in
+linux-x86_64) ASSET="uksfta" ;;
+linux-arm64) ASSET="uksfta-linux-arm64" ;;
+macos-arm64) ASSET="uksfta-macos-arm64" ;;
+*)
+	echo "Unsupported platform: $(uname -s) $(uname -m)." >&2
+	echo "Supported: Linux x86_64, Linux arm64, macOS arm64." >&2
 	exit 1
-fi
+	;;
+esac
+os=${platform%%-*}
 
 echo "Finding latest uksfta release..."
 release=$(get_latest_release)
 tag=$(printf '%s' "$release" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
-url=$(printf '%s' "$release" | sed -n 's/.*"browser_download_url": *"\([^"]*uksfta\)".*/\1/p' | head -1)
+url="https://github.com/$REPO/releases/latest/download/$ASSET"
 
-if [ -z "$tag" ] || [ -z "$url" ]; then
+if [ -z "$tag" ]; then
 	echo "Could not determine release details." >&2
 	exit 1
 fi
@@ -111,7 +128,7 @@ if [ "$os" = "macos" ] && [ "$(id -u)" -eq 0 ]; then
 fi
 
 mkdir -p "$install_dir"
-install -m 0755 "$tmp" "$install_dir/$ASSET"
+install -m 0755 "$tmp" "$install_dir/uksfta"
 rm -f "$tmp"
 
 case ":$PATH:" in
