@@ -61,6 +61,12 @@ uksfta server
 # Upload missing PBOs and signatures, then remove extra PBOs
 uksfta server --upload --prune
 
+# Check every required addon is provided by the pack or the external list
+uksfta deps
+
+# Include a mission's addons[] list, and fail on an unaccounted addon
+uksfta deps --mission mission.pbo --strict
+
 # Show the installed version and force a fresh update check
 uksfta version
 
@@ -778,6 +784,63 @@ mismatch, a missing pack folder, or any unsigned PBO under
 The command never uploads a file outside `<root>/@<publishedid>/`. It never
 follows a symlink on the server, and it never recurses below `addons/` or
 `keys/`.
+
+## Dependencies
+
+`uksfta deps` checks the addon closure of a built pack. It reads every
+`CfgPatches` class that each PBO in `addons/` provides, and every
+`requiredAddons[]` entry that each PBO declares. The command is local and
+offline. It does not read the Workshop cache, `mods.lock` or the network.
+
+The command reads `.hemttout/release` when that directory exists, else
+`.hemttout/build`. Use `--local PATH` to choose another directory. A
+missing directory is an input error and names the path.
+
+Each requirement has one of three states:
+
+- `provided`: a PBO in the pack provides the class.
+- `external`: the external list names the class.
+- `unaccounted`: nothing accounts for the class.
+
+The external list holds the addon classes that the pack needs but does not
+provide. These are base-game and DLC addons, and mods that the server or
+the launcher supplies. Write one class on a line. A line that starts with
+`#` is a comment. The default path is `.uksfta/external-addons.txt`. Use
+`--external PATH` to choose another file.
+
+```
+# Arma 3 base game
+A3_Data_F
+A3_Data_F_Loadorder
+
+# Optional DLC
+A3_Data_F_Jets
+```
+
+A base-game or DLC addon must be listed once, whatever the number of PBOs
+that require it.
+
+Add `--mission PATH` to include the `addons[]` list of a mission PBO. The
+`mission.sqm` entry must be stored, not compressed. A compressed or
+missing entry is an input error that names the reason.
+
+The command prints the count of provided classes, requirements and
+unaccounted entries. It prints one line for each unaccounted entry, with
+the requiring PBO and the addon class. `--suggest` prints the external
+list format on standard output and writes no file.
+
+The check is advisory. A run with an unaccounted entry exits 0, so a
+warning does not stop a build. `--strict` exits 1 when any entry is
+unaccounted. A bad input, such as a missing build directory or a
+compressed mission, exits 2.
+
+The command has four outcomes:
+
+- All entries are accounted for. The command exits 0.
+- An unaccounted entry without `--strict`. The command exits 0 and prints
+  the entry.
+- An unaccounted entry with `--strict`. The command exits 1.
+- A bad input. The command exits 2 and names the path or the reason.
 
 ## Update checking
 

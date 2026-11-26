@@ -41,7 +41,8 @@ fn help_exits_zero_and_lists_the_commands() {
         .assert()
         .success()
         .stdout(predicate::str::contains("export"))
-        .stdout(predicate::str::contains("size"));
+        .stdout(predicate::str::contains("size"))
+        .stdout(predicate::str::contains("deps"));
 }
 
 #[test]
@@ -131,4 +132,120 @@ fn size_pbo_lists_an_untracked_pbo_with_its_size() {
         .success()
         .stdout(predicate::str::contains("extra.pbo"))
         .stdout(predicate::str::contains("2.0 KB"));
+}
+
+/// A PBO with stored text entries, enough for the addon closure scan.
+fn write_pbo(path: &Path, entries: &[(&str, &str)]) {
+    let properties = b"prefix\0test\0\0";
+    let mut bytes = Vec::new();
+    bytes.push(0);
+    bytes.extend(0x5665_7273u32.to_le_bytes()); // Vers
+    for _ in 0..3 {
+        bytes.extend(0u32.to_le_bytes());
+    }
+    bytes.extend((properties.len() as u32).to_le_bytes());
+    bytes.extend(properties);
+    for (name, content) in entries {
+        bytes.extend(name.as_bytes());
+        bytes.push(0);
+        bytes.extend(0u32.to_le_bytes()); // stored
+        let size = content.len() as u32;
+        bytes.extend(size.to_le_bytes());
+        bytes.extend(0u32.to_le_bytes());
+        bytes.extend(0u32.to_le_bytes());
+        bytes.extend(size.to_le_bytes());
+    }
+    bytes.extend([0u8; 21]);
+    for (_, content) in entries {
+        bytes.extend(content.as_bytes());
+    }
+    write(path, &bytes);
+}
+
+/// A build tree with A (requires B_main and A3_Data_F) and B (provides
+/// B_main). The optional text becomes `.uksfta/external-addons.txt`.
+fn deps_fixture(dir: &Path, external: Option<&str>) {
+    let addons = dir.join(".hemttout/release/addons");
+    fs::create_dir_all(&addons).expect("create addons");
+    write_pbo(
+        &addons.join("A.pbo"),
+        &[(
+            "config.cpp",
+            r#"class CfgPatches { class a_main { requiredAddons[] = {"B_main", "A3_Data_F"}; }; };"#,
+        )],
+    );
+    write_pbo(
+        &addons.join("B.pbo"),
+        &[("config.cpp", r#"class CfgPatches { class b_main {}; };"#)],
+    );
+    if let Some(list) = external {
+        let list_dir = dir.join(".uksfta");
+        fs::create_dir_all(&list_dir).expect("create .uksfta");
+        write(&list_dir.join("external-addons.txt"), list.as_bytes());
+    }
+}
+
+#[test]
+fn deps_reports_a_clean_pack() {
+    let dir = TempDir::new().expect("temp dir");
+    deps_fixture(dir.path(), Some("# base game\nA3_Data_F\n"));
+
+    uksfta(dir.path())
+        .arg("deps")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("provided: 2 addon class(es)"))
+        .stdout(predicate::str::contains("requirements: 2"))
+        .stdout(predicate::str::contains("unaccounted: 0"));
+}
+
+#[test]
+fn deps_warns_without_strict_and_fails_with_it() {
+    let dir = TempDir::new().expect("temp dir");
+    deps_fixture(dir.path(), None);
+
+    uksfta(dir.path())
+        .arg("deps")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("unaccounted: 1"))
+        .stdout(predicate::str::contains("A.pbo requires A3_Data_F"));
+
+    uksfta(dir.path())
+        .args(["deps", "--strict"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("A.pbo requires A3_Data_F"))
+        .stderr(predicate::str::contains("unaccounted"));
+}
+
+#[test]
+fn deps_suggest_prints_the_external_format_without_writing_it() {
+    let dir = TempDir::new().expect("temp dir");
+    deps_fixture(dir.path(), None);
+
+    uksfta(dir.path())
+        .args(["deps", "--suggest"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".uksfta/external-addons.txt"))
+        .stdout(predicate::str::contains("A3_Data_F"));
+
+    assert!(
+        !dir.path().join(".uksfta/external-addons.txt").exists(),
+        "--suggest must not write the external list"
+    );
+}
+
+#[test]
+fn deps_names_a_missing_build_directory() {
+    let dir = TempDir::new().expect("temp dir");
+    let missing = dir.path().join("missing-build");
+
+    uksfta(dir.path())
+        .args(["deps", "--local"])
+        .arg(&missing)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(missing.display().to_string()));
 }

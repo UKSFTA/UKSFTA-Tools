@@ -110,7 +110,7 @@ pub struct PboEntry {
 /// Properties header, mapped from `Vers`.
 const PBO_PROPERTIES_MIME: u32 = 0x5665_7273; // Vers
 /// Compressed body; the raw bytes are returned for a later decoder.
-const PBO_CPRS_MIME: u32 = 0x4370_7273; // Cprs
+pub(crate) const PBO_CPRS_MIME: u32 = 0x4370_7273; // Cprs
 /// Encrypted body; never read.
 const PBO_ENCR_MIME: u32 = 0x456e_6372; // Encr
 const PBO_MAX_NAME: usize = 1024;
@@ -299,6 +299,9 @@ pub struct PboConfigFacts {
     pub cfgmods_name: Option<String>,
     pub cfgmods_author: Option<String>,
     pub cfgpatches_class: Option<String>,
+    /// Every `CfgPatches` class, for the dependency closure. Identity
+    /// reads only `cfgpatches_class`.
+    pub cfgpatches_classes: Vec<String>,
     pub cfgpatches_author: Option<String>,
     pub cfgpatches_url: Option<String>,
     pub display_names: Vec<String>,
@@ -372,11 +375,17 @@ pub fn pbo_config_facts(path: &Path) -> PboConfigFacts {
             match name.to_ascii_lowercase().as_str() {
                 "cfgmods" => pending_section = Section::CfgMods,
                 "cfgpatches" => pending_section = Section::CfgPatches,
-                _ if section == Section::CfgPatches
-                    && depth == section_depth + 1
-                    && facts.cfgpatches_class.is_none() =>
-                {
-                    facts.cfgpatches_class = Some(name.to_string());
+                _ if section == Section::CfgPatches && depth == section_depth + 1 => {
+                    if facts.cfgpatches_class.is_none() {
+                        facts.cfgpatches_class = Some(name.to_string());
+                    }
+                    if !facts
+                        .cfgpatches_classes
+                        .iter()
+                        .any(|seen| seen.eq_ignore_ascii_case(name))
+                    {
+                        facts.cfgpatches_classes.push(name.to_string());
+                    }
                 }
                 _ => {}
             }
@@ -414,6 +423,21 @@ pub fn pbo_config_facts(path: &Path) -> PboConfigFacts {
     }
 
     facts
+}
+
+/// Addon classes the PBO provides: every `CfgPatches` class in its config.
+///
+/// Deduplicated case-insensitively, first spelling kept, sorted. A PBO
+/// with no readable config yields an empty list.
+pub fn pbo_provided_classes(path: &Path) -> Vec<String> {
+    let mut classes: Vec<String> = Vec::new();
+    for class in pbo_config_facts(path).cfgpatches_classes {
+        if !classes.iter().any(|seen| seen.eq_ignore_ascii_case(&class)) {
+            classes.push(class);
+        }
+    }
+    classes.sort_by_key(|class| class.to_ascii_lowercase());
+    classes
 }
 
 /// Content fingerprint: sha256 over the file length, the first 64 KiB
@@ -606,13 +630,14 @@ fn set_author(slot: &mut Option<String>, value: Option<String>) {
     }
 }
 
-/// Every `requiredAddons[]` entry, in declaration order. The scan
-/// tolerates the array wrapping across lines.
-fn required_addons(text: &str) -> Vec<String> {
+/// Every entry of a `key[] = { ... }` list, in declaration order. The
+/// scan tolerates the array wrapping across lines, and strips quotes
+/// and whitespace from each entry.
+pub(crate) fn config_list(text: &str, key: &str) -> Vec<String> {
     let mut addons: Vec<String> = Vec::new();
     let mut rest = text;
-    while let Some(index) = rest.find("requiredAddons[]") {
-        rest = &rest[index + "requiredAddons[]".len()..];
+    while let Some(index) = rest.find(key) {
+        rest = &rest[index + key.len()..];
         let after = rest.trim_start();
         let Some(after) = after.strip_prefix('=') else {
             continue;
@@ -636,6 +661,11 @@ fn required_addons(text: &str) -> Vec<String> {
         rest = after_close;
     }
     addons
+}
+
+/// Every `requiredAddons[]` entry from one config text.
+fn required_addons(text: &str) -> Vec<String> {
+    config_list(text, "requiredAddons[]")
 }
 
 /// Every distinct `$STR_` token, prefix included.
@@ -698,6 +728,7 @@ const PBO_MAX_CONFIG_ENTRIES: usize = 8;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct RapFacts {
     cfgpatches_class: Option<String>,
+    cfgpatches_classes: Vec<String>,
     cfgpatches_author: Option<String>,
     cfgpatches_url: Option<String>,
     required_addons: Vec<String>,
@@ -709,6 +740,7 @@ struct RapFacts {
 impl RapFacts {
     fn is_empty(&self) -> bool {
         self.cfgpatches_class.is_none()
+            && self.cfgpatches_classes.is_empty()
             && self.cfgpatches_author.is_none()
             && self.cfgpatches_url.is_none()
             && self.required_addons.is_empty()
@@ -897,11 +929,19 @@ impl<'a> RapParser<'a> {
     }
 
     fn note_class(&mut self, path: &[&str], name: &str) {
-        if path.len() == 1
-            && path[0].eq_ignore_ascii_case("CfgPatches")
-            && self.facts.cfgpatches_class.is_none()
-        {
+        if path.len() != 1 || !path[0].eq_ignore_ascii_case("CfgPatches") {
+            return;
+        }
+        if self.facts.cfgpatches_class.is_none() {
             self.facts.cfgpatches_class = Some(name.to_string());
+        }
+        if !self
+            .facts
+            .cfgpatches_classes
+            .iter()
+            .any(|seen| seen.eq_ignore_ascii_case(name))
+        {
+            self.facts.cfgpatches_classes.push(name.to_string());
         }
     }
 
@@ -999,6 +1039,9 @@ fn merge_rap_facts(facts: &mut PboConfigFacts, rap: RapFacts) {
     if let Some(class) = rap.cfgpatches_class {
         facts.cfgpatches_class = Some(class);
     }
+    if !rap.cfgpatches_classes.is_empty() {
+        facts.cfgpatches_classes = rap.cfgpatches_classes;
+    }
     set_author(&mut facts.cfgpatches_author, rap.cfgpatches_author);
     if let Some(url) = rap.cfgpatches_url.or(rap.cfgmods_url) {
         facts.cfgpatches_url = Some(url);
@@ -1064,7 +1107,7 @@ fn rap_from_config_entries(path: &Path) -> Option<RapFacts> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1302,7 +1345,7 @@ mod tests {
 
     /// Build a PBO header with a properties entry, the given named
     /// entries, a terminator and the data block in header order.
-    fn write_pbo_entries(path: &Path, entries: &[(&str, u32, &[u8])]) {
+    pub(crate) fn write_pbo_entries(path: &Path, entries: &[(&str, u32, &[u8])]) {
         let properties = b"prefix\0test_prefix\0\0";
         let mut bytes = Vec::new();
         bytes.push(0); // empty properties name
@@ -1683,6 +1726,56 @@ mod tests {
 
         assert_eq!(facts.cfgpatches_class.as_deref(), Some("ade_core"));
         assert_eq!(facts.cfgpatches_author.as_deref(), Some("[ADE]"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_provided_classes_reads_every_text_class() {
+        let dir = std::env::temp_dir().join("uksfta-pbo-provided-text");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        let config: &[u8] = br#"class CfgPatches { class alpha_main {}; class beta_extra {}; };"#;
+        write_pbo_entries(&f, &[("config.cpp", 0, config)]);
+
+        assert_eq!(pbo_provided_classes(&f), ["alpha_main", "beta_extra"]);
+
+        let facts = pbo_config_facts(&f);
+        assert_eq!(facts.cfgpatches_class.as_deref(), Some("alpha_main"));
+        assert_eq!(facts.cfgpatches_classes, ["alpha_main", "beta_extra"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_provided_classes_prefers_binarised_config() {
+        let dir = std::env::temp_dir().join("uksfta-pbo-provided-rap");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+
+        let mut patches = RapBody::new("CfgPatches");
+        patches.class("alpha_main", RapBody::new("alpha_main"));
+        patches.class("beta_extra", RapBody::new("beta_extra"));
+        let mut root = RapBody::new("");
+        root.class("CfgPatches", patches);
+        let config = rap_blob(&root);
+        let stale: &[u8] = br#"class CfgPatches { class stale_name {}; };"#;
+        write_pbo_entries(&f, &[("config.cpp", 0, stale), ("config.bin", 0, &config)]);
+
+        assert_eq!(pbo_provided_classes(&f), ["alpha_main", "beta_extra"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pbo_provided_classes_is_empty_without_a_config() {
+        let dir = std::env::temp_dir().join("uksfta-pbo-provided-empty");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mod.pbo");
+        let config: &[u8] = b"class CfgPatches {};";
+        write_pbo_entries(&f, &[("config.cpp", 0, config)]);
+        assert!(pbo_provided_classes(&f).is_empty());
+
+        let truncated = dir.join("truncated.pbo");
+        fs::write(&truncated, b"short").unwrap();
+        assert!(pbo_provided_classes(&truncated).is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

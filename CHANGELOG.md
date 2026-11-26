@@ -9,6 +9,12 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `uksfta deps` reports every `CfgPatches` class the pack provides and
+  every `requiredAddons` entry it needs. Each requirement is provided,
+  external (listed once in `.uksfta/external-addons.txt`) or unaccounted.
+  The check is advisory, `--strict` exits 1 on an unaccounted entry, and
+  `--suggest` prints the external-list format. `--mission` adds a
+  mission's `addons[]` list.
 - Match each local `.bisign` authority against the embedded names in
   `keys/*.bikey`, locally and on the server. A renamed key still matches,
   because the file names are ignored. The command does not verify
