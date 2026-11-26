@@ -3,12 +3,14 @@
 
 mod compare;
 mod model;
+mod tree;
 
 pub use compare::build_plan;
 pub use model::{
-    is_bikey, is_bisign, is_pbo, Action, Finding, LocalFile, LocalPack, Plan, PlanInput,
-    RemoteFile, RemotePack,
+    is_addons_pbo, is_addons_signature, is_key_file, is_pbo, Action, Finding, LocalPack, Plan,
+    PlanInput, RemoteEntry, RemotePack,
 };
+pub use tree::{inside, walk_release, LocalEntry};
 
 /// The remote folder for one pack id: `<root>/@<id>`.
 pub fn mod_dir(root: &str, id: &str) -> String {

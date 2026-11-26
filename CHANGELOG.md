@@ -15,6 +15,11 @@ This project uses [Semantic Versioning](https://semver.org/).
   The check is advisory, `--strict` exits 1 on an unaccounted entry, and
   `--suggest` prints the external-list format. `--mission` adds a
   mission's `addons[]` list.
+- Compare and upload the whole release root at any depth, not only
+  `addons/` and `keys/`. Files that start with `.`, `*.biprivatekey`,
+  `*.tmp`, `*.bak` and symbolic links are excluded. `meta.cpp` and
+  `mod.cpp` keep their own checks, and prune still removes only
+  `addons/*.pbo`.
 - Match each local `.bisign` authority against the embedded names in
   `keys/*.bikey`, locally and on the server. A renamed key still matches,
   because the file names are ignored. The command does not verify

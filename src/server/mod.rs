@@ -25,7 +25,10 @@ use crate::util::human_size;
 
 use self::config::{Overrides, Settings};
 use self::hostkey::HostKeyPolicy;
-use self::plan::{is_bikey, is_bisign, is_pbo, Action, LocalFile, LocalPack, Plan};
+use self::plan::{
+    is_addons_pbo, is_addons_signature, is_key_file, is_pbo, walk_release, Action, LocalEntry,
+    LocalPack, Plan,
+};
 use self::report::{
     plan_workers, print_plan, print_report, put_line, upload_batch, upload_dirs, upload_units,
     UploadUnit,
@@ -110,8 +113,7 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
         .unwrap_or_else(|| PathBuf::from("meta.cpp"));
     let local = load_local(&meta_path, opts.local.as_deref())?;
     let meta_upload = local
-        .meta
-        .as_ref()
+        .meta()
         .map_or_else(|| local.meta_source.clone(), |file| file.path.clone());
     let scratch = ScratchDir::new("uksfta-server-")?;
     let locked = locked_pbos()?;
@@ -140,6 +142,12 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
     );
     for warning in &cross_checks {
         eprintln!("Warning: {warning}");
+    }
+    if local.skipped > 0 {
+        eprintln!(
+            "Warning: {} release file(s) are excluded by name or type",
+            local.skipped
+        );
     }
 
     let mut plan = verifier.verify()?;
@@ -389,9 +397,8 @@ fn cross_check_messages(
     let mut warnings = Vec::new();
 
     let release: HashSet<String> = local
-        .pbos
-        .iter()
-        .map(|pbo| pbo.name.to_ascii_lowercase())
+        .pbos()
+        .map(|pbo| basename(&pbo.rel).to_ascii_lowercase())
         .collect();
     let mut locked: Vec<(String, String)> = lock
         .mods
@@ -458,29 +465,23 @@ fn load_local(meta_path: &Path, local: Option<&Path>) -> Result<LocalPack, Uksft
             dir.display()
         )));
     }
-    let pbos = collect(&addons, is_pbo);
-    if pbos.is_empty() {
+    let walk = walk_release(&dir)?;
+    if !walk.files.iter().any(|file| is_addons_pbo(&file.rel)) {
         return Err(UksftaError::Input(format!(
             "no PBOs in {}",
             addons.display()
         )));
     }
-    let signatures = collect(&addons, is_bisign);
-    let keys = collect(&dir.join("keys"), is_bikey);
-    let meta_file = local_file(&dir.join("meta.cpp"));
-    let mod_cpp = local_file(&dir.join("mod.cpp"));
     let (signature_authorities, key_authorities, authority_warnings) =
-        read_authorities(&signatures, &keys);
+        read_authorities(&walk.files);
 
     Ok(LocalPack {
         id,
         name,
         dir,
-        pbos,
-        signatures,
-        keys,
-        meta: meta_file,
-        mod_cpp,
+        files: walk.files,
+        dirs: walk.dirs,
+        skipped: walk.skipped,
         meta_source: meta_path.to_path_buf(),
         signature_authorities,
         key_authorities,
@@ -491,38 +492,39 @@ fn load_local(meta_path: &Path, local: Option<&Path>) -> Result<LocalPack, Uksft
 /// Read the embedded authority of every local signature and key. A file
 /// that does not parse is a warning and stays unknown.
 fn read_authorities(
-    signatures: &[LocalFile],
-    keys: &[LocalFile],
+    files: &[LocalEntry],
 ) -> (HashMap<String, String>, HashSet<String>, Vec<String>) {
     let mut signature_authorities = HashMap::new();
     let mut warnings = Vec::new();
-    for file in signatures {
+    for file in files.iter().filter(|file| is_addons_signature(&file.rel)) {
+        let name = basename(&file.rel);
         match signature::read_key_file(&file.path) {
             Ok(key) => {
-                if let Some(named) = signature_authority(&file.name) {
+                if let Some(named) = signature_authority(name) {
                     if named != key.name {
                         warnings.push(format!(
-                            "{}: embedded authority is {}, not {named}",
-                            file.name, key.name
+                            "{name}: embedded authority is {}, not {named}",
+                            key.name
                         ));
                     }
                 }
-                signature_authorities.insert(file.name.clone(), key.name);
+                signature_authorities.insert(name.to_string(), key.name);
             }
-            Err(e) => warnings.push(format!("{}: {e}", file.name)),
+            Err(e) => warnings.push(format!("{name}: {e}")),
         }
     }
 
     let mut key_authorities = HashSet::new();
-    for file in keys {
+    for file in files.iter().filter(|file| is_key_file(&file.rel)) {
+        let name = basename(&file.rel);
         match signature::read_key_file(&file.path) {
             Ok(key) => {
-                if !key_base(&file.name).eq_ignore_ascii_case(&key.name) {
-                    warnings.push(format!("{}: embedded authority is {}", file.name, key.name));
+                if !key_base(name).eq_ignore_ascii_case(&key.name) {
+                    warnings.push(format!("{name}: embedded authority is {}", key.name));
                 }
                 key_authorities.insert(key.name);
             }
-            Err(e) => warnings.push(format!("{}: {e}", file.name)),
+            Err(e) => warnings.push(format!("{name}: {e}")),
         }
     }
     (signature_authorities, key_authorities, warnings)
@@ -534,6 +536,10 @@ fn signature_authority(name: &str) -> Option<&str> {
     let stem = lower.strip_suffix(".bisign")?;
     let pos = stem.rfind(".pbo.")?;
     Some(&name[pos + 5..name.len() - ".bisign".len()])
+}
+
+fn basename(rel: &str) -> &str {
+    rel.rsplit_once('/').map_or(rel, |(_, name)| name)
 }
 
 fn key_base(name: &str) -> &str {
@@ -552,46 +558,6 @@ fn default_local_dir() -> PathBuf {
     } else {
         PathBuf::from(".hemttout/build")
     }
-}
-
-/// The regular files in `dir` whose name passes `keep`, sorted by name.
-fn collect(dir: &Path, keep: fn(&str) -> bool) -> Vec<LocalFile> {
-    let Ok(items) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut files: Vec<LocalFile> = items
-        .flatten()
-        .filter_map(|item| {
-            let path = item.path();
-            let name = path.file_name()?.to_str()?;
-            if !keep(name) {
-                return None;
-            }
-            let meta = item.metadata().ok()?;
-            if !meta.is_file() {
-                return None;
-            }
-            Some(LocalFile {
-                name: name.to_string(),
-                path,
-                size: meta.len(),
-            })
-        })
-        .collect();
-    files.sort_by(|a, b| a.name.cmp(&b.name));
-    files
-}
-
-fn local_file(path: &Path) -> Option<LocalFile> {
-    let meta = fs::metadata(path).ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    Some(LocalFile {
-        name: path.file_name()?.to_str()?.to_string(),
-        path: path.to_path_buf(),
-        size: meta.len(),
-    })
 }
 
 #[cfg(test)]
@@ -624,11 +590,11 @@ mod tests {
         let local = load_local(&meta, Some(&dir)).unwrap();
         assert_eq!(local.id, "3662499431");
         assert_eq!(local.name, "UKSF Taskforce Alpha Maps");
-        assert_eq!(local.pbos.len(), 1);
-        assert_eq!(local.signatures.len(), 1);
-        assert_eq!(local.keys.len(), 1);
-        assert!(local.meta.is_some());
-        assert!(local.mod_cpp.is_some());
+        assert_eq!(local.pbos().count(), 1);
+        assert_eq!(local.signatures().count(), 1);
+        assert_eq!(local.keys().count(), 1);
+        assert!(local.meta().is_some());
+        assert!(local.mod_cpp().is_some());
     }
 
     fn lock_with(files: &[&str]) -> LockFile {

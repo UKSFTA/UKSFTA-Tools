@@ -1,14 +1,14 @@
 //! The verification phases for the pack: one batch each for the listing,
 //! the `meta.cpp`/`mod.cpp` fetch and the deep download.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 
 use super::config::Settings;
-use super::parse::{self, Block};
+use super::parse;
 use super::plan::{
-    build_plan, is_bikey, join_remote, mod_dir, LocalPack, Plan, PlanInput, RemoteFile, RemotePack,
+    build_plan, join_remote, mod_dir, LocalPack, Plan, PlanInput, RemoteEntry, RemotePack,
 };
 use super::sftp::{quote, ScratchDir, Sftp};
 use super::signature;
@@ -17,6 +17,12 @@ use crate::util::file_sha256;
 
 /// The most remote key files read in one run.
 const MAX_REMOTE_KEYS: usize = 64;
+/// The most directories listed in one run.
+const MAX_DIRS: usize = 512;
+/// The most directories listed in one batch.
+const DIR_BATCH: usize = 32;
+/// The deepest directory level listed below the pack root.
+const MAX_DEPTH: usize = 8;
 
 /// The inputs that stay fixed for one command run.
 pub struct Verifier<'a> {
@@ -68,12 +74,7 @@ impl Verifier<'_> {
         remote: &RemotePack,
     ) -> Result<(HashSet<String>, Vec<String>), UksftaError> {
         let mut warnings = Vec::new();
-        let mut names: Vec<&str> = remote
-            .keys
-            .iter()
-            .map(|file| file.name.as_str())
-            .filter(|name| is_bikey(name))
-            .collect();
+        let mut names: Vec<&str> = remote.keys().map(|entry| basename(&entry.rel)).collect();
         names.sort_unstable();
         if names.len() > MAX_REMOTE_KEYS {
             warnings.push(format!(
@@ -86,16 +87,16 @@ impl Verifier<'_> {
             return Ok((HashSet::new(), warnings));
         }
 
-        let keys_dir = join_remote(dir, "keys");
         let out_dir = self.scratch.join("remote-keys");
         fs::create_dir_all(&out_dir).map_err(UksftaError::Io)?;
         let mut lines = Vec::new();
         let mut targets = Vec::new();
         for name in names {
+            let rel = format!("keys/{name}");
             let target = out_dir.join(name);
             lines.push(format!(
                 "-get {} {}",
-                quote(&join_remote(&keys_dir, name))?,
+                quote(&join_remote(dir, &rel))?,
                 quote(&target.display().to_string())?
             ));
             targets.push((name.to_string(), target));
@@ -117,49 +118,111 @@ impl Verifier<'_> {
         Ok((authorities, warnings))
     }
 
-    /// One batch lists the pack folder and its `addons/` and `keys/`.
+    /// List the pack root, then every directory below it in bounded batches.
     fn list(&self, dir: &str) -> Result<RemotePack, UksftaError> {
-        let addons_dir = join_remote(dir, "addons");
-        let keys_dir = join_remote(dir, "keys");
         let lines = vec![
             format!("cd {}", quote(&self.settings.root)?),
             format!("-cd {}", quote(dir)?),
             "pwd".to_string(),
             "ls -l".to_string(),
-            format!("-cd {}", quote(&addons_dir)?),
-            "pwd".to_string(),
-            "ls -l".to_string(),
-            format!("-cd {}", quote(&keys_dir)?),
-            "pwd".to_string(),
-            "ls -l".to_string(),
         ];
         let blocks = parse::parse_blocks(&self.client.batch(&lines)?);
-
-        let Some(pack_block) = parse::find_block(&blocks, dir) else {
+        let Some(root_block) = parse::find_block(&blocks, dir) else {
             return Ok(RemotePack::default());
         };
-        for item in &pack_block.entries {
-            if item.is_symlink && (item.name == "addons" || item.name == "keys") {
-                return Err(UksftaError::Input(format!(
-                    "{} is a symlink; refusing to follow it",
-                    join_remote(dir, &item.name)
-                )));
+
+        let mut pack = RemotePack {
+            exists: true,
+            ..RemotePack::default()
+        };
+        let mut queue: VecDeque<String> = VecDeque::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        self.absorb(dir, "", root_block, &mut pack, &mut queue, &mut seen)?;
+        for rel in &self.local.dirs {
+            self.enqueue(rel, &mut queue, &mut seen)?;
+        }
+
+        while !queue.is_empty() {
+            let batch: Vec<String> = queue.drain(..queue.len().min(DIR_BATCH)).collect();
+            let mut lines = Vec::new();
+            for rel in &batch {
+                lines.push(format!("-cd {}", quote(&join_remote(dir, rel))?));
+                lines.push("pwd".to_string());
+                lines.push("ls -l".to_string());
+            }
+            let blocks = parse::parse_blocks(&self.client.batch(&lines)?);
+            for rel in batch {
+                let path = join_remote(dir, &rel);
+                if let Some(block) = parse::find_block(&blocks, &path) {
+                    self.absorb(dir, &rel, block, &mut pack, &mut queue, &mut seen)?;
+                }
             }
         }
-        let addons_block = parse::find_block(&blocks, &addons_dir);
-        let keys_block = parse::find_block(&blocks, &keys_dir);
-        require_listable(pack_block, "addons", &addons_dir, addons_block)?;
-        require_listable(pack_block, "keys", &keys_dir, keys_block)?;
 
-        Ok(RemotePack {
-            exists: true,
-            addons: files(addons_block),
-            addons_symlinks: symlinks(addons_block),
-            keys: files(keys_block),
-            keys_symlinks: symlinks(keys_block),
-            meta_id: None,
-            mod_size: None,
-        })
+        pack.files.sort_by(|a, b| a.rel.cmp(&b.rel));
+        pack.dirs.sort();
+        pack.symlinks.sort();
+        Ok(pack)
+    }
+
+    fn enqueue(
+        &self,
+        rel: &str,
+        queue: &mut VecDeque<String>,
+        seen: &mut HashSet<String>,
+    ) -> Result<(), UksftaError> {
+        if rel.split('/').count() > MAX_DEPTH || seen.contains(rel) {
+            return Ok(());
+        }
+        if seen.len() >= MAX_DIRS {
+            return Err(UksftaError::Input(format!(
+                "the pack folder has more than {MAX_DIRS} directories"
+            )));
+        }
+        seen.insert(rel.to_string());
+        queue.push_back(rel.to_string());
+        Ok(())
+    }
+
+    fn absorb(
+        &self,
+        dir: &str,
+        prefix: &str,
+        block: &parse::Block,
+        pack: &mut RemotePack,
+        queue: &mut VecDeque<String>,
+        seen: &mut HashSet<String>,
+    ) -> Result<(), UksftaError> {
+        for item in &block.entries {
+            let rel = if prefix.is_empty() {
+                item.name.clone()
+            } else {
+                format!("{prefix}/{}", item.name)
+            };
+            if item.is_symlink {
+                pack.symlinks.push(rel.clone());
+                if item.name == "addons" || item.name == "keys" || self.local.dirs.contains(&rel) {
+                    return Err(UksftaError::Input(format!(
+                        "{} is a symlink; refusing to follow it",
+                        join_remote(dir, &rel)
+                    )));
+                }
+                continue;
+            }
+            if item.is_dir {
+                self.enqueue(&rel, queue, seen)?;
+                pack.dirs.push(rel);
+                continue;
+            }
+            pack.files.push(RemoteEntry {
+                rel: rel.clone(),
+                size: item.size,
+            });
+            if rel == "mod.cpp" {
+                pack.mod_size = Some(item.size);
+            }
+        }
+        Ok(())
     }
 
     /// One batch fetches `meta.cpp` and `mod.cpp`. `-get` keeps a missing
@@ -204,26 +267,25 @@ impl Verifier<'_> {
         dir: &str,
         remote: &RemotePack,
     ) -> Result<HashMap<String, bool>, UksftaError> {
-        let addons_dir = join_remote(dir, "addons");
-        let remote_by_name: HashMap<String, &RemoteFile> = remote
-            .addons
+        let remote_by_name: HashMap<String, &RemoteEntry> = remote
+            .files
             .iter()
-            .map(|file| (file.name.to_ascii_lowercase(), file))
+            .map(|entry| (entry.rel.to_ascii_lowercase(), entry))
             .collect();
         let out_dir = self.scratch.join("deep");
         fs::create_dir_all(&out_dir).map_err(UksftaError::Io)?;
 
         let mut lines = Vec::new();
         let mut targets = Vec::new();
-        for pbo in &self.local.pbos {
-            let key = pbo.name.to_ascii_lowercase();
+        for pbo in self.local.pbos() {
+            let key = pbo.rel.to_ascii_lowercase();
             let Some(remote_file) = remote_by_name.get(&key) else {
                 continue;
             };
-            let target = out_dir.join(format!("{key}.pbo"));
+            let target = out_dir.join(format!("{}.pbo", key.replace('/', "_")));
             lines.push(format!(
                 "-get {} {}",
-                quote(&join_remote(&addons_dir, &remote_file.name))?,
+                quote(&join_remote(dir, &remote_file.rel))?,
                 quote(&target.display().to_string())?
             ));
             targets.push((key, pbo.path.clone(), target));
@@ -249,44 +311,6 @@ impl Verifier<'_> {
     }
 }
 
-/// A directory that exists in the pack folder must also be listable.
-fn require_listable(
-    pack_block: &Block,
-    name: &str,
-    path: &str,
-    block: Option<&Block>,
-) -> Result<(), UksftaError> {
-    let exists = pack_block
-        .entries
-        .iter()
-        .any(|item| item.is_dir && item.name == name);
-    if exists && block.is_none() {
-        return Err(UksftaError::Input(format!("cannot list {path}")));
-    }
-    Ok(())
-}
-
-fn files(block: Option<&Block>) -> Vec<RemoteFile> {
-    block.map_or_else(Vec::new, |block| {
-        block
-            .entries
-            .iter()
-            .filter(|item| !item.is_dir && !item.is_symlink)
-            .map(|item| RemoteFile {
-                name: item.name.clone(),
-                size: item.size,
-            })
-            .collect()
-    })
-}
-
-fn symlinks(block: Option<&Block>) -> Vec<String> {
-    block.map_or_else(Vec::new, |block| {
-        block
-            .entries
-            .iter()
-            .filter(|item| item.is_symlink)
-            .map(|item| item.name.clone())
-            .collect()
-    })
+fn basename(rel: &str) -> &str {
+    rel.rsplit_once('/').map_or(rel, |(_, name)| name)
 }

@@ -626,8 +626,8 @@ uksfta server --upload --progress
 uksfta server --prune --force-prune
 ```
 
-The build output must contain `addons/*.pbo`. The command expects this
-layout on the server:
+The build output must contain `addons/*.pbo`. The command reads every
+file under the release root, at any depth. This layout is the usual one:
 
 ```text
 <root>/@<publishedid>/addons/*.pbo
@@ -649,6 +649,21 @@ The command checks:
 6. Every local `.bisign` names an authority that a local `keys/*.bikey`
    carries, and, when the remote keys are readable, that the remote
    `keys/` carries too.
+7. Every other file at any depth is compared by relative path, with the
+   same size.
+
+The walk skips four kinds of entry: any name that starts with `.`,
+`*.biprivatekey`, `*.tmp` and `*.bak`, and symbolic links. It never
+follows a link and never reads file contents. One warning gives the
+count of skipped entries.
+
+A remote-only file outside `addons/*.pbo` is `extra` and advisory. Prune
+stays inside `addons/` and removes `.pbo` files only, so an included
+file, a key, a signature, `meta.cpp` and `mod.cpp` are never removed.
+`meta.cpp` and `mod.cpp` keep their own id and size checks.
+
+The default comparison is size only. `--deep` downloads and hashes
+`addons/*.pbo` only.
 
 A name that differs only by case is the same file. One warning gives the
 number of such names, and uploads reuse the server name, so no case
@@ -666,10 +681,11 @@ warning, and its authority is unknown.
 its SHA-256 with the local file. It is slow, because it transfers every PBO
 in the pack. Use it when a size match is not enough.
 
-`--upload` puts missing or stale PBOs and their signatures into `addons/`,
-`keys/*.bikey` into `keys/`, and `meta.cpp` and `mod.cpp` into the pack
-folder. It creates only `addons/` and `keys/` when they are absent. After
-the upload the command lists the server again and re-runs the check.
+`--upload` puts every missing or stale file into the pack folder at its
+relative path, including files outside `addons/` and `keys/`. It creates
+each directory the uploads need, starting with the pack folder, before it
+sends the file. After the upload the command lists the server again and
+re-runs the check.
 
 ### Upload performance
 
