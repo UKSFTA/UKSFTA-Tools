@@ -14,7 +14,7 @@ pub struct ModCpp {
 
 /// The trimmed left side of an `=` assignment, or None when the line has
 /// no `=`. Exact-key matching stops `namespace` from matching `name`.
-fn key_of(line: &str) -> Option<&str> {
+pub(crate) fn key_of(line: &str) -> Option<&str> {
     line.split_once('=').map(|(key, _)| key.trim())
 }
 

@@ -55,6 +55,12 @@ uksfta investigate --report --online
 # Print the stored resolution lines with no network
 uksfta investigate --report
 
+# Verify the game server's workshop tree over SFTP
+uksfta server
+
+# Upload missing PBOs and signatures, then remove extra PBOs
+uksfta server --upload --prune
+
 # Show the installed version and force a fresh update check
 uksfta version
 
@@ -542,6 +548,106 @@ stored status, and exits 1 only when a confirmed row names the wrong id.
 
 The `identify` command uses the same byte-hash matching, so its origin
 reports are now deterministic too.
+
+## Server verification over SFTP
+
+`uksfta server` compares a private Arma 3 game server's workshop tree with
+the local pack. Every remote operation uses the `sftp` client, one run per
+phase, with the commands on standard input. The command never starts
+`ssh`, `rsync` or `scp`.
+
+Put the connection settings in `.uksfta/server.toml`. The directory is
+gitignored, so the file stays local:
+
+```toml
+destination = "user@host"
+port = 2022
+root = "/home/container/steamapps/workshop/content/107410"
+identity = "/home/user/.ssh/id_ed25519"
+```
+
+`destination` and `root` are required. The port defaults to 22. A flag
+overrides the file:
+
+```bash
+# Verify with the config file
+uksfta server
+
+# Verify a chosen destination
+uksfta server --destination user@host --root /srv/arma
+
+# Print the plan and change nothing
+uksfta server --upload --prune --dry-run
+```
+
+The command reads the enabled mods from `mod_sources.txt` and their PBOs
+from `mods.lock`. It expects each mod at `<root>/@<publishedfileid>/`, with
+the PBOs in `addons/` and `meta.cpp` at the mod root. A SteamCMD copy that
+keeps the PBOs directly in the mod folder is also accepted.
+
+For each mod the command checks four things:
+
+1. The mod folder and its `addons/` directory exist.
+2. `meta.cpp` has the expected `publishedid`.
+3. Every PBO in `mods.lock` exists on the server.
+4. Every PBO has the same size as the local file.
+
+A remote PBO that the pack does not contain is reported as `extra`. A PBO
+with no companion `<pbo>.*.bisign` prints `[NO SIGNATURE]` as a warning.
+The warning does not fail the command, because the server may not check
+signatures. Add `--require-signatures` for a server that sets
+`verifySignatures = 2`. An uploaded PBO with no signature for its version
+then fails the command.
+
+`--deep` downloads each remote PBO into a temporary directory and compares
+its SHA-256 with the local file. It is slow, because it transfers every PBO
+in the pack. Use it once after a large upload, or when a size match is not
+enough.
+
+`--upload` writes the missing or stale PBOs. It copies a `.bisign` file
+from the Steam Workshop cache only when that signature belongs to the same
+PBO version. The command checks this by comparing the size of the cached
+PBO with the local PBO. A signature from another version is skipped and
+reported, and the PBO is still uploaded, because the server may not check
+signatures. A missing or wrong `meta.cpp` is repaired from the cached copy
+when one exists, otherwise a minimal file is written. After the upload the
+command lists the server again and re-runs the check.
+
+`--prune` removes remote PBOs that the pack does not contain. It removes
+`.pbo` files only, never a directory, and never a `.bisign` companion.
+Without `--prune` the command reports extras and changes nothing.
+
+`--dry-run` prints the plan and stops before any upload or removal. Each
+plan line is the command that would run:
+
+```text
+plan: rm /srv/arma/@450814997/addons/Old.pbo
+plan: put /srv/arma/@450814997/addons/CBA.pbo from addons/CBA.pbo
+```
+
+The command stores no credential and prints none. Authentication is
+whatever `sftp` supports: a key, an agent, or a prompt in the terminal. Use
+`identity` or `--identity` to select a key. The commands travel on standard
+input, so the prompt path stays available. The `-b` batch-file mode is not
+used, because it suppresses the prompt. No password is read or stored.
+
+One `sftp` process runs per phase. The phases are the listing, the
+`meta.cpp` fetch, the deep download, the upload and the prune. A password
+prompt therefore appears at most once per phase. Each run uses `-R 64` and
+`-B 262144` for throughput. The cost is one connection per phase, so a
+large pack stays fast over a slow link.
+
+The exit code is 0 when every mod matches or only warnings were found. It
+is 1 for a missing or stale PBO, an id mismatch, a missing mod folder, a
+mod with no lock entry, or an unsigned PBO under `--require-signatures`.
+It is 2 for a connection, usage or parse failure.
+
+Set `UKSFTA_WORKSHOP_CACHE` to a directory to read signatures and
+`meta.cpp` from a Steam library in a non-standard place.
+
+The command never uploads a file outside `<root>/@<publishedfileid>/`. It
+never follows a symlink on the server, and it never recurses below the mod
+folder.
 
 ## Update checking
 
