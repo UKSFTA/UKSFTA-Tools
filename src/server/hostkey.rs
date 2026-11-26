@@ -185,6 +185,8 @@ mod tests {
             transfer: Transfer::default(),
             known_hosts,
             host_key_policy: policy,
+            launch_line: None,
+            server_cfg: None,
         }
     }
 

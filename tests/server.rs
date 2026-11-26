@@ -989,3 +989,240 @@ drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 keys
             "addons is a symlink; refusing to follow it",
         ));
 }
+
+/// Write a remote `server.cfg` at the given path below the server root.
+fn write_remote_cfg(fixture: &Fixture, rel: &str, text: &str) {
+    let path = fixture.remote.join(rel);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create the cfg directory");
+    }
+    fs::write(path, text).expect("write the remote config");
+}
+
+/// A local launch-line file in the fixture directory.
+fn write_launch_line(fixture: &Fixture, line: &str) -> PathBuf {
+    let path = fixture.dir.path().join("launch.txt");
+    fs::write(&path, line).expect("write the launch line");
+    path
+}
+
+#[test]
+fn a_launch_line_that_names_the_pack_passes() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    let line = write_launch_line(&fixture, "-mod=@3662499431");
+
+    fixture
+        .command()
+        .args(["server", "--launch-line"])
+        .arg(&line)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("launch: @3662499431 is loaded"));
+}
+
+#[test]
+fn a_server_mod_entry_reports_not_in_mod() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    let line = write_launch_line(&fixture, "-serverMod=mods/@3662499431");
+
+    fixture
+        .command()
+        .args(["server", "--launch-line"])
+        .arg(&line)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "launch: @3662499431 is not in -mod",
+        ));
+}
+
+#[test]
+fn an_absent_pack_is_a_warning_unless_strict() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    let line = write_launch_line(&fixture, "-mod=@999");
+
+    fixture
+        .command()
+        .args(["server", "--launch-line"])
+        .arg(&line)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "launch: @3662499431 is not loaded",
+        ));
+
+    fixture
+        .command()
+        .args(["server", "--launch-line"])
+        .arg(&line)
+        .arg("--strict-config")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "launch: @3662499431 is not loaded",
+        ))
+        .stderr(predicate::str::contains("1 pack problem").not());
+}
+
+#[test]
+fn a_par_file_hides_the_list() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    let line = write_launch_line(&fixture, "-par=server.par -mod=@3662499431");
+
+    fixture
+        .command()
+        .args(["server", "--launch-line"])
+        .arg(&line)
+        .arg("--strict-config")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("launch: -par hides the mod list"));
+}
+
+#[test]
+fn the_pack_in_both_lists_is_loaded_twice() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    let line = write_launch_line(&fixture, "-mod=@3662499431 -serverMod=@3662499431");
+
+    fixture
+        .command()
+        .args(["server", "--launch-line"])
+        .arg(&line)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("launch: loaded twice"));
+
+    fixture
+        .command()
+        .args(["server", "--launch-line"])
+        .arg(&line)
+        .arg("--strict-config")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("launch: loaded twice"));
+}
+
+#[test]
+fn a_missing_launch_line_file_stops_before_any_client() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    let missing = fixture.dir.path().join("absent-launch.txt");
+
+    fixture
+        .command()
+        .args(["server", "--launch-line"])
+        .arg(&missing)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("no launch line at"));
+
+    assert!(!fixture.log().contains("ARGV "));
+}
+
+#[test]
+fn a_correct_server_cfg_passes_and_is_fetched_once() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    write_remote_cfg(
+        &fixture,
+        "server.cfg",
+        "verifySignatures = 2;\nallowedFilePatching = 0;\n",
+    );
+
+    fixture
+        .command()
+        .args(["server", "--server-cfg", "server.cfg", "--strict-config"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("server.cfg: verifySignatures = 2"))
+        .stderr(predicate::str::contains(
+            "server.cfg: allowedFilePatching = 0",
+        ));
+
+    let log = fixture.log();
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.starts_with("-get ") && line.contains("server.cfg"))
+            .count(),
+        1,
+        "one get for the config: {log}"
+    );
+}
+
+#[test]
+fn an_unsafe_server_cfg_fails_only_with_strict() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    write_remote_cfg(
+        &fixture,
+        "server.cfg",
+        "verifySignatures = 0;\nallowedFilePatching = 2;\n",
+    );
+
+    fixture
+        .command()
+        .args(["server", "--server-cfg", "server.cfg"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("server.cfg: verifySignatures = 0"))
+        .stderr(predicate::str::contains(
+            "server.cfg: allowedFilePatching = 2",
+        ));
+
+    fixture
+        .command()
+        .args(["server", "--server-cfg", "server.cfg", "--strict-config"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("server.cfg: verifySignatures = 0"))
+        .stderr(predicate::str::contains(
+            "server.cfg: allowedFilePatching = 2",
+        ));
+}
+
+#[test]
+fn a_comment_or_a_string_cannot_hide_the_setting() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    write_remote_cfg(
+        &fixture,
+        "server.cfg",
+        "hostname = \"verifySignatures = 0;\";\n// verifySignatures = 0;\nverifySignatures = 2;\n",
+    );
+
+    fixture
+        .command()
+        .args(["server", "--server-cfg", "server.cfg", "--strict-config"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("server.cfg: verifySignatures = 2"))
+        .stderr(predicate::str::contains("server.cfg: verifySignatures = 0").not());
+}
+
+#[test]
+fn file_patching_exceptions_warn_but_do_not_fail_strict() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    write_remote_cfg(
+        &fixture,
+        "server.cfg",
+        "verifySignatures = 2;\nallowedFilePatching = 0;\nfilePatchingExceptions[] = { \"7656119\" };\n",
+    );
+
+    fixture
+        .command()
+        .args(["server", "--server-cfg", "server.cfg", "--strict-config"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "server.cfg: filePatchingExceptions is not empty",
+        ));
+}
+
+#[test]
+fn the_config_is_not_fetched_without_the_flag() {
+    let fixture = Fixture::new(LISTING_MATCH);
+
+    fixture.command().arg("server").assert().success();
+
+    assert!(
+        !fixture.log().contains("server.cfg"),
+        "no config is fetched: {}",
+        fixture.log()
+    );
+}

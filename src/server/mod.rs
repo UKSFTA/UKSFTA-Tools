@@ -3,8 +3,10 @@
 //! Only `<root>/@<publishedid>/` is read or written. Dependency tooling
 //! (`mod_sources.txt`, `mods.lock`, the Workshop cache) is not used here.
 
+mod cfgfile;
 mod config;
 mod hostkey;
+mod launch;
 mod parse;
 mod plan;
 mod report;
@@ -26,8 +28,8 @@ use crate::util::human_size;
 use self::config::{Overrides, Settings};
 use self::hostkey::HostKeyPolicy;
 use self::plan::{
-    is_addons_pbo, is_addons_signature, is_key_file, is_pbo, walk_release, Action, LocalEntry,
-    LocalPack, Plan,
+    is_addons_pbo, is_addons_signature, is_key_file, is_pbo, join_remote, walk_release, Action,
+    LocalEntry, LocalPack, Plan,
 };
 use self::report::{
     plan_workers, print_plan, print_report, put_line, upload_batch, upload_dirs, upload_units,
@@ -77,6 +79,12 @@ pub struct ServerOptions {
     pub host_key_policy: Option<String>,
     /// When to show the client's transfer meter.
     pub progress: Progress,
+    /// A local copy of the launch line.
+    pub launch_line: Option<PathBuf>,
+    /// server.cfg path on the server.
+    pub server_cfg: Option<String>,
+    /// Fail when an opt-in config check fails.
+    pub strict_config: bool,
 }
 
 /// Verify the pack, then upload or prune when asked.
@@ -96,10 +104,17 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
             requests: opts.requests,
             known_hosts: opts.known_hosts.clone(),
             host_key_policy: opts.host_key_policy.clone(),
+            launch_line: opts.launch_line.clone(),
+            server_cfg: opts.server_cfg.clone(),
         },
     )?;
 
     hostkey::preflight(&settings)?;
+    let launch = settings
+        .launch_line
+        .as_deref()
+        .map(read_launch_line)
+        .transpose()?;
 
     let before_known_hosts = if settings.host_key_policy == HostKeyPolicy::AcceptNew {
         hostkey::snapshot(&settings.known_hosts)
@@ -161,6 +176,16 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
             eprintln!("{notice}");
         }
     }
+    let cfg_text = match settings.server_cfg.as_deref() {
+        Some(path) => fetch_server_cfg(&verifier.client, &settings.root, path, &scratch)?,
+        None => None,
+    };
+    let (config_lines, config_reasons) =
+        config_checks(launch.as_deref(), cfg_text.as_deref(), &local.id);
+    for line in &config_lines {
+        eprintln!("{line}");
+    }
+
     print_report(&plan);
     print_plan(&plan);
 
@@ -184,8 +209,8 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
         }
     }
 
+    let mut reasons = Vec::new();
     if plan.failed() {
-        let mut reasons = Vec::new();
         let problems = plan.problems();
         if problems > 0 {
             reasons.push(format!("{problems} pack problem(s)"));
@@ -196,9 +221,92 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
                 plan.unsigned, plan.local_pbos
             ));
         }
+    }
+    if opts.strict_config {
+        reasons.extend(config_reasons);
+    }
+    if !reasons.is_empty() {
         return Err(UksftaError::Check(reasons.join(", ")));
     }
     Ok(())
+}
+
+/// Read a local copy of the launch line.
+///
+/// # Errors
+/// Returns `Input` when the file is missing, empty or over 64 KiB.
+fn read_launch_line(path: &Path) -> Result<String, UksftaError> {
+    let text = fs::read_to_string(path)
+        .map_err(|_| UksftaError::Input(format!("no launch line at {}", path.display())))?;
+    if text.trim().is_empty() {
+        return Err(UksftaError::Input(format!(
+            "launch line at {} is empty",
+            path.display()
+        )));
+    }
+    if text.len() > 64 * 1024 {
+        return Err(UksftaError::Input(format!(
+            "launch line at {} is over 64 KiB",
+            path.display()
+        )));
+    }
+    Ok(text.trim().to_string())
+}
+
+/// Fetch the remote `server.cfg` into scratch. A failure is a warning, so
+/// the check cannot run.
+fn fetch_server_cfg(
+    client: &Sftp,
+    root: &str,
+    path: &str,
+    scratch: &ScratchDir,
+) -> Result<Option<String>, UksftaError> {
+    let remote = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        join_remote(root, path)
+    };
+    let local = scratch.join("server.cfg");
+    let _ = fs::remove_file(&local);
+    let batch = vec![format!(
+        "-get {} {}",
+        self::sftp::quote(&remote)?,
+        self::sftp::quote(&local.display().to_string())?
+    )];
+    match client.batch(&batch) {
+        Ok(_) => Ok(fs::read_to_string(&local).ok()),
+        Err(e) => {
+            eprintln!("Warning: server.cfg: {e}");
+            Ok(None)
+        }
+    }
+}
+
+/// The check lines, and the reasons that `--strict-config` turns fatal.
+fn config_checks(launch: Option<&str>, cfg: Option<&str>, id: &str) -> (Vec<String>, Vec<String>) {
+    let mut lines = Vec::new();
+    let mut reasons = Vec::new();
+
+    if let Some(text) = launch {
+        let result = launch::check(&launch::parse(text), id);
+        let line = format!("launch: {}", result.describe(id));
+        if result.failed() {
+            reasons.push(line.clone());
+        }
+        lines.push(line);
+    }
+
+    if let Some(text) = cfg {
+        for finding in cfgfile::parse(text).check() {
+            let line = format!("server.cfg: {}", finding.describe());
+            if finding.fatal() {
+                reasons.push(line.clone());
+            }
+            lines.push(line);
+        }
+    }
+
+    (lines, reasons)
 }
 
 fn remove_path(action: &Action) -> String {
@@ -679,6 +787,34 @@ mod tests {
         assert_eq!(transfer_rate(1_000_000, Duration::ZERO), 0.0);
         let rate = transfer_rate(2_000_000, Duration::from_secs(2));
         assert!((rate - 1.0).abs() < f64::EPSILON, "{rate}");
+    }
+
+    #[test]
+    fn the_launch_line_reader_refuses_missing_empty_and_large_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("missing.txt");
+        assert!(matches!(
+            read_launch_line(&missing),
+            Err(UksftaError::Input(_))
+        ));
+
+        let empty = dir.path().join("empty.txt");
+        fs::write(&empty, b"  \n").unwrap();
+        assert!(matches!(
+            read_launch_line(&empty),
+            Err(UksftaError::Input(_))
+        ));
+
+        let large = dir.path().join("large.txt");
+        fs::write(&large, "a".repeat(64 * 1024 + 1)).unwrap();
+        assert!(matches!(
+            read_launch_line(&large),
+            Err(UksftaError::Input(_))
+        ));
+
+        let small = dir.path().join("small.txt");
+        fs::write(&small, b"-mod=@1\n").unwrap();
+        assert_eq!(read_launch_line(&small).unwrap(), "-mod=@1");
     }
 
     #[test]

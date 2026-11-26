@@ -9,6 +9,12 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Opt-in launch-line and `server.cfg` checks. `--launch-line` reads a
+  local copy and finds `@<id>` in `-mod` or `-serverMod`. `--server-cfg`
+  reads one file over SFTP and checks `verifySignatures` and
+  `allowedFilePatching`. The lines warn by default, and `--strict-config`
+  makes a failing check exit 1.
+
 - `uksfta deps` reports every `CfgPatches` class the pack provides and
   every `requiredAddons` entry it needs. Each requirement is provided,
   external (listed once in `.uksfta/external-addons.txt`) or unaccounted.
