@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use super::config::Settings;
 use super::parse;
@@ -17,6 +18,10 @@ use crate::util::file_sha256;
 
 /// The most remote key files read in one run.
 const MAX_REMOTE_KEYS: usize = 64;
+
+fn millis(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
 /// The most directories listed in one run.
 const MAX_DIRS: usize = 512;
 /// The most directories listed in one batch.
@@ -37,18 +42,38 @@ pub struct Verifier<'a> {
     pub require_signatures: bool,
 }
 
+/// The time spent in the read-only phases, in milliseconds.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VerifyTiming {
+    /// Listing, `meta.cpp`/`mod.cpp`, and the remote keys.
+    pub connect_ms: u64,
+    /// The deep download and hash, when it ran.
+    pub deep_ms: Option<u64>,
+}
+
 impl Verifier<'_> {
     /// Run every read-only phase and build the plan.
     pub fn verify(&self) -> Result<Plan, UksftaError> {
+        self.verify_timed().map(|(plan, _)| plan)
+    }
+
+    /// Run the read-only phases and report how long they took.
+    pub fn verify_timed(&self) -> Result<(Plan, VerifyTiming), UksftaError> {
+        let connect_started = Instant::now();
         let dir = mod_dir(&self.settings.root, &self.local.id);
         let mut remote = self.list(&dir)?;
         self.fetch_meta(&dir, &mut remote)?;
         let (remote_key_authorities, mut warnings) = self.fetch_remote_keys(&dir, &remote)?;
+        let connect_ms = millis(connect_started.elapsed());
+
+        let deep_started = Instant::now();
         let deep = if self.deep {
             self.deep_hashes(&dir, &remote)?
         } else {
             HashMap::new()
         };
+        let deep_ms = self.deep.then(|| millis(deep_started.elapsed()));
+
         let mut plan = build_plan(&PlanInput {
             local: self.local,
             remote_dir: &dir,
@@ -63,7 +88,13 @@ impl Verifier<'_> {
             require_signatures: self.require_signatures,
         });
         plan.warnings.append(&mut warnings);
-        Ok(plan)
+        Ok((
+            plan,
+            VerifyTiming {
+                connect_ms,
+                deep_ms,
+            },
+        ))
     }
 
     /// One batch downloads every remote `keys/*.bikey` and reads its

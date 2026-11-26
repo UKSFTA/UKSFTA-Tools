@@ -5,8 +5,10 @@
 
 mod cfgfile;
 mod config;
+mod doctor;
 mod hostkey;
 mod launch;
+mod output;
 mod parse;
 mod plan;
 mod report;
@@ -27,9 +29,10 @@ use crate::util::human_size;
 
 use self::config::{Overrides, Settings};
 use self::hostkey::HostKeyPolicy;
+use self::output::{JsonReport, TimingsJson};
 use self::plan::{
-    is_addons_pbo, is_addons_signature, is_key_file, is_pbo, join_remote, walk_release, Action,
-    LocalEntry, LocalPack, Plan,
+    is_addons_pbo, is_addons_signature, is_key_file, is_pbo, join_remote, mod_dir, walk_release,
+    Action, LocalEntry, LocalPack, Plan,
 };
 use self::report::{
     plan_workers, print_plan, print_report, put_line, upload_batch, upload_dirs, upload_units,
@@ -85,6 +88,10 @@ pub struct ServerOptions {
     pub server_cfg: Option<String>,
     /// Fail when an opt-in config check fails.
     pub strict_config: bool,
+    /// Write one JSON object to standard output.
+    pub json: bool,
+    /// Run the read-only preflight instead of the checks.
+    pub doctor: bool,
 }
 
 /// Verify the pack, then upload or prune when asked.
@@ -93,21 +100,61 @@ pub struct ServerOptions {
 /// Returns `Check` when the pack fails verification, and `Input` or `Parse`
 /// for a connection, usage or parse failure.
 pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
-    let settings = config::resolve(
-        opts.config.as_deref(),
-        &Overrides {
-            destination: opts.destination.clone(),
-            port: opts.port,
-            root: opts.root.clone(),
-            identity: opts.identity.clone(),
-            buffer: opts.buffer,
-            requests: opts.requests,
-            known_hosts: opts.known_hosts.clone(),
-            host_key_policy: opts.host_key_policy.clone(),
-            launch_line: opts.launch_line.clone(),
-            server_cfg: opts.server_cfg.clone(),
-        },
-    )?;
+    if opts.doctor {
+        return run_doctor(&opts);
+    }
+
+    let started = Instant::now();
+    let mut outcome = Outcome::default();
+    let result = run_verify(&opts, &mut outcome);
+    let total_ms = millis(started.elapsed());
+
+    if opts.json {
+        let report = JsonReport::new(
+            outcome.settings.as_ref(),
+            outcome.pack.clone(),
+            outcome.plan.as_ref(),
+            TimingsJson {
+                connect_ms: outcome.connect_ms,
+                deep_ms: outcome.deep_ms,
+                upload_ms: outcome.upload_ms,
+                total_ms,
+            },
+            &result,
+        );
+        if let Ok(text) = serde_json::to_string(&report) {
+            println!("{text}");
+        }
+    } else {
+        eprintln!(
+            "timing: connect/list {} ms, deep {} ms, upload {} ms, total {total_ms} ms",
+            outcome.connect_ms,
+            outcome.deep_ms.unwrap_or(0),
+            outcome.upload_ms.unwrap_or(0)
+        );
+    }
+    result
+}
+
+/// The data the JSON report needs, filled as the phases complete.
+#[derive(Default)]
+struct Outcome {
+    settings: Option<Settings>,
+    pack: Option<(String, String)>,
+    plan: Option<Plan>,
+    connect_ms: u64,
+    deep_ms: Option<u64>,
+    upload_ms: Option<u64>,
+}
+
+fn millis(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Verify the pack, then upload or prune when asked.
+fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaError> {
+    let settings = config::resolve(opts.config.as_deref(), &overrides(opts))?;
+    outcome.settings = Some(settings.clone());
 
     hostkey::preflight(&settings)?;
     let launch = settings
@@ -127,6 +174,7 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
         .clone()
         .unwrap_or_else(|| PathBuf::from("meta.cpp"));
     let local = load_local(&meta_path, opts.local.as_deref())?;
+    outcome.pack = Some((local.id.clone(), local.name.clone()));
     let meta_upload = local
         .meta()
         .map_or_else(|| local.meta_source.clone(), |file| file.path.clone());
@@ -150,10 +198,13 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
         require_signatures: opts.require_signatures,
     };
 
-    println!("pack {} {}", local.id, local.name);
-    println!(
-        "server: {}:{} root {}",
-        settings.destination, settings.port, settings.root
+    say(opts.json, &format!("pack {} {}", local.id, local.name));
+    say(
+        opts.json,
+        &format!(
+            "server: {}:{} root {}",
+            settings.destination, settings.port, settings.root
+        ),
     );
     for warning in &cross_checks {
         eprintln!("Warning: {warning}");
@@ -165,7 +216,16 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
         );
     }
 
-    let mut plan = verifier.verify()?;
+    let verify_started = Instant::now();
+    let verified = verifier.verify_timed();
+    match &verified {
+        Ok((_, timing)) => {
+            outcome.connect_ms = timing.connect_ms;
+            outcome.deep_ms = timing.deep_ms;
+        }
+        Err(_) => outcome.connect_ms = millis(verify_started.elapsed()),
+    }
+    let (mut plan, _) = verified?;
     if settings.host_key_policy == HostKeyPolicy::AcceptNew {
         if let Some(notice) = hostkey::acceptance_notice(
             before_known_hosts,
@@ -186,13 +246,22 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
         eprintln!("{line}");
     }
 
-    print_report(&plan);
-    print_plan(&plan);
+    write_report(&plan, opts.json);
+    write_plan(&plan, opts.json);
 
     if opts.dry_run {
-        println!("dry run: no changes made");
+        say(opts.json, "dry run: no changes made");
     } else if opts.upload {
-        plan = upload_with_retries(&verifier, plan, opts.retries, opts.jobs, show_progress)?;
+        let upload_started = Instant::now();
+        plan = upload_with_retries(
+            &verifier,
+            plan,
+            opts.retries,
+            opts.jobs,
+            show_progress,
+            opts.json,
+        )?;
+        outcome.upload_ms = Some(millis(upload_started.elapsed()));
     }
 
     if opts.prune && !opts.dry_run {
@@ -204,11 +273,12 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
             }
             verifier.client.batch(&batch)?;
             for remote in &removals {
-                println!("removed {remote}");
+                say(opts.json, &format!("removed {remote}"));
             }
         }
     }
 
+    outcome.plan = Some(plan.clone());
     let mut reasons = Vec::new();
     if plan.failed() {
         let problems = plan.problems();
@@ -229,6 +299,157 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
         return Err(UksftaError::Check(reasons.join(", ")));
     }
     Ok(())
+}
+
+/// The connection fields the flags carry.
+fn overrides(opts: &ServerOptions) -> Overrides {
+    Overrides {
+        destination: opts.destination.clone(),
+        port: opts.port,
+        root: opts.root.clone(),
+        identity: opts.identity.clone(),
+        buffer: opts.buffer,
+        requests: opts.requests,
+        known_hosts: opts.known_hosts.clone(),
+        host_key_policy: opts.host_key_policy.clone(),
+        launch_line: opts.launch_line.clone(),
+        server_cfg: opts.server_cfg.clone(),
+    }
+}
+
+/// A report line: standard output in human mode, standard error with
+/// `--json`, so the JSON object owns standard output.
+fn say(json: bool, text: &str) {
+    if json {
+        eprintln!("{text}");
+    } else {
+        println!("{text}");
+    }
+}
+
+fn write_report(plan: &Plan, json: bool) {
+    if json {
+        let mut err = std::io::stderr().lock();
+        print_report(plan, &mut err);
+    } else {
+        let mut out = std::io::stdout().lock();
+        print_report(plan, &mut out);
+    }
+}
+
+fn write_plan(plan: &Plan, json: bool) {
+    if json {
+        let mut err = std::io::stderr().lock();
+        print_plan(plan, &mut err);
+    } else {
+        let mut out = std::io::stdout().lock();
+        print_plan(plan, &mut out);
+    }
+}
+
+/// The read-only preflight. It resolves the settings, checks the key file,
+/// lists the pack folder and asks for free space. It never plans, verifies,
+/// uploads or creates a directory.
+fn run_doctor(opts: &ServerOptions) -> Result<(), UksftaError> {
+    let started = Instant::now();
+    let settings = config::resolve(opts.config.as_deref(), &overrides(opts))?;
+    for line in doctor::settings_lines(&settings) {
+        say(opts.json, &line);
+    }
+
+    let meta_path = opts
+        .meta
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("meta.cpp"));
+    let pack = read_pack_identity(&meta_path);
+    let pack_dir = pack.as_ref().map(|(id, _)| mod_dir(&settings.root, id));
+    if let Some((id, name)) = &pack {
+        say(opts.json, &format!("doctor: pack {id} {name}"));
+    } else {
+        say(
+            opts.json,
+            &format!(
+                "doctor: pack unknown (no meta.cpp at {})",
+                meta_path.display()
+            ),
+        );
+    }
+
+    let probe = doctor::probe(&settings, pack_dir.as_deref());
+    let mut checks = probe.checks;
+    if pack.is_none() {
+        checks.push(doctor::Check {
+            name: "pack",
+            ok: false,
+            detail: format!("no meta.cpp at {}", meta_path.display()),
+        });
+    }
+    for check in &checks {
+        say(
+            opts.json,
+            &format!(
+                "doctor: {} {}: {}",
+                check.name,
+                if check.ok { "ok" } else { "failed" },
+                check.detail
+            ),
+        );
+    }
+    say(
+        opts.json,
+        &match probe.free_space {
+            Some(bytes) => format!("doctor: free space {bytes} bytes"),
+            None => "doctor: free space unknown".to_string(),
+        },
+    );
+    say(
+        opts.json,
+        &format!("doctor: connect {} ms", probe.connect_ms),
+    );
+
+    let usable = checks.iter().all(|check| check.ok);
+    let result = if usable {
+        Ok(())
+    } else {
+        Err(UksftaError::Input(
+            "the server or pack folder is not usable".to_string(),
+        ))
+    };
+    if opts.json {
+        let total_ms = millis(started.elapsed());
+        let report = output::DoctorReport::new(
+            Some(&settings),
+            pack.clone(),
+            checks
+                .iter()
+                .map(|check| output::DoctorCheckJson {
+                    name: check.name.to_string(),
+                    ok: check.ok,
+                    detail: check.detail.clone(),
+                })
+                .collect(),
+            probe.free_space,
+            probe.connect_ms,
+            total_ms,
+            &result,
+        );
+        if let Ok(text) = serde_json::to_string(&report) {
+            println!("{text}");
+        }
+    }
+    result
+}
+
+/// The pack id and name from `meta.cpp`, without the build output.
+fn read_pack_identity(path: &Path) -> Option<(String, String)> {
+    let text = fs::read_to_string(path).ok()?;
+    let meta = parse::parse_meta_cpp(&text);
+    let id = meta.publishedid?;
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let name = meta.name.unwrap_or_else(|| format!("Pack {id}"));
+    Some((id, name))
 }
 
 /// Read a local copy of the launch line.
@@ -330,6 +551,7 @@ fn upload_with_retries(
     retries: u8,
     jobs: u8,
     progress: bool,
+    json: bool,
 ) -> Result<Plan, UksftaError> {
     let limit = u16::from(retries) + 1;
     let mut attempted = false;
@@ -356,11 +578,14 @@ fn upload_with_retries(
         }
         plan = verifier.verify()?;
         let elapsed = started.elapsed();
-        println!(
-            "attempt {attempt}: {files} file(s), {} attempted, {:.1} s, {:.2} MB/s",
-            human_size(bytes),
-            elapsed.as_secs_f64(),
-            transfer_rate(bytes, elapsed)
+        say(
+            json,
+            &format!(
+                "attempt {attempt}: {files} file(s), {} attempted, {:.1} s, {:.2} MB/s",
+                human_size(bytes),
+                elapsed.as_secs_f64(),
+                transfer_rate(bytes, elapsed)
+            ),
         );
         match next_attempt(&plan, attempt, limit) {
             NextAttempt::Stop => break,
@@ -368,8 +593,8 @@ fn upload_with_retries(
         }
     }
     if attempted {
-        println!("after upload:");
-        print_report(&plan);
+        say(json, "after upload:");
+        write_report(&plan, json);
     }
     Ok(plan)
 }

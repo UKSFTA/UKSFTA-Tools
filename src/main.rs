@@ -247,6 +247,12 @@ enum Commands {
         /// Fail when an opt-in config check fails
         #[arg(long)]
         strict_config: bool,
+        /// Write one JSON object to standard output
+        #[arg(long)]
+        json: bool,
+        /// Run the read-only preflight and exit
+        #[arg(long)]
+        doctor: bool,
     },
     /// Check that every required addon is provided or listed
     ///
@@ -421,6 +427,8 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             launch_line,
             server_cfg,
             strict_config,
+            json,
+            doctor,
         } => {
             let mode = if progress {
                 server::Progress::Always
@@ -453,6 +461,8 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
                 launch_line,
                 server_cfg,
                 strict_config,
+                json,
+                doctor,
             })?
         }
         Commands::Deps {

@@ -1,5 +1,6 @@
 //! Print the pack report and the change plan, and build the upload batch.
 
+use std::io::Write;
 use std::path::PathBuf;
 
 use super::plan::{inside, Action, Finding, Plan};
@@ -7,8 +8,9 @@ use super::sftp::quote;
 use crate::error::UksftaError;
 use crate::util::human_size;
 
-pub fn print_report(plan: &Plan) {
-    println!(
+pub fn print_report(plan: &Plan, out: &mut dyn Write) {
+    let _ = writeln!(
+        out,
         "local {}: {} PBO(s), {} signature(s), {} key(s)",
         plan.local_dir.display(),
         plan.local_pbos,
@@ -16,19 +18,21 @@ pub fn print_report(plan: &Plan) {
         plan.local_keys
     );
     if plan.remote_exists {
-        println!(
+        let _ = writeln!(
+            out,
             "remote {}: {} PBO(s), {} key(s)",
             plan.remote_dir, plan.remote_pbos, plan.remote_keys
         );
     } else {
-        println!("remote {}: no pack folder", plan.remote_dir);
+        let _ = writeln!(out, "remote {}: no pack folder", plan.remote_dir);
     }
-    println!("status: {}", plan.status().as_str());
+    let _ = writeln!(out, "status: {}", plan.status().as_str());
     for finding in &plan.findings {
-        println!("  {}", describe(finding, &plan.id));
+        let _ = writeln!(out, "  {}", describe(finding, &plan.id));
     }
     if plan.unsigned > 0 {
-        println!(
+        let _ = writeln!(
+            out,
             "unsigned: {} of {} PBO(s) have no signature (advisory)",
             plan.unsigned, plan.local_pbos
         );
@@ -36,7 +40,8 @@ pub fn print_report(plan: &Plan) {
     for warning in &plan.warnings {
         eprintln!("Warning: {warning}");
     }
-    println!(
+    let _ = writeln!(
+        out,
         "PBOs: {} local, {} local-only, {} remote-only",
         plan.local_pbos,
         plan.local_only(),
@@ -91,22 +96,22 @@ fn describe(finding: &Finding, pack_id: &str) -> String {
     }
 }
 
-pub fn print_plan(plan: &Plan) {
+pub fn print_plan(plan: &Plan, out: &mut dyn Write) {
     let mut any = false;
     for action in &plan.actions {
         match action {
             Action::Upload { local, remote, .. } => {
-                println!("plan: put {remote} from {}", local.display());
+                let _ = writeln!(out, "plan: put {remote} from {}", local.display());
                 any = true;
             }
             Action::Remove { remote } => {
-                println!("plan: rm {remote}");
+                let _ = writeln!(out, "plan: rm {remote}");
                 any = true;
             }
         }
     }
     if !any {
-        println!("plan: no changes");
+        let _ = writeln!(out, "plan: no changes");
     }
 }
 
