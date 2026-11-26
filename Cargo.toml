@@ -9,6 +9,7 @@ repository = "https://github.com/UKSFTA/UKSFTA-Tools"
 readme = "README.md"
 
 [dependencies]
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 html-escape = "0.3"

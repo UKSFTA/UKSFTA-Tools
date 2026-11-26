@@ -14,6 +14,11 @@ This project uses [Semantic Versioning](https://semver.org/).
   read-only preflight of the connection, the pack folder and free space.
   Every human run prints one `timing:` line on standard error.
 
+- `--segmented` sends one large upload over several connections, verifies
+  the temporary file by SHA-256 and publishes it with an atomic rename.
+  It is off by default, needs key or agent authentication, and does not
+  resume yet.
+
 - Opt-in launch-line and `server.cfg` checks. `--launch-line` reads a
   local copy and finds `@<id>` in `-mod` or `-serverMod`. `--server-cfg`
   reads one file over SFTP and checks `verifySignatures` and

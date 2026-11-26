@@ -1,5 +1,6 @@
 //! Print the pack report and the change plan, and build the upload batch.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -255,13 +256,16 @@ fn smallest_total(totals: &[u64]) -> usize {
 
 /// The upload phase. Only `addons/` and `keys/` are created. The puts run
 /// smallest first, so a failure in the middle leaves the large files for a
-/// retry.
+/// retry. A remote path in `skip` is left out; the segmented path sends it.
 ///
 /// # Errors
 /// Returns `Input` when a path cannot be quoted.
-pub fn upload_batch(plan: &Plan) -> Result<Vec<String>, UksftaError> {
+pub fn upload_batch(plan: &Plan, skip: &HashSet<String>) -> Result<Vec<String>, UksftaError> {
     let mut batch = upload_dirs(plan)?;
     for unit in upload_units(plan) {
+        if skip.contains(&unit.remote) {
+            continue;
+        }
         batch.push(put_line(&unit)?);
     }
     Ok(batch)
@@ -297,7 +301,7 @@ mod tests {
             upload("small.pbo", "/srv/arma/@1/addons/small.pbo", 100),
         ]);
 
-        let batch = upload_batch(&plan).unwrap();
+        let batch = upload_batch(&plan, &HashSet::new()).unwrap();
         let puts: Vec<&String> = batch
             .iter()
             .filter(|line| line.starts_with("put "))
@@ -322,7 +326,7 @@ mod tests {
             upload("y.py", "/srv/arma/@1/python_code/y.py", 20),
         ]);
 
-        let batch = upload_batch(&plan).unwrap();
+        let batch = upload_batch(&plan, &HashSet::new()).unwrap();
         let mkdir = batch
             .iter()
             .position(|line| line == "-mkdir \"/srv/arma/@1/python_code\"")
@@ -347,7 +351,7 @@ mod tests {
     fn every_put_preserves_the_timestamp() {
         let plan = plan_with(vec![upload("a.pbo", "/srv/arma/@1/addons/a.pbo", 10)]);
 
-        let batch = upload_batch(&plan).unwrap();
+        let batch = upload_batch(&plan, &HashSet::new()).unwrap();
         let puts: Vec<&String> = batch
             .iter()
             .filter(|line| line.starts_with("put "))

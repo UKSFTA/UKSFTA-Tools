@@ -3462,6 +3462,7 @@ name = "uksfta"
 version = "0.10.1"
 dependencies = [
  "assert_cmd",
+ "bytes",
  "clap",
  "dirs",
  "html-escape",

@@ -19,9 +19,12 @@ use crate::server::hostkey::{self, HostKeyPolicy};
 
 /// A connected and authenticated session.
 pub struct NativeSession {
+    /// Held so the SSH connection outlives the SFTP client built from it.
+    #[allow(dead_code)]
     pub handle: Handle<Handler>,
     pub sftp: Sftp,
-    /// The accept-new line, when this connection added a key.
+    /// The accept-new line, when this connection added a key. Wave 3 prints it.
+    #[allow(dead_code)]
     pub notice: Option<String>,
 }
 
