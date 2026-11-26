@@ -47,41 +47,25 @@ pub fn parse_required_items(html: &str) -> Vec<(String, String)> {
 }
 
 /// Fetch a Workshop item's page and return its required dependencies as
-/// Vec<(id, name)>. Returns empty on network error or if no deps exist.
-pub(crate) fn fetch_workshop_dependencies(workshop_id: &str) -> Vec<(String, String)> {
+/// Vec<(id, name)>. The error carries the reason, so the caller can report
+/// the affected id and decide whether the whole run failed.
+pub(crate) fn fetch_workshop_dependencies(
+    workshop_id: &str,
+) -> Result<Vec<(String, String)>, String> {
     let url = workshop_url(workshop_id);
     // A stalled connection must not hang the CLI indefinitely.
-    let client = match reqwest::blocking::Client::builder()
+    let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-    {
-        Ok(client) => client,
-        Err(e) => {
-            eprintln!("Warning: failed to build HTTP client: {}", e);
-            return Vec::new();
-        }
-    };
-    let body = match client.get(&url).send() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!(
-                "Warning: failed to fetch Workshop page for {}: {}",
-                workshop_id, e
-            );
-            return Vec::new();
-        }
-    };
-    let html = match body.text() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!(
-                "Warning: failed to read response for {}: {}",
-                workshop_id, e
-            );
-            return Vec::new();
-        }
-    };
-    parse_required_items(&html)
+        .map_err(|e| format!("failed to build the HTTP client: {e}"))?;
+    let body = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("failed to fetch the Workshop page: {e}"))?;
+    let html = body
+        .text()
+        .map_err(|e| format!("failed to read the response: {e}"))?;
+    Ok(parse_required_items(&html))
 }
 
 #[cfg(test)]

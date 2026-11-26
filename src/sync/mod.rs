@@ -132,7 +132,7 @@ pub fn sync_mods(
     if opts.resolve_deps && !opts.offline {
         let known: HashSet<String> = planned_mods.iter().map(|m| m.id.clone()).collect();
         let ignored_set: HashSet<String> = ignored.iter().cloned().collect();
-        let (_all, by_root) = resolve_all_required(&planned_mods, &known, &ignored_set);
+        let (_all, by_root) = resolve_all_required(&planned_mods, &known, &ignored_set)?;
         report::print_discovered_deps(&planned_mods, &by_root, &caches);
         let updates = merge_dependencies(&mut planned_mods, &by_root);
         let should_persist = !opts.dry_run && !updates.is_empty();

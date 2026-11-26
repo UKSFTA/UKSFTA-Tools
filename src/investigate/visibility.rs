@@ -1,5 +1,7 @@
 //! Workshop visibility check for resolved origins.
 
+use std::path::PathBuf;
+
 use crate::error::UksftaError;
 use crate::origin::ResolvedOrigin;
 use crate::util::sanitize_for_terminal;
@@ -7,10 +9,10 @@ use crate::workshop_api::{build_client, fetch_published_file_details};
 
 /// Query the Steam Workshop API for each investigated mod's visibility.
 /// Keyless: ISteamRemoteStorage/GetPublishedFileDetails needs no API key.
-pub(crate) fn check_workshop_visibility(results: Vec<(String, Option<ResolvedOrigin>)>) {
+pub(crate) fn check_workshop_visibility(results: &[(String, PathBuf, Option<ResolvedOrigin>)]) {
     let mut ids: Vec<String> = results
         .iter()
-        .filter_map(|(_, origin)| origin.as_ref().map(|o| o.id.clone()))
+        .filter_map(|(_, _, origin)| origin.as_ref().map(|o| o.id.clone()))
         .collect();
     ids.sort();
     ids.dedup();

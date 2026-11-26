@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::deps::{fetch_workshop_dependencies, is_non_mod_app_id};
 use super::ModEntry;
+use crate::error::UksftaError;
 
 /// Direct Workshop dependencies per fetched id: id -> [(dep_id, name)].
 pub type DepMap = HashMap<String, Vec<(String, String)>>;
@@ -80,21 +81,36 @@ pub fn transitive_closure(roots: &[String], direct: &DepMap) -> DepMap {
 /// dependency reached from it. Returns the deduplicated union of all
 /// discovered dependencies and the closure per root.
 ///
-/// One request per second keeps the fetches within Steam's tolerance.
+/// A page that does not load is a warning and contributes no dependencies.
+/// The run fails only when no page loaded at all, because then nothing was
+/// resolved. One request per second keeps the fetches within Steam's
+/// tolerance.
 pub fn resolve_all_required(
     roots: &[ModEntry],
     known: &HashSet<String>,
     ignored: &HashSet<String>,
-) -> (Vec<(String, String)>, DepMap) {
+) -> Result<(Vec<(String, String)>, DepMap), UksftaError> {
     let mut direct = DepMap::new();
     let mut fetched: HashSet<String> = HashSet::new();
     let mut queue: Vec<String> = roots.iter().map(|m| m.id.clone()).collect();
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
 
     while let Some(id) = queue.pop() {
         if !fetched.insert(id.clone()) {
             continue;
         }
-        let deps = fetch_workshop_dependencies(&id);
+        let deps = match fetch_workshop_dependencies(&id) {
+            Ok(deps) => {
+                succeeded += 1;
+                deps
+            }
+            Err(error) => {
+                eprintln!("Warning: dependencies for {id} not resolved: {error}");
+                failed += 1;
+                Vec::new()
+            }
+        };
         let allowed = filter_allowed(deps, known, ignored);
         for (dep_id, _) in &allowed {
             if !fetched.contains(dep_id) {
@@ -103,6 +119,12 @@ pub fn resolve_all_required(
         }
         direct.insert(id, allowed);
         std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+
+    if succeeded == 0 && failed > 0 {
+        return Err(UksftaError::Input(
+            "could not fetch any Workshop page; dependencies were not resolved".to_string(),
+        ));
     }
 
     let root_ids: Vec<String> = roots.iter().map(|m| m.id.clone()).collect();
@@ -117,7 +139,7 @@ pub fn resolve_all_required(
             }
         }
     }
-    (all, by_root)
+    Ok((all, by_root))
 }
 
 /// Print a mod's missing dependency tree with tree-style indentation.

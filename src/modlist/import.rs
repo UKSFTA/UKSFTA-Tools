@@ -34,7 +34,7 @@ pub fn import_modlist(modlist_file: &Path, dry_run: bool) -> Result<(), UksftaEr
 
     // Load existing IDs to skip duplicates. Handles both legacy and TOML
     // formats via the shared parser.
-    let existing_content = fs::read_to_string(sources_path).unwrap_or_default();
+    let existing_content = read_sources(sources_path)?;
     let is_toml = existing_content.contains("[[mods]]")
         || existing_content
             .lines()
@@ -109,9 +109,20 @@ pub fn import_modlist(modlist_file: &Path, dry_run: bool) -> Result<(), UksftaEr
         output = insert_before_ignore(&output, &additions);
     }
 
-    fs::write(sources_path, output).map_err(UksftaError::Io)?;
+    crate::atomic::write_atomic_with_backup(sources_path, output.as_bytes())?;
     println!("Imported {} mod(s) into mod_sources.txt", new_mods.len());
     Ok(())
+}
+
+/// Read `mod_sources.txt`. A missing file is an empty list, so the first
+/// import creates it. Any other read error is returned: a damaged file must
+/// never be overwritten with a truncated one.
+fn read_sources(path: &Path) -> Result<String, UksftaError> {
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(UksftaError::Io(error)),
+    }
 }
 
 /// Insert `additions` before the `[ignore]`/`@ignore` marker line. Every
@@ -159,5 +170,35 @@ mod tests {
         let sources = "450814997 # CBA_A3\n\n[ignore]\n463939057 # ACE\n";
         let out = insert_before_ignore(sources, "1234567890 # O&T Warfighters\n");
         assert!(out.starts_with("450814997 # CBA_A3\n\n1234567890 # O&T Warfighters\n[ignore]"));
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("uksfta-import-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn read_sources_returns_empty_for_a_missing_file() {
+        let dir = temp_dir("missing");
+
+        let content = read_sources(&dir.join("mod_sources.txt")).unwrap();
+
+        assert_eq!(content, "");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_sources_returns_the_file_content() {
+        let dir = temp_dir("present");
+        let path = dir.join("mod_sources.txt");
+        fs::write(&path, "450814997 # CBA_A3\n").unwrap();
+
+        let content = read_sources(&path).unwrap();
+
+        assert_eq!(content, "450814997 # CBA_A3\n");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

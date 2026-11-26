@@ -234,7 +234,7 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=887302721 # Boat Mod
 The tool reads the Workshop cache and its `appworkshop_107410.acf` metadata
 directly from your Steam libraries. It is offline by default. `investigate
 --online`, `size --online`, and `sync --resolve-deps` use the network, as
-does the daily update check, which calls the GitHub API.
+does the automatic update check, which calls the GitHub API.
 
 The `audit` command also flags orphan PBOs: files in `addons/` that belong
 to no mod listed in `mod_sources.txt`. These are leftovers from removed
@@ -250,7 +250,9 @@ expected PBO is missing, so it can gate a build in CI.
 | 2 | Input or environment failure. A required file is missing or unreadable, or `mod_sources.txt` or `mods.lock` is unparseable. |
 
 Network failures during `--online` commands are warnings and exit 0. Those
-commands are best-effort.
+commands are best-effort. The one exception is `docs --online --check`: a
+failed Workshop name lookup leaves the description stale, so `--check`
+exits 1.
 
 ## Missing mods
 
@@ -278,7 +280,9 @@ If a required dependency is absent from the cache, `sync` fails with exit
 code 1. It fails before it copies any PBO, so a broken mod is never
 published. The non-mod Steam app ids `107410` and `228800` are ignored.
 This requires a network connection and adds a one-second delay per mod for
-rate limiting.
+rate limiting. A page that does not load is a warning for that mod, and
+the run continues. When no Workshop page loads at all, `sync --resolve-deps`
+exits 2 and resolves no dependencies.
 
 ## Importing a modlist
 
@@ -516,10 +520,10 @@ uksfta investigate --report
 uksfta investigate --report --online
 ```
 
-`--report` reads `.uksfta/identities.json` and nothing else. A PBO that
-the file does not describe, or describes under a different fingerprint
-because the file changed, prints `[unresolved]` with no query. A missing
-file prints
+`--report` reads `.uksfta/identities.json` and fingerprints every PBO in
+`addons/`, so it reads the PBO file contents as well. A PBO that the file
+does not describe, or describes under a different fingerprint because the
+file changed, prints `[unresolved]` with no query. A missing file prints
 
 ```text
 No cached resolutions. Run 'uksfta investigate --online' first.
@@ -541,10 +545,19 @@ reports are now deterministic too.
 
 ## Update checking
 
-Every command checks for a newer release at most once per day and prints
-a notice when one exists. The check is cached in `.uksfta/` so normal
-commands stay fast and work offline. `uksfta version` forces a fresh
-check and prints the install one-liner for your platform.
+Every command checks for a newer release and prints a notice when one
+exists. The result is cached in the user cache directory, as
+`uksfta/last-update-check`. On Linux this is `~/.cache/uksfta/`, and on
+Windows it is `%LOCALAPPDATA%\uksfta\`. A machine with no cache directory
+uses the system temp directory. The command writes nothing to the
+repository.
+
+A successful check stays fresh for 24 hours. A failed check stays fresh
+for 1 hour, so an offline machine retries once an hour and then continues
+at once. The check records no diagnostic when it fails. Set
+`UKSFTA_NO_UPDATE_CHECK` to any value to disable the automatic check.
+`uksfta version` always checks, even with that variable set, and prints
+the install one-liner for your platform.
 
 ## Platforms
 

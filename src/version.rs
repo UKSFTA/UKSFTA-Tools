@@ -1,12 +1,61 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// How long a successful check stays fresh.
+const SUCCESS_TTL: Duration = Duration::from_secs(24 * 3600);
+/// How long a failed check stays fresh.
+const FAILURE_TTL: Duration = Duration::from_secs(3600);
+
+/// Cache window for one recorded check outcome.
+const fn check_ttl(ok: bool) -> Duration {
+    if ok {
+        SUCCESS_TTL
+    } else {
+        FAILURE_TTL
+    }
+}
+
+/// True when a recorded marker is still inside its cache window. A missing
+/// marker is never fresh, so the check runs.
+fn marker_is_fresh(marker: Option<(Duration, bool)>) -> bool {
+    match marker {
+        Some((age, ok)) => age < check_ttl(ok),
+        None => false,
+    }
+}
+
+/// The marker file: a per-user cache path, never the current directory.
+/// A machine with no cache directory falls back to the temp directory.
+fn marker_path() -> PathBuf {
+    dirs::cache_dir()
+        .map(|dir| dir.join("uksfta").join("last-update-check"))
+        .unwrap_or_else(|| std::env::temp_dir().join("uksfta-last-update-check"))
+}
+
+/// Read the marker as `(age, ok)`. Missing or unreadable means "no record".
+fn read_marker(path: &Path) -> Option<(Duration, bool)> {
+    let modified = fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    let age = modified.elapsed().ok()?;
+    let content = fs::read_to_string(path).ok()?;
+    Some((age, content.trim() == "ok"))
+}
+
+/// Record the outcome of a check so the next command can skip the network.
+/// A write failure is not an error: the next command checks again.
+fn record_marker(path: &Path, ok: bool) {
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = fs::write(path, if ok { "ok" } else { "fail" });
+}
 
 /// Query the latest release tag from GitHub (no key required).
 fn latest_release_tag() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(Duration::from_secs(10))
         .build()
-        .expect("Failed to build HTTP client");
+        .ok()?;
 
     let body = client
         .get("https://api.github.com/repos/UKSFTA/UKSFTA-Tools/releases/latest")
@@ -25,42 +74,31 @@ fn latest_release_tag() -> Option<String> {
 }
 
 /// Print an update notice if a newer release exists. When `force` is false
-/// (the automatic check on every command), the GitHub API is queried at
-/// most once per day, using a timestamped marker in .uksfta/ so normal
-/// commands stay fast and offline-friendly.
+/// (the automatic check on every command), the GitHub API is queried only
+/// when the cached outcome is stale: 24 hours after a success, one hour
+/// after a failure. The marker lives in the user cache directory, so
+/// normal commands stay fast, work offline, and write nothing to the
+/// current directory.
 pub fn check_for_updates(force: bool) {
+    let marker = marker_path();
+
+    if !force && marker_is_fresh(read_marker(&marker)) {
+        return;
+    }
+
     let current = env!("CARGO_PKG_VERSION");
-    let marker = Path::new(".uksfta").join("last-update-check");
+    let latest = latest_release_tag();
+    record_marker(&marker, latest.is_some());
 
-    if !force {
-        // Skip the API call if we already checked today
-        if let Ok(mtime) = fs::metadata(&marker).and_then(|m| m.modified()) {
-            if let Ok(elapsed) = mtime.elapsed() {
-                if elapsed < std::time::Duration::from_secs(24 * 3600) {
-                    return;
-                }
-            }
+    if let Some(latest) = latest {
+        if is_outdated(current, latest.trim_start_matches('v')) {
+            println!(
+                "\nA new version is available: v{} (you have v{})",
+                latest.trim_start_matches('v'),
+                current
+            );
+            println!("Run 'uksfta version' for update instructions.");
         }
-    }
-
-    let latest = match latest_release_tag() {
-        Some(t) => t,
-        None => return, // offline or error: stay silent on auto-check
-    };
-
-    // Record the check (only when the API succeeded)
-    if let Some(dir) = marker.parent() {
-        let _ = fs::create_dir_all(dir);
-    }
-    let _ = fs::write(&marker, b"");
-
-    if is_outdated(current, latest.trim_start_matches('v')) {
-        println!(
-            "\nA new version is available: v{} (you have v{})",
-            latest.trim_start_matches('v'),
-            current
-        );
-        println!("Run 'uksfta version' for update instructions.");
     }
 }
 
@@ -69,7 +107,9 @@ pub fn version() {
     let current = env!("CARGO_PKG_VERSION");
     println!("uksfta {}", current);
 
-    let latest = match latest_release_tag() {
+    let latest = latest_release_tag();
+    record_marker(&marker_path(), latest.is_some());
+    let latest = match latest {
         Some(t) => t.trim_start_matches('v').to_string(),
         None => {
             println!("Could not check for updates (offline or no access to GitHub).");
@@ -153,5 +193,37 @@ mod tests {
         assert!(!is_outdated("0.4.0", "0.4.0"));
         assert!(is_outdated("0.3.0", "0.4.0"));
         assert!(is_outdated("0.3.0", "0.4.1"));
+    }
+
+    #[test]
+    fn check_ttl_is_one_day_after_success_and_one_hour_after_failure() {
+        assert_eq!(check_ttl(true), Duration::from_secs(24 * 3600));
+        assert_eq!(check_ttl(false), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn marker_is_fresh_within_the_success_window() {
+        assert!(marker_is_fresh(Some((
+            Duration::from_secs(23 * 3600),
+            true
+        ))));
+        assert!(!marker_is_fresh(Some((
+            Duration::from_secs(25 * 3600),
+            true
+        ))));
+    }
+
+    #[test]
+    fn marker_is_fresh_within_the_failure_window() {
+        assert!(marker_is_fresh(Some((Duration::from_secs(1800), false))));
+        assert!(!marker_is_fresh(Some((
+            Duration::from_secs(2 * 3600),
+            false
+        ))));
+    }
+
+    #[test]
+    fn marker_is_fresh_is_false_when_the_marker_is_missing() {
+        assert!(!marker_is_fresh(None));
     }
 }

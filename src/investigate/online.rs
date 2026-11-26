@@ -9,7 +9,6 @@
 //! prints the same lines offline from the same decisions.
 
 use std::collections::{BTreeSet, HashSet};
-use std::fs;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -33,7 +32,7 @@ use crate::origin::{
 };
 use crate::pbo::{get_mod_metadata, pbo_fingerprint, pbo_prefix};
 use crate::steam::find_all_workshop_caches;
-use crate::util::{paint, stdout_is_tty, workshop_url, C_GREEN, C_RED};
+use crate::util::{find_pbos, paint, stdout_is_tty, workshop_url, C_GREEN, C_RED};
 
 /// Trace the Workshop origin of untracked PBOs in addons/, then, when
 /// `online` is set, resolve each PBO's identity and print one line per PBO.
@@ -81,19 +80,16 @@ pub fn investigate(all: bool, online: bool, report: bool) -> Result<(), UksftaEr
         })
         .collect();
 
-    let mut results: Vec<(String, Option<ResolvedOrigin>)> = Vec::new();
+    let mut results: Vec<(String, PathBuf, Option<ResolvedOrigin>)> = Vec::new();
 
-    if let Ok(entries) = fs::read_dir(addons_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().map(|e| e == "pbo").unwrap_or(false) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !all && tracked.contains(&name) {
-                    continue;
-                }
-                results.push((name, None));
-            }
+    for pbo in find_pbos(addons_dir) {
+        let Some(name) = pbo.file_name().map(|n| n.to_string_lossy().to_string()) else {
+            continue;
+        };
+        if !all && tracked.contains(&name) {
+            continue;
         }
+        results.push((name, pbo, None));
     }
 
     if results.is_empty() {
@@ -105,14 +101,13 @@ pub fn investigate(all: bool, online: bool, report: bool) -> Result<(), UksftaEr
     let index = build_pbo_index(&mod_dirs);
 
     // Match each untracked PBO against the index and arbitrate the origin
-    for (pbo_name, origin) in &mut results {
-        let pbo_path = addons_dir.join(pbo_name.as_str());
-        let target_prefix = pbo_prefix(&pbo_path);
+    for (pbo_name, pbo_path, origin) in &mut results {
+        let target_prefix = pbo_prefix(pbo_path);
         let candidates = index
             .get(pbo_name.as_str())
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
-        *origin = resolve_pbo_from_index(&pbo_path, candidates, target_prefix.as_deref());
+        *origin = resolve_pbo_from_index(pbo_path, candidates, target_prefix.as_deref());
     }
 
     // Report
@@ -120,7 +115,7 @@ pub fn investigate(all: bool, online: bool, report: bool) -> Result<(), UksftaEr
     println!("Untracked PBO Investigation:");
     println!("  {} PBO(s) examined", results.len());
     let mut unknown_count = 0;
-    for (pbo, origin) in &results {
+    for (pbo, _, origin) in &results {
         let Some(origin) = origin else {
             unknown_count += 1;
             println!("  {} {}", paint(use_colour, C_RED, "[UNKNOWN]"), pbo);
@@ -170,9 +165,12 @@ pub fn investigate(all: bool, online: bool, report: bool) -> Result<(), UksftaEr
         return Ok(());
     }
 
-    let pbo_names: Vec<String> = results.iter().map(|(name, _)| name.clone()).collect();
-    check_workshop_visibility(results);
-    resolve_identities(&pbo_names, addons_dir, &mod_dirs, use_colour);
+    let examined: Vec<(String, PathBuf)> = results
+        .iter()
+        .map(|(name, path, _)| (name.clone(), path.clone()))
+        .collect();
+    check_workshop_visibility(&results);
+    resolve_identities(&examined, addons_dir, &mod_dirs, use_colour);
     Ok(())
 }
 
@@ -212,15 +210,12 @@ fn investigate_report() -> Result<(), UksftaError> {
 /// Every PBO in addons/ with its current fingerprint, in file-name order.
 fn examined_fingerprints(addons_dir: &Path) -> Vec<(String, String)> {
     let mut examined: Vec<(String, String)> = Vec::new();
-    if let Ok(entries) = fs::read_dir(addons_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().map(|e| e == "pbo").unwrap_or(false) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let fingerprint = pbo_fingerprint(&path).unwrap_or_default();
-                examined.push((name, fingerprint));
-            }
-        }
+    for pbo in find_pbos(addons_dir) {
+        let Some(name) = pbo.file_name().map(|n| n.to_string_lossy().to_string()) else {
+            continue;
+        };
+        let fingerprint = pbo_fingerprint(&pbo).unwrap_or_default();
+        examined.push((name, fingerprint));
     }
     examined.sort();
     examined
@@ -228,7 +223,7 @@ fn examined_fingerprints(addons_dir: &Path) -> Vec<(String, String)> {
 
 /// Print the online phase: identity resolution and summary.
 fn resolve_identities(
-    pbo_names: &[String],
+    pbos: &[(String, PathBuf)],
     addons_dir: &Path,
     mod_dirs: &[ModDir],
     use_colour: bool,
@@ -241,7 +236,7 @@ fn resolve_identities(
     println!(
         "\nResolving {} PBO(s) online. The evidence read takes about a minute and \
          Workshop browse requests are paced at one every 4 s, so a run takes minutes.",
-        pbo_names.len()
+        pbos.len()
     );
 
     // Rarity is learned from every installed Workshop PBO, not from this
@@ -257,9 +252,9 @@ fn resolve_identities(
     }
     let corpus = build_corpus_stats_many(&corpus_dirs.into_iter().collect::<Vec<_>>());
     let pool = build_evidence_pool(addons_dir);
-    let evidence: Vec<_> = pbo_names
+    let evidence: Vec<_> = pbos
         .iter()
-        .map(|name| extract_identity(&addons_dir.join(name)))
+        .map(|(_, path)| extract_identity(path))
         .collect();
 
     let store = load_store(&store_path());
