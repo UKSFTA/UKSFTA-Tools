@@ -3,49 +3,53 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::lock::LockFile;
-use crate::modlist::ModEntry;
-
-/// One regular file reported by the remote listing.
+/// One file in the remote pack folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteFile {
     pub name: String,
     pub size: u64,
 }
 
-/// One mod folder on the server.
+/// The pack folder on the server.
 #[derive(Debug, Clone, Default)]
-pub struct RemoteMod {
-    /// False when `<root>/@<id>` is absent.
+pub struct RemotePack {
     pub exists: bool,
-    /// The directory that holds the PBOs: `<root>/@<id>/addons`, or the mod
-    /// folder itself when a SteamCMD copy keeps the flat shape.
-    pub pbo_dir: String,
-    pub files: Vec<RemoteFile>,
-    pub symlinks: Vec<String>,
+    pub addons: Vec<RemoteFile>,
+    pub keys: Vec<RemoteFile>,
+    /// Names in `addons/` that are symbolic links.
+    pub addons_symlinks: Vec<String>,
+    /// Names in `keys/` that are symbolic links.
+    pub keys_symlinks: Vec<String>,
     /// The `publishedid` in the remote `meta.cpp`.
     pub meta_id: Option<String>,
+    /// Size of the remote `mod.cpp`, when present.
+    pub mod_size: Option<u64>,
 }
 
-/// A cached `.bisign` file and the PBO version it was made for.
+/// One file in the local build output.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Signature {
+pub struct LocalFile {
+    pub name: String,
     pub path: PathBuf,
-    /// Size of the signature file.
     pub size: u64,
-    /// Size of the cached PBO it belongs to. None when the cache holds no
-    /// copy of that PBO, so the version cannot be confirmed.
-    pub pbo_size: Option<u64>,
 }
 
-/// A planned PBO upload that has no signature for the local PBO version.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnsignedUpload {
+/// The local pack: the build output plus the `meta.cpp` that names it.
+#[derive(Debug, Clone, Default)]
+pub struct LocalPack {
     pub id: String,
     pub name: String,
+    pub dir: PathBuf,
+    pub pbos: Vec<LocalFile>,
+    pub signatures: Vec<LocalFile>,
+    pub keys: Vec<LocalFile>,
+    pub meta: Option<LocalFile>,
+    pub mod_cpp: Option<LocalFile>,
+    /// The `meta.cpp` that named the pack, used when the build has none.
+    pub meta_source: PathBuf,
 }
 
-/// A per-mod outcome. `rank` orders the statuses so the worst one is shown.
+/// The state of the pack. `rank` orders the statuses so the worst is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Ok,
@@ -53,26 +57,23 @@ pub enum Status {
     Unsigned,
     Stale,
     Missing,
-    IdMismatch,
-    NoDirectory,
-    NoLock,
+    MetaMismatch,
+    NoPack,
 }
 
 impl Status {
-    pub(crate) const fn rank(self) -> u8 {
+    const fn rank(self) -> u8 {
         match self {
             Status::Ok => 0,
             Status::Extra => 1,
             Status::Unsigned => 2,
             Status::Stale => 3,
             Status::Missing => 4,
-            Status::IdMismatch => 5,
-            Status::NoDirectory => 6,
-            Status::NoLock => 7,
+            Status::MetaMismatch => 5,
+            Status::NoPack => 6,
         }
     }
 
-    /// A failing status. `Extra` and `Unsigned` are reported but pass.
     pub const fn failed(self) -> bool {
         self.rank() >= Status::Stale.rank()
     }
@@ -84,9 +85,8 @@ impl Status {
             Status::Unsigned => "unsigned",
             Status::Stale => "stale",
             Status::Missing => "missing",
-            Status::IdMismatch => "id-mismatch",
-            Status::NoDirectory => "no-directory",
-            Status::NoLock => "no-lock",
+            Status::MetaMismatch => "meta-mismatch",
+            Status::NoPack => "no-pack",
         }
     }
 }
@@ -94,11 +94,9 @@ impl Status {
 /// One remote change the plan proposes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// `local: None` writes a minimal `meta.cpp` instead of copying a file.
     Upload {
-        id: String,
         name: String,
-        local: Option<PathBuf>,
+        local: PathBuf,
         remote: String,
     },
     Remove {
@@ -106,71 +104,136 @@ pub enum Action {
     },
 }
 
-/// One problem found on the server.
+/// One problem or warning-level fact about the pack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Finding {
+    NoPack,
+    /// `remote` is the id in the remote `meta.cpp`, or None when absent.
+    MetaMismatch {
+        remote: Option<String>,
+    },
     Missing {
-        id: String,
         name: String,
     },
     StaleSize {
-        id: String,
         name: String,
         local: u64,
         remote: u64,
     },
     StaleHash {
-        id: String,
         name: String,
-    },
-    /// `remote` is the id in the remote `meta.cpp`, or None when absent.
-    IdMismatch {
-        id: String,
-        remote: Option<String>,
     },
     Extra {
-        id: String,
         name: String,
     },
-    NoSignature {
-        id: String,
+    KeyMissing {
         name: String,
     },
-    NoDirectory {
-        id: String,
+    KeyStale {
+        name: String,
+        local: u64,
+        remote: u64,
     },
-    NoLock {
-        id: String,
+    KeyExtra {
+        name: String,
+    },
+    ModCppMissing,
+    ModCppStale {
+        local: u64,
+        remote: u64,
     },
 }
 
-/// The state of one mod.
-#[derive(Debug, Clone)]
-pub struct ModReport {
-    pub id: String,
-    pub name: String,
-    pub status: Status,
-    pub pbos: usize,
-    pub findings: Vec<Finding>,
+impl Finding {
+    /// True when the finding fails the command. Extras are reported only.
+    pub const fn failed(&self) -> bool {
+        match self {
+            Finding::Extra { .. } | Finding::KeyExtra { .. } => false,
+            Finding::NoPack
+            | Finding::MetaMismatch { .. }
+            | Finding::Missing { .. }
+            | Finding::StaleSize { .. }
+            | Finding::StaleHash { .. }
+            | Finding::KeyMissing { .. }
+            | Finding::KeyStale { .. }
+            | Finding::ModCppMissing
+            | Finding::ModCppStale { .. } => true,
+        }
+    }
+
+    const fn status(&self) -> Status {
+        match self {
+            Finding::NoPack => Status::NoPack,
+            Finding::MetaMismatch { .. } => Status::MetaMismatch,
+            Finding::Missing { .. } | Finding::KeyMissing { .. } | Finding::ModCppMissing => {
+                Status::Missing
+            }
+            Finding::StaleSize { .. }
+            | Finding::StaleHash { .. }
+            | Finding::KeyStale { .. }
+            | Finding::ModCppStale { .. } => Status::Stale,
+            Finding::Extra { .. } | Finding::KeyExtra { .. } => Status::Extra,
+        }
+    }
 }
 
 /// The whole comparison.
 #[derive(Debug, Clone)]
 pub struct Plan {
-    pub mods: Vec<ModReport>,
+    pub id: String,
+    pub local_dir: PathBuf,
+    pub remote_dir: String,
+    pub remote_exists: bool,
+    pub local_pbos: usize,
+    pub local_signatures: usize,
+    pub local_keys: usize,
+    pub remote_pbos: usize,
+    pub remote_keys: usize,
+    pub findings: Vec<Finding>,
     pub actions: Vec<Action>,
     pub warnings: Vec<String>,
-    pub unsigned_uploads: Vec<UnsignedUpload>,
+    /// Local PBOs that have no local signature.
+    pub unsigned: usize,
     pub require_signatures: bool,
 }
 
 impl Plan {
-    /// True when a mod fails, or when `--require-signatures` is set and a
-    /// PBO upload has no signature for the local version.
+    pub fn status(&self) -> Status {
+        let mut status = Status::Ok;
+        for finding in &self.findings {
+            let found = finding.status();
+            if found.rank() > status.rank() {
+                status = found;
+            }
+        }
+        if self.unsigned > 0 && Status::Unsigned.rank() > status.rank() {
+            status = Status::Unsigned;
+        }
+        status
+    }
+
+    /// True when a finding fails, or when `--require-signatures` is set and
+    /// a PBO has no signature.
     pub fn failed(&self) -> bool {
-        self.mods.iter().any(|m| m.status.failed())
-            || (self.require_signatures
-                && (self.mods.iter().any(|m| m.unsigned()) || !self.unsigned_uploads.is_empty()))
+        self.status().failed() || (self.require_signatures && self.unsigned > 0)
+    }
+
+    pub fn problems(&self) -> usize {
+        self.findings.iter().filter(|f| f.failed()).count()
+    }
+
+    pub fn local_only(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|f| matches!(f, Finding::Missing { .. }))
+            .count()
+    }
+
+    pub fn remote_only(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|f| matches!(f, Finding::Extra { .. }))
+            .count()
     }
 
     pub fn uploads(&self) -> impl Iterator<Item = &Action> {
@@ -184,38 +247,32 @@ impl Plan {
             .iter()
             .filter(|a| matches!(a, Action::Remove { .. }))
     }
-
-    /// Mods that fail verification, plus unsigned mods when the caller
-    /// requires signatures.
-    pub fn problems(&self) -> usize {
-        self.mods
-            .iter()
-            .filter(|m| m.status.failed() || (self.require_signatures && m.unsigned()))
-            .count()
-    }
-}
-
-impl ModReport {
-    fn unsigned(&self) -> bool {
-        self.findings
-            .iter()
-            .any(|f| matches!(f, Finding::NoSignature { .. }))
-    }
 }
 
 /// Everything the comparison reads.
 pub struct PlanInput<'a> {
-    pub root: &'a str,
-    pub mods: &'a [ModEntry],
-    pub lock: &'a LockFile,
-    pub remote: &'a HashMap<String, RemoteMod>,
-    /// Lock path (for example `addons/CBA.pbo`) to local size.
-    pub local_sizes: &'a HashMap<String, u64>,
-    /// `<id>/<pbo>` to the cached `.bisign` files for that PBO.
-    pub signatures: &'a HashMap<String, Vec<Signature>>,
-    /// Workshop id to a `meta.cpp` in the local cache, copied verbatim.
-    pub meta_sources: &'a HashMap<String, PathBuf>,
-    /// `<id>/<pbo>` to true when the deep hashes match.
+    pub local: &'a LocalPack,
+    /// `<root>/@<id>`.
+    pub remote_dir: &'a str,
+    pub remote: &'a RemotePack,
+    /// The file to upload when the remote `meta.cpp` is wrong.
+    pub meta_upload: Option<&'a std::path::Path>,
+    /// Lowercase PBO name to true when the deep hashes match.
     pub deep: &'a HashMap<String, bool>,
     pub require_signatures: bool,
+}
+
+/// True for a PBO file name.
+pub fn is_pbo(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".pbo")
+}
+
+/// True for a signature file name.
+pub fn is_bisign(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".bisign")
+}
+
+/// True for a key file name.
+pub fn is_bikey(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".bikey")
 }

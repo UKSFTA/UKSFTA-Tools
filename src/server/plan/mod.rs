@@ -1,13 +1,16 @@
-//! Compare the local pack with the remote workshop tree. Pure: every
+//! Compare the local build with the remote pack folder. Pure: every
 //! filesystem fact arrives through [`PlanInput`].
 
 mod compare;
 mod model;
 
 pub use compare::build_plan;
-pub use model::{Action, Finding, Plan, PlanInput, RemoteFile, RemoteMod, Signature, Status};
+pub use model::{
+    is_bikey, is_bisign, is_pbo, Action, Finding, LocalFile, LocalPack, Plan, PlanInput,
+    RemoteFile, RemotePack,
+};
 
-/// The remote folder for one mod.
+/// The remote folder for one pack id: `<root>/@<id>`.
 pub fn mod_dir(root: &str, id: &str) -> String {
     join_remote(root, &format!("@{id}"))
 }

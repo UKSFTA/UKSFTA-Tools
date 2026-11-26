@@ -1,54 +1,96 @@
-//! Print the verification report and the change plan, and build the upload
-//! batch.
+//! Print the pack report and the change plan, and build the upload batch.
 
-use std::fs;
-
-use super::plan::{Action, Finding, Plan, Status};
-use super::sftp::{quote, ScratchDir};
+use super::plan::{Action, Finding, Plan};
+use super::sftp::quote;
 use crate::error::UksftaError;
 use crate::util::human_size;
 
 pub fn print_report(plan: &Plan) {
-    for report in &plan.mods {
+    println!(
+        "local {}: {} PBO(s), {} signature(s), {} key(s)",
+        plan.local_dir.display(),
+        plan.local_pbos,
+        plan.local_signatures,
+        plan.local_keys
+    );
+    if plan.remote_exists {
         println!(
-            "mod {} {}: {} ({} PBO(s))",
-            report.id,
-            report.name,
-            report.status.as_str(),
-            report.pbos
+            "remote {}: {} PBO(s), {} key(s)",
+            plan.remote_dir, plan.remote_pbos, plan.remote_keys
         );
-        for finding in &report.findings {
-            println!("  {}", describe(finding));
-        }
+    } else {
+        println!("remote {}: no pack folder", plan.remote_dir);
+    }
+    println!("status: {}", plan.status().as_str());
+    for finding in &plan.findings {
+        println!("  {}", describe(finding, &plan.id));
+    }
+    if plan.unsigned > 0 {
+        println!(
+            "unsigned: {} of {} PBO(s) have no signature (advisory)",
+            plan.unsigned, plan.local_pbos
+        );
     }
     for warning in &plan.warnings {
         eprintln!("Warning: {warning}");
     }
     println!(
-        "{} mod(s) checked, {} with problems",
-        plan.mods.len(),
-        plan.problems()
+        "PBOs: {} local, {} local-only, {} remote-only",
+        plan.local_pbos,
+        plan.local_only(),
+        plan.remote_only()
     );
+}
+
+fn describe(finding: &Finding, pack_id: &str) -> String {
+    match finding {
+        Finding::NoPack => "no pack folder on the server".to_string(),
+        Finding::MetaMismatch {
+            remote: Some(remote),
+        } => format!("meta.cpp publishedid is {remote}, expected {pack_id}"),
+        Finding::MetaMismatch { remote: None } => {
+            "meta.cpp is missing or has no publishedid".to_string()
+        }
+        Finding::Missing { name } => format!("missing {name}"),
+        Finding::StaleSize {
+            name,
+            local,
+            remote,
+            ..
+        } => format!(
+            "stale {name}: local {}, remote {}",
+            human_size(*local),
+            human_size(*remote)
+        ),
+        Finding::StaleHash { name } => format!("stale {name}: contents differ"),
+        Finding::Extra { name } => format!("extra {name}"),
+        Finding::KeyMissing { name } => format!("missing key {name}"),
+        Finding::KeyStale {
+            name,
+            local,
+            remote,
+            ..
+        } => format!(
+            "stale key {name}: local {}, remote {}",
+            human_size(*local),
+            human_size(*remote)
+        ),
+        Finding::KeyExtra { name } => format!("extra key {name}"),
+        Finding::ModCppMissing => "mod.cpp is missing".to_string(),
+        Finding::ModCppStale { local, remote } => format!(
+            "stale mod.cpp: local {}, remote {}",
+            human_size(*local),
+            human_size(*remote)
+        ),
+    }
 }
 
 pub fn print_plan(plan: &Plan) {
     let mut any = false;
     for action in &plan.actions {
         match action {
-            Action::Upload {
-                local: Some(path),
-                remote,
-                ..
-            } => {
-                println!("plan: put {remote} from {}", path.display());
-                any = true;
-            }
-            Action::Upload {
-                local: None,
-                remote,
-                ..
-            } => {
-                println!("plan: put {remote} (write meta.cpp)");
+            Action::Upload { local, remote, .. } => {
+                println!("plan: put {remote} from {}", local.display());
                 any = true;
             }
             Action::Remove { remote } => {
@@ -62,119 +104,34 @@ pub fn print_plan(plan: &Plan) {
     }
 }
 
-fn describe(finding: &Finding) -> String {
-    match finding {
-        Finding::Missing { name, .. } => format!("missing {name}"),
-        Finding::StaleSize {
-            name,
-            local,
-            remote,
-            ..
-        } => format!(
-            "stale {name}: local {}, remote {}",
-            human_size(*local),
-            human_size(*remote)
-        ),
-        Finding::StaleHash { name, .. } => format!("stale {name}: contents differ"),
-        Finding::IdMismatch {
-            id,
-            remote: Some(remote),
-        } => format!("meta.cpp publishedid is {remote}, expected {id}"),
-        Finding::IdMismatch { id, remote: None } => {
-            format!("meta.cpp is missing or has no publishedid, expected {id}")
-        }
-        Finding::Extra { name, .. } => format!("extra {name}"),
-        Finding::NoSignature { name, .. } => format!("[NO SIGNATURE] {name}"),
-        Finding::NoDirectory { id } => format!("no mod folder @{id} on the server"),
-        Finding::NoLock { id } => format!("no mods.lock entry for {id}"),
-    }
-}
-
-/// The upload phase: create a missing mod directory, then put every file.
-pub fn upload_batch(plan: &Plan, scratch: &ScratchDir) -> Result<Vec<String>, UksftaError> {
+/// The upload phase. Only `addons/` and `keys/` are created.
+pub fn upload_batch(plan: &Plan) -> Result<Vec<String>, UksftaError> {
+    let addons = format!("{}/addons", plan.remote_dir);
+    let keys = format!("{}/keys", plan.remote_dir);
     let mut dirs: Vec<String> = Vec::new();
     let mut puts = Vec::new();
-    let missing: Vec<&str> = plan
-        .mods
-        .iter()
-        .filter(|report| report.status == Status::NoDirectory)
-        .map(|report| report.id.as_str())
-        .collect();
 
     for action in plan.uploads() {
-        if let Action::Upload {
-            id, local, remote, ..
-        } = action
-        {
-            if missing.contains(&id.as_str()) {
-                if let Some((dir, _)) = remote.rsplit_once('/') {
-                    if !dirs.iter().any(|known| known == dir) {
-                        dirs.push(dir.to_string());
-                    }
-                }
+        if let Action::Upload { local, remote, .. } = action {
+            if remote.starts_with(&format!("{addons}/")) && !dirs.contains(&addons) {
+                dirs.push(addons.clone());
             }
-            let source = match local {
-                Some(path) => path.clone(),
-                None => {
-                    let path = scratch.join(&format!("{id}-meta.cpp"));
-                    let name = plan
-                        .mods
-                        .iter()
-                        .find(|report| &report.id == id)
-                        .map_or(id.as_str(), |report| report.name.as_str());
-                    fs::write(&path, generated_meta_cpp(id, name)).map_err(UksftaError::Io)?;
-                    path
-                }
-            };
+            if remote.starts_with(&format!("{keys}/")) && !dirs.contains(&keys) {
+                dirs.push(keys.clone());
+            }
             puts.push(format!(
                 "put {} {}",
-                quote(&source.display().to_string())?,
+                quote(&local.display().to_string())?,
                 quote(remote)?
             ));
         }
     }
 
-    dirs.sort_by_key(|dir| dir.matches('/').count());
+    dirs.sort();
     let mut batch = Vec::new();
-    for dir in dirs {
-        batch.push(format!("-mkdir {}", quote(&dir)?));
+    for dir in &dirs {
+        batch.push(format!("-mkdir {}", quote(dir)?));
     }
     batch.extend(puts);
     Ok(batch)
-}
-
-/// The minimal `meta.cpp`, in the format the server writes. A cache copy is
-/// preferred, so this is the fallback only.
-fn generated_meta_cpp(id: &str, name: &str) -> String {
-    format!(
-        "protocol = 1;\npublishedid = {id};\nname = \"{}\";\n",
-        cpp_string(name)
-    )
-}
-
-fn cpp_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for c in value.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            c if c.is_control() => out.push(' '),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn generated_meta_cpp_uses_the_server_format() {
-        let text = generated_meta_cpp("450814997", "CBA \"A3\"");
-        assert!(text.contains("protocol = 1;"));
-        assert!(text.contains("publishedid = 450814997;"));
-        assert!(text.contains("name = \"CBA \\\"A3\\\"\";"));
-        assert!(!text.contains("protocolVersion"));
-    }
 }

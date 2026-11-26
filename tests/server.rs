@@ -1,6 +1,5 @@
 //! End-to-end tests for `uksfta server`. A stub `sftp` script answers the
-//! batch phases from canned fixtures, so no test uses a network or a real
-//! server.
+//! phases from canned fixtures, so no test uses a network or a real server.
 #![cfg(unix)]
 
 use std::fs;
@@ -12,78 +11,103 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 const ROOT: &str = "/srv/arma";
+const ID: &str = "3662499431";
+const PBO: &str = "uksfta_main.pbo";
+const SIG: &str = "uksfta_main.pbo.uksfta_1.0.1.bisign";
+const KEY: &str = "uksfta_1.0.1.bikey";
 
-/// A mod with a PBO present and signed, and a mod whose PBO is missing.
-const LISTING: &str = "\
+/// A pack that matches the server.
+const LISTING_MATCH: &str = "\
 sftp> cd \"/srv/arma\"
+sftp> -cd \"/srv/arma/@3662499431\"
 sftp> pwd
-Remote working directory: /srv/arma
+Remote working directory: /srv/arma/@3662499431
 sftp> ls -l
-drwxrwxr-x    3 1000     1000         4096 Nov 20 10:00 @450814997
-drwxrwxr-x    3 1000     1000         4096 Nov 20 10:00 @887302721
-drwxrwxr-x    2 1000     1000         4096 Nov 20 10:00 addons
--rw-rw-r--    1 1000     1000         1234 Nov 20 10:00 server.cfg
-sftp> -cd \"/srv/arma/@450814997\"
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 addons
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 keys
+-rw-r--r--    1 1000     1000          120 Nov 20 10:00 meta.cpp
+-rw-r--r--    1 1000     1000           11 Nov 20 10:00 mod.cpp
+sftp> -cd \"/srv/arma/@3662499431/addons\"
 sftp> pwd
-Remote working directory: /srv/arma/@450814997
+Remote working directory: /srv/arma/@3662499431/addons
 sftp> ls -l
-drwxrwxr-x    2 1000     1000         4096 Nov 20 10:00 addons
--rw-rw-r--    1 1000     1000          120 Nov 20 10:00 meta.cpp
-sftp> -cd \"/srv/arma/@450814997/addons\"
+-rw-r--r--    1 1000     1000            5 Nov 20 10:00 uksfta_main.pbo
+-rw-r--r--    1 1000     1000            9 Nov 20 10:00 uksfta_main.pbo.uksfta_1.0.1.bisign
+sftp> -cd \"/srv/arma/@3662499431/keys\"
 sftp> pwd
-Remote working directory: /srv/arma/@450814997/addons
+Remote working directory: /srv/arma/@3662499431/keys
 sftp> ls -l
--rw-rw-r--    1 1000     1000            5 Nov 20 10:00 CBA.pbo
--rw-rw-r--    1 1000     1000           10 Nov 20 10:00 CBA.pbo.cba_3.20.0.bisign
-sftp> -cd \"/srv/arma/@887302721\"
-sftp> pwd
-Remote working directory: /srv/arma/@887302721
-sftp> ls -l
-drwxrwxr-x    2 1000     1000         4096 Nov 20 10:00 addons
--rw-rw-r--    1 1000     1000          120 Nov 20 10:00 meta.cpp
-sftp> -cd \"/srv/arma/@887302721/addons\"
-sftp> pwd
-Remote working directory: /srv/arma/@887302721/addons
-sftp> ls -l
+-rw-r--r--    1 1000     1000            7 Nov 20 10:00 uksfta_1.0.1.bikey
 ";
 
-/// One mod whose PBO is present but has no companion signature.
+/// The PBO is missing on the server.
+const LISTING_MISSING: &str = "\
+sftp> cd \"/srv/arma\"
+sftp> -cd \"/srv/arma/@3662499431\"
+sftp> pwd
+Remote working directory: /srv/arma/@3662499431
+sftp> ls -l
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 addons
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 keys
+-rw-r--r--    1 1000     1000          120 Nov 20 10:00 meta.cpp
+-rw-r--r--    1 1000     1000           11 Nov 20 10:00 mod.cpp
+sftp> -cd \"/srv/arma/@3662499431/addons\"
+sftp> pwd
+Remote working directory: /srv/arma/@3662499431/addons
+sftp> ls -l
+-rw-r--r--    1 1000     1000            9 Nov 20 10:00 uksfta_main.pbo.uksfta_1.0.1.bisign
+sftp> -cd \"/srv/arma/@3662499431/keys\"
+sftp> pwd
+Remote working directory: /srv/arma/@3662499431/keys
+sftp> ls -l
+-rw-r--r--    1 1000     1000            7 Nov 20 10:00 uksfta_1.0.1.bikey
+";
+
+/// The server name differs only by case.
+const LISTING_CASE: &str = "\
+sftp> cd \"/srv/arma\"
+sftp> -cd \"/srv/arma/@3662499431\"
+sftp> pwd
+Remote working directory: /srv/arma/@3662499431
+sftp> ls -l
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 addons
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 keys
+-rw-r--r--    1 1000     1000          120 Nov 20 10:00 meta.cpp
+-rw-r--r--    1 1000     1000           11 Nov 20 10:00 mod.cpp
+sftp> -cd \"/srv/arma/@3662499431/addons\"
+sftp> pwd
+Remote working directory: /srv/arma/@3662499431/addons
+sftp> ls -l
+-rw-r--r--    1 1000     1000            5 Nov 20 10:00 UKSFTA_MAIN.PBO
+-rw-r--r--    1 1000     1000            9 Nov 20 10:00 uksfta_main.pbo.uksfta_1.0.1.bisign
+sftp> -cd \"/srv/arma/@3662499431/keys\"
+sftp> pwd
+Remote working directory: /srv/arma/@3662499431/keys
+sftp> ls -l
+-rw-r--r--    1 1000     1000            7 Nov 20 10:00 uksfta_1.0.1.bikey
+";
+
+/// The pack has no signature on the server.
 const LISTING_UNSIGNED: &str = "\
 sftp> cd \"/srv/arma\"
+sftp> -cd \"/srv/arma/@3662499431\"
 sftp> pwd
-Remote working directory: /srv/arma
+Remote working directory: /srv/arma/@3662499431
 sftp> ls -l
-drwxrwxr-x    3 1000     1000         4096 Nov 20 10:00 @450814997
-sftp> -cd \"/srv/arma/@450814997\"
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 addons
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 keys
+-rw-r--r--    1 1000     1000          120 Nov 20 10:00 meta.cpp
+-rw-r--r--    1 1000     1000           11 Nov 20 10:00 mod.cpp
+sftp> -cd \"/srv/arma/@3662499431/addons\"
 sftp> pwd
-Remote working directory: /srv/arma/@450814997
+Remote working directory: /srv/arma/@3662499431/addons
 sftp> ls -l
-drwxrwxr-x    2 1000     1000         4096 Nov 20 10:00 addons
--rw-rw-r--    1 1000     1000          120 Nov 20 10:00 meta.cpp
-sftp> -cd \"/srv/arma/@450814997/addons\"
+-rw-r--r--    1 1000     1000            5 Nov 20 10:00 uksfta_main.pbo
+sftp> -cd \"/srv/arma/@3662499431/keys\"
 sftp> pwd
-Remote working directory: /srv/arma/@450814997/addons
+Remote working directory: /srv/arma/@3662499431/keys
 sftp> ls -l
--rw-rw-r--    1 1000     1000            5 Nov 20 10:00 CBA.pbo
-";
-
-/// One mod whose `addons/` directory is a symlink.
-const LISTING_SYMLINK: &str = "\
-sftp> cd \"/srv/arma\"
-sftp> pwd
-Remote working directory: /srv/arma
-sftp> ls -l
-drwxrwxr-x    3 1000     1000         4096 Nov 20 10:00 @450814997
-sftp> -cd \"/srv/arma/@450814997\"
-sftp> pwd
-Remote working directory: /srv/arma/@450814997
-sftp> ls -l
-lrwxrwxrwx    1 1000     1000            9 Nov 20 10:00 addons -> /srv/other
--rw-rw-r--    1 1000     1000          120 Nov 20 10:00 meta.cpp
-sftp> -cd \"/srv/arma/@450814997/addons\"
-sftp> pwd
-Remote working directory: /srv/other
-sftp> ls -l
+-rw-r--r--    1 1000     1000            7 Nov 20 10:00 uksfta_1.0.1.bikey
 ";
 
 const STUB: &str = r#"#!/bin/sh
@@ -112,36 +136,36 @@ fi
 exit 0
 "#;
 
-/// A temporary mod repository plus the stub's fixtures.
+/// A temporary pack repo plus the stub's fixtures. No `mod_sources.txt` or
+/// `mods.lock` is written, so any read of them would fail the test.
 struct Fixture {
     dir: TempDir,
     log: PathBuf,
+    stdin: PathBuf,
     stub: PathBuf,
     listing: PathBuf,
     remote: PathBuf,
-    cache: PathBuf,
-    stdin: PathBuf,
 }
 
 impl Fixture {
-    fn new(mods: &[(&str, &str, &str)], listing: &str) -> Self {
+    fn new(listing: &str) -> Self {
         let dir = TempDir::new().expect("temp dir");
         let base = dir.path();
 
-        let mut sources = String::from("version = 2\n");
-        let mut lock = String::from("{\"version\":1,\"mods\":{");
-        for (index, (id, name, pbo)) in mods.iter().enumerate() {
-            sources.push_str(&format!("\n[[mods]]\nid = \"{id}\"\nname = \"{name}\"\n"));
-            if index > 0 {
-                lock.push(',');
-            }
-            lock.push_str(&format!(
-                "\"{id}\":{{\"name\":\"{name}\",\"files\":[\"addons/{pbo}\"]}}"
-            ));
-            fs::create_dir_all(base.join("addons")).expect("create addons");
-            fs::write(base.join("addons").join(pbo), b"local").expect("write a local PBO");
-        }
-        lock.push_str("}}");
+        fs::write(
+            base.join("meta.cpp"),
+            format!("protocol = 1;\npublishedid = {ID};\nname = \"UKSF Taskforce Alpha Maps\";\n"),
+        )
+        .expect("write meta.cpp");
+
+        let release = base.join(".hemttout/release");
+        fs::create_dir_all(release.join("addons")).expect("create addons");
+        fs::create_dir_all(release.join("keys")).expect("create keys");
+        fs::write(release.join("addons").join(PBO), b"local").expect("write the PBO");
+        fs::write(release.join("addons").join(SIG), b"bisign123").expect("write the signature");
+        fs::write(release.join("keys").join(KEY), b"bikey12").expect("write the key");
+        fs::write(release.join("meta.cpp"), b"meta").expect("write the build meta.cpp");
+        fs::write(release.join("mod.cpp"), b"mod-cpp-111").expect("write mod.cpp");
 
         fs::create_dir_all(base.join(".uksfta")).expect("create the state dir");
         fs::write(
@@ -149,44 +173,23 @@ impl Fixture {
             format!("destination = \"tester@example.invalid\"\nport = 2022\nroot = \"{ROOT}\"\n"),
         )
         .expect("write the config");
-        fs::write(base.join("mod_sources.txt"), sources).expect("write mod_sources.txt");
-        fs::write(base.join("mods.lock"), lock).expect("write mods.lock");
 
         let remote = base.join("remote");
-        let cache = base.join("cache");
-        for (id, _, pbo) in mods {
-            fs::create_dir_all(remote.join(format!("@{id}"))).expect("create the remote fixture");
-            fs::write(
-                remote.join(format!("@{id}/meta.cpp")),
-                format!("protocol = 1;\npublishedid = {id};\nname = \"Fixture\";\n"),
-            )
-            .expect("write the remote meta.cpp");
-            fs::create_dir_all(cache.join(format!("{id}/addons"))).expect("create the cache");
-            fs::write(
-                cache.join(format!("{id}/meta.cpp")),
-                format!("protocol = 1;\npublishedid = {id};\nname = \"Fixture\";\n"),
-            )
-            .expect("write the cached meta.cpp");
-            let signature = format!("{}/addons/{pbo}.key_1.0.bisign", cache.join(id).display());
-            fs::write(signature, b"signature").expect("write a cached signature");
-            // The cache PBO version must match the local PBO for the
-            // signature to pair with it.
-            fs::write(cache.join(id).join("addons").join(pbo), b"local")
-                .expect("write the cached PBO");
-        }
-        // The listing names this signature, so the sizes must agree.
+        let pack = remote.join(format!("@{ID}"));
+        fs::create_dir_all(&pack).expect("create the remote fixture");
         fs::write(
-            cache.join("450814997/addons/CBA.pbo.cba_3.20.0.bisign"),
-            b"0123456789",
+            pack.join("meta.cpp"),
+            format!("protocol = 1;\npublishedid = {ID};\nname = \"UKSF Taskforce Alpha Maps\";\n"),
         )
-        .expect("write the signed CBA signature");
+        .expect("write the remote meta.cpp");
+        fs::write(pack.join("mod.cpp"), b"mod-cpp-111").expect("write the remote mod.cpp");
 
         let listing_path = base.join("listing.txt");
         fs::write(&listing_path, listing).expect("write the listing");
         let log = base.join("sftp.log");
         fs::write(&log, b"").expect("create the log");
-
         let stdin = base.join("stdin.txt");
+
         let stub = base.join("fake-sftp");
         fs::write(&stub, STUB).expect("write the stub");
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755))
@@ -195,11 +198,10 @@ impl Fixture {
         Self {
             dir,
             log,
+            stdin,
             stub,
             listing: listing_path,
             remote,
-            cache,
-            stdin,
         }
     }
 
@@ -215,42 +217,40 @@ impl Fixture {
             .env("UKSFTA_TEST_STDIN", &self.stdin)
             .env("UKSFTA_TEST_LISTING", &self.listing)
             .env("UKSFTA_TEST_REMOTE", &self.remote)
-            .env("UKSFTA_TEST_ROOT", ROOT)
-            .env("UKSFTA_WORKSHOP_CACHE", &self.cache);
+            .env("UKSFTA_TEST_ROOT", ROOT);
         command
     }
 
     fn log(&self) -> String {
         fs::read_to_string(&self.log).expect("read the stub log")
     }
+
+    fn remove_local_signature(&self) {
+        fs::remove_file(self.dir.path().join(".hemttout/release/addons").join(SIG))
+            .expect("remove the local signature");
+    }
 }
 
 #[test]
-fn a_missing_pbo_is_reported_and_exits_one() {
-    let fixture = Fixture::new(
-        &[
-            ("450814997", "CBA_A3", "CBA.pbo"),
-            ("887302721", "Boat Mod", "Boat.pbo"),
-        ],
-        LISTING,
-    );
+fn a_matching_pack_plans_no_change() {
+    let fixture = Fixture::new(LISTING_MATCH);
 
     fixture
         .command()
         .arg("server")
         .assert()
-        .code(1)
+        .success()
         .stdout(predicate::str::contains(
-            "mod 450814997 CBA_A3: ok (1 PBO(s))",
+            "pack 3662499431 UKSF Taskforce Alpha Maps",
         ))
-        .stdout(predicate::str::contains("missing Boat.pbo"))
-        .stderr(predicate::str::contains("server problem(s) found"));
+        .stdout(predicate::str::contains("status: ok"))
+        .stdout(predicate::str::contains("plan: no changes"));
 
     let log = fixture.log();
     assert_eq!(
         log.matches("ARGV ").count(),
         2,
-        "a report run uses the listing and meta phases only"
+        "the listing and the meta phase only"
     );
     let argv: Vec<&str> = log
         .lines()
@@ -260,30 +260,51 @@ fn a_missing_pbo_is_reported_and_exits_one() {
         argv.iter().all(|line| !line.contains(" -b ")),
         "sftp must not run in -b mode: {argv:?}"
     );
+    assert!(log.contains("CMDS"), "commands arrive on stdin");
+}
+
+#[test]
+fn a_missing_pbo_is_reported_and_exits_one() {
+    let fixture = Fixture::new(LISTING_MISSING);
+
+    fixture
+        .command()
+        .arg("server")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("missing uksfta_main.pbo"))
+        .stderr(predicate::str::contains("pack problem(s)"));
+}
+
+#[test]
+fn a_case_only_difference_is_the_same_file() {
+    let fixture = Fixture::new(LISTING_CASE);
+
+    fixture
+        .command()
+        .arg("server")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("status: ok"))
+        .stderr(predicate::str::contains("differ only by case"));
+
+    let log = fixture.log();
     assert!(
-        log.contains("CMDS"),
-        "the stub must receive the commands on stdin"
+        !log.lines().any(|line| line.starts_with("put ")),
+        "a case-only difference must not upload"
     );
 }
 
 #[test]
 fn upload_dry_run_prints_the_plan_and_writes_nothing() {
-    let fixture = Fixture::new(
-        &[
-            ("450814997", "CBA_A3", "CBA.pbo"),
-            ("887302721", "Boat Mod", "Boat.pbo"),
-        ],
-        LISTING,
-    );
+    let fixture = Fixture::new(LISTING_MISSING);
 
     fixture
         .command()
-        .args(["server", "--upload", "--dry-run"])
+        .args(["server", "--upload", "--prune", "--dry-run"])
         .assert()
         .code(1)
         .stdout(predicate::str::contains("plan: put"))
-        .stdout(predicate::str::contains("Boat.pbo"))
-        .stdout(predicate::str::contains("Boat.pbo.key_1.0.bisign"))
         .stdout(predicate::str::contains("dry run: no changes made"));
 
     let log = fixture.log();
@@ -299,34 +320,37 @@ fn upload_dry_run_prints_the_plan_and_writes_nothing() {
 }
 
 #[test]
-fn a_symlinked_addons_directory_is_refused() {
-    let fixture = Fixture::new(&[("450814997", "CBA_A3", "CBA.pbo")], LISTING_SYMLINK);
+fn an_unsigned_pack_warns_and_fails_only_when_required() {
+    let fixture = Fixture::new(LISTING_UNSIGNED);
+    fixture.remove_local_signature();
+    fixture
+        .command()
+        .arg("server")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "unsigned: 1 of 1 PBO(s) have no signature (advisory)",
+        ));
+
+    let fixture = Fixture::new(LISTING_UNSIGNED);
+    fixture.remove_local_signature();
+    fixture
+        .command()
+        .args(["server", "--require-signatures"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("1 of 1 PBO(s) have no signature"));
+}
+
+#[test]
+fn a_local_dropin_without_a_meta_cpp_cannot_run() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    fs::remove_file(fixture.dir.path().join("meta.cpp")).expect("remove meta.cpp");
 
     fixture
         .command()
         .arg("server")
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("symlink"));
-}
-
-#[test]
-fn an_unsigned_pbo_warns_by_default_and_fails_when_required() {
-    let mods = [("450814997", "CBA_A3", "CBA.pbo")];
-
-    let fixture = Fixture::new(&mods, LISTING_UNSIGNED);
-    fixture
-        .command()
-        .arg("server")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("[NO SIGNATURE] CBA.pbo"));
-
-    let fixture = Fixture::new(&mods, LISTING_UNSIGNED);
-    fixture
-        .command()
-        .args(["server", "--require-signatures"])
-        .assert()
-        .code(1)
-        .stderr(predicate::str::contains("server problem(s) found"));
+        .stderr(predicate::str::contains("no meta.cpp"));
 }

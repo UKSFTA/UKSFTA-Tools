@@ -165,11 +165,11 @@ enum Commands {
         #[arg(long)]
         report: bool,
     },
-    /// Verify a game server's workshop tree over SFTP
+    /// Verify the private modpack on a game server over SFTP
     ///
-    /// Compares meta.cpp ids and PBOs under <root>/@<id>/ with
-    /// mod_sources.txt and mods.lock. Authentication is handled by sftp:
-    /// key, agent or terminal prompt.
+    /// Compares the local build with <root>/@<publishedid>/. The pack id
+    /// comes from meta.cpp. Authentication is handled by sftp: key, agent
+    /// or terminal prompt.
     #[command(
         after_help = "Examples:\n  uksfta server\n  uksfta server --deep\n  uksfta server --upload --dry-run\n  uksfta server --upload --prune"
     )]
@@ -189,6 +189,12 @@ enum Commands {
         /// Identity file for sftp
         #[arg(long, value_name = "PATH")]
         identity: Option<PathBuf>,
+        /// meta.cpp that names the pack
+        #[arg(long, value_name = "PATH")]
+        meta: Option<PathBuf>,
+        /// Local build output (default: .hemttout/release, else .hemttout/build)
+        #[arg(long, value_name = "PATH")]
+        local: Option<PathBuf>,
         /// Download and hash remote PBOs (slow)
         #[arg(long)]
         deep: bool,
@@ -334,6 +340,8 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             port,
             root,
             identity,
+            meta,
+            local,
             deep,
             upload,
             prune,
@@ -345,6 +353,8 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             port,
             root,
             identity,
+            meta,
+            local,
             deep,
             upload,
             prune,

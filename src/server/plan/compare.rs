@@ -1,241 +1,237 @@
-//! Build the plan from the local pack and the remote listing.
+//! Build the plan by comparing the local build with the remote pack folder.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use super::model::{
-    Action, Finding, ModReport, Plan, PlanInput, RemoteFile, Signature, Status, UnsignedUpload,
-};
-use super::{join_remote, mod_dir};
+use super::join_remote;
+use super::model::{is_bikey, is_pbo, Action, Finding, LocalFile, Plan, PlanInput, RemoteFile};
 
-/// True for a name that is a companion of `pbo`, for example
-/// `ace_zeus.pbo.ace_3.21.3.bisign`.
-pub(super) fn is_signature_of(name: &str, pbo: &str) -> bool {
-    name.strip_prefix(pbo)
-        .is_some_and(|rest| rest.starts_with('.') && rest.ends_with(".bisign"))
+/// The PBO that a signature belongs to:
+/// `uksfta_main.pbo.uksfta_1.0.1.bisign` -> `uksfta_main.pbo`.
+pub(super) fn signature_owner(name: &str) -> Option<&str> {
+    let lower = name.to_ascii_lowercase();
+    if !lower.ends_with(".bisign") {
+        return None;
+    }
+    let stem = &name[..name.len() - ".bisign".len()];
+    let pos = stem.to_ascii_lowercase().find(".pbo.")?;
+    Some(&stem[..pos + 4])
 }
 
-fn is_signature(name: &str) -> bool {
-    name.ends_with(".bisign")
+/// True when `signature` belongs to `pbo`, ignoring case.
+pub(super) fn is_signature_of(signature: &str, pbo: &str) -> bool {
+    signature_owner(signature).is_some_and(|owner| owner.eq_ignore_ascii_case(pbo))
 }
 
-fn file_name(path: &Path) -> Option<String> {
-    path.file_name()?.to_str().map(str::to_string)
+fn lower(name: &str) -> String {
+    name.to_ascii_lowercase()
 }
 
 /// Build the plan.
 pub fn build_plan(input: &PlanInput<'_>) -> Plan {
-    let mut mods = Vec::new();
-    let mut queue = Queue::default();
+    let local = input.local;
+    let remote = input.remote;
+    let mut findings = Vec::new();
     let mut warnings = Vec::new();
-    let mut unsigned_uploads = Vec::new();
+    let mut unsigned = 0;
+    let mut case_differences = 0;
+    let mut queue = Queue::default();
 
-    for entry in input.mods {
-        let mut findings = Vec::new();
-        let Some(locked) = input.lock.mods.get(&entry.id) else {
-            findings.push(Finding::NoLock {
-                id: entry.id.clone(),
-            });
-            mods.push(ModReport {
-                id: entry.id.clone(),
-                name: entry.name.clone(),
-                status: Status::NoLock,
-                pbos: 0,
-                findings,
-            });
-            continue;
-        };
+    if !remote.exists {
+        findings.push(Finding::NoPack);
+    }
 
-        let name = if locked.name.is_empty() {
-            entry.name.clone()
-        } else {
-            locked.name.clone()
-        };
-        let remote = input.remote.get(&entry.id).filter(|r| r.exists);
-        let dir = mod_dir(input.root, &entry.id);
-        let pbo_dir = remote.map_or_else(|| join_remote(&dir, "addons"), |r| r.pbo_dir.clone());
+    let addons_dir = join_remote(input.remote_dir, "addons");
+    let keys_dir = join_remote(input.remote_dir, "keys");
+    let addons: HashMap<String, &RemoteFile> = remote
+        .addons
+        .iter()
+        .map(|file| (lower(&file.name), file))
+        .collect();
+    let keys: HashMap<String, &RemoteFile> = remote
+        .keys
+        .iter()
+        .map(|file| (lower(&file.name), file))
+        .collect();
+    let addons_links: HashSet<String> = remote.addons_symlinks.iter().map(|n| lower(n)).collect();
+    let keys_links: HashSet<String> = remote.keys_symlinks.iter().map(|n| lower(n)).collect();
 
-        let local: Vec<(String, PathBuf, u64)> = locked
-            .files
-            .iter()
-            .filter_map(|path| match file_name(Path::new(path)) {
-                Some(name) => input
-                    .local_sizes
-                    .get(path)
-                    .map(|size| (name, PathBuf::from(path), *size)),
-                None => None,
-            })
-            .collect();
-        let local_names: HashSet<&str> = local.iter().map(|(n, _, _)| n.as_str()).collect();
-
-        if remote.is_none() {
-            findings.push(Finding::NoDirectory {
-                id: entry.id.clone(),
-            });
-        }
-        let remote_by_name: HashMap<&str, &RemoteFile> = remote.map_or_else(HashMap::new, |r| {
-            r.files.iter().map(|f| (f.name.as_str(), f)).collect()
+    // The remote meta.cpp must name this pack.
+    let meta_matches = remote.meta_id.as_deref().is_some_and(|id| id == local.id);
+    if !meta_matches {
+        findings.push(Finding::MetaMismatch {
+            remote: remote.meta_id.clone(),
         });
+        match input.meta_upload {
+            Some(path) => queue.upload("meta.cpp", path, join_remote(input.remote_dir, "meta.cpp")),
+            None => warnings.push("meta.cpp: no local copy to upload".to_string()),
+        }
+    }
 
-        for (pbo, local_path, local_size) in &local {
-            let key = format!("{}/{}", entry.id, pbo);
-            let found = remote_by_name.get(pbo.as_str()).copied();
-            let blocked = remote.is_some_and(|r| r.symlinks.iter().any(|s| s == pbo));
-            let mut stale = false;
+    // mod.cpp is compared by size only.
+    match (&local.mod_cpp, remote.mod_size) {
+        (Some(local_mod), None) => {
+            findings.push(Finding::ModCppMissing);
+            queue.upload(
+                "mod.cpp",
+                &local_mod.path,
+                join_remote(input.remote_dir, "mod.cpp"),
+            );
+        }
+        (Some(local_mod), Some(size)) if size != local_mod.size => {
+            findings.push(Finding::ModCppStale {
+                local: local_mod.size,
+                remote: size,
+            });
+            queue.upload(
+                "mod.cpp",
+                &local_mod.path,
+                join_remote(input.remote_dir, "mod.cpp"),
+            );
+        }
+        (Some(_), Some(_)) => {}
+        (None, Some(_)) => warnings.push("mod.cpp: no local copy to upload".to_string()),
+        (None, None) => {}
+    }
 
-            match found {
-                None => {
-                    findings.push(Finding::Missing {
-                        id: entry.id.clone(),
-                        name: pbo.clone(),
-                    });
-                    stale = true;
+    for pbo in &local.pbos {
+        let key = lower(&pbo.name);
+        let found = addons.get(&key).copied();
+        if let Some(file) = found {
+            if file.name != pbo.name {
+                case_differences += 1;
+            }
+        }
+        let target = found.map_or(pbo.name.clone(), |file| file.name.clone());
+
+        let mut stale = false;
+        match found {
+            None => {
+                findings.push(Finding::Missing {
+                    name: pbo.name.clone(),
+                });
+                stale = true;
+            }
+            Some(file) if file.size != pbo.size => {
+                findings.push(Finding::StaleSize {
+                    name: pbo.name.clone(),
+                    local: pbo.size,
+                    remote: file.size,
+                });
+                stale = true;
+            }
+            Some(_) if input.deep.get(&key) == Some(&false) => {
+                findings.push(Finding::StaleHash {
+                    name: pbo.name.clone(),
+                });
+                stale = true;
+            }
+            Some(_) => {}
+        }
+
+        let paired: Vec<&LocalFile> = local
+            .signatures
+            .iter()
+            .filter(|signature| is_signature_of(&signature.name, &pbo.name))
+            .collect();
+        if paired.is_empty() {
+            unsigned += 1;
+        }
+
+        let blocked = addons_links.contains(&key);
+        if blocked {
+            warnings.push(format!("{}: symlink on the server; not written", pbo.name));
+            continue;
+        }
+        if stale {
+            queue.upload(&pbo.name, &pbo.path, join_remote(&addons_dir, &target));
+        }
+        for signature in paired {
+            let sig_key = lower(&signature.name);
+            let remote_signature = addons.get(&sig_key).copied();
+            let sig_target =
+                remote_signature.map_or(signature.name.clone(), |file| file.name.clone());
+            let needed = stale || remote_signature.is_none_or(|file| file.size != signature.size);
+            if needed {
+                queue.upload(
+                    &signature.name,
+                    &signature.path,
+                    join_remote(&addons_dir, &sig_target),
+                );
+            }
+        }
+    }
+
+    // Remote PBOs with no local match are extras.
+    let local_pbos: HashSet<String> = local.pbos.iter().map(|p| lower(&p.name)).collect();
+    for file in &remote.addons {
+        if !is_pbo(&file.name) || local_pbos.contains(&lower(&file.name)) {
+            continue;
+        }
+        findings.push(Finding::Extra {
+            name: file.name.clone(),
+        });
+        queue.remove(join_remote(&addons_dir, &file.name));
+    }
+
+    // Keys are compared by name and size, and never removed.
+    let local_keys: HashSet<String> = local.keys.iter().map(|k| lower(&k.name)).collect();
+    for key in &local.keys {
+        let name = lower(&key.name);
+        match keys.get(&name) {
+            None => {
+                findings.push(Finding::KeyMissing {
+                    name: key.name.clone(),
+                });
+                if !keys_links.contains(&name) {
+                    queue.upload(&key.name, &key.path, join_remote(&keys_dir, &key.name));
                 }
-                Some(file) if file.size != *local_size => {
-                    findings.push(Finding::StaleSize {
-                        id: entry.id.clone(),
-                        name: pbo.clone(),
-                        local: *local_size,
+            }
+            Some(file) => {
+                if file.size != key.size {
+                    findings.push(Finding::KeyStale {
+                        name: key.name.clone(),
+                        local: key.size,
                         remote: file.size,
                     });
-                    stale = true;
-                }
-                Some(_) if input.deep.get(&key) == Some(&false) => {
-                    findings.push(Finding::StaleHash {
-                        id: entry.id.clone(),
-                        name: pbo.clone(),
-                    });
-                    stale = true;
-                }
-                Some(_) => {}
-            }
-
-            let signed = remote_by_name
-                .keys()
-                .any(|remote_name| is_signature_of(remote_name, pbo));
-            if remote.is_some() && found.is_some() && !signed {
-                findings.push(Finding::NoSignature {
-                    id: entry.id.clone(),
-                    name: pbo.clone(),
-                });
-            }
-
-            if blocked {
-                warnings.push(format!(
-                    "{}: {pbo} is a symlink on the server; not written",
-                    entry.id
-                ));
-                continue;
-            }
-
-            let signatures = input.signatures.get(&key).map_or(&[][..], Vec::as_slice);
-            let valid: Vec<&Signature> = signatures
-                .iter()
-                .filter(|signature| signature.pbo_size == Some(*local_size))
-                .collect();
-
-            if stale {
-                queue.upload(&entry.id, pbo, local_path, format!("{pbo_dir}/{pbo}"));
-                if valid.is_empty() {
-                    if signatures.is_empty() {
-                        warnings.push(format!("{}: {pbo}: no cached signature", entry.id));
-                    } else {
-                        warnings.push(format!(
-                            "{}: {pbo}: cached signature is for a different PBO version and was not uploaded",
-                            entry.id
-                        ));
+                    if !keys_links.contains(&name) {
+                        queue.upload(&key.name, &key.path, join_remote(&keys_dir, &file.name));
                     }
-                    unsigned_uploads.push(UnsignedUpload {
-                        id: entry.id.clone(),
-                        name: pbo.clone(),
-                    });
-                }
-            }
-            for signature in valid {
-                let Some(sig_name) = file_name(&signature.path) else {
-                    continue;
-                };
-                let out_of_date = remote_by_name
-                    .get(sig_name.as_str())
-                    .is_none_or(|file| file.size != signature.size);
-                if out_of_date {
-                    queue.upload(
-                        &entry.id,
-                        &sig_name,
-                        &signature.path,
-                        format!("{pbo_dir}/{sig_name}"),
-                    );
                 }
             }
         }
-
-        // The meta.cpp id must name this workshop item.
-        let meta_matches = remote
-            .and_then(|r| r.meta_id.as_deref())
-            .is_some_and(|id| id == entry.id);
-        let can_create = remote.is_some() || queue.has_upload(&entry.id);
-        if !meta_matches && can_create {
-            if remote.is_some() {
-                findings.push(Finding::IdMismatch {
-                    id: entry.id.clone(),
-                    remote: remote.and_then(|r| r.meta_id.clone()),
-                });
-            }
-            let local = input.meta_sources.get(&entry.id).cloned();
-            queue.upload_meta(&entry.id, local, &dir);
+    }
+    for file in &remote.keys {
+        if !is_bikey(&file.name) || local_keys.contains(&lower(&file.name)) {
+            continue;
         }
-
-        if let Some(remote) = remote {
-            for file in &remote.files {
-                if local_names.contains(file.name.as_str())
-                    || is_signature(&file.name)
-                    || !file.name.to_ascii_lowercase().ends_with(".pbo")
-                {
-                    continue;
-                }
-                findings.push(Finding::Extra {
-                    id: entry.id.clone(),
-                    name: file.name.clone(),
-                });
-                queue.remove(format!("{pbo_dir}/{}", file.name));
-            }
-        }
-
-        mods.push(ModReport {
-            id: entry.id.clone(),
-            name,
-            status: status_of(&findings),
-            pbos: local.len(),
-            findings,
+        findings.push(Finding::KeyExtra {
+            name: file.name.clone(),
         });
+    }
+
+    if case_differences > 0 {
+        warnings.push(format!(
+            "{case_differences} PBO name(s) differ only by case; uploads reuse the server name"
+        ));
     }
 
     Plan {
-        mods,
+        id: local.id.clone(),
+        local_dir: local.dir.clone(),
+        remote_dir: input.remote_dir.to_string(),
+        remote_exists: remote.exists,
+        local_pbos: local.pbos.len(),
+        local_signatures: local.signatures.len(),
+        local_keys: local.keys.len(),
+        remote_pbos: remote.addons.iter().filter(|f| is_pbo(&f.name)).count(),
+        remote_keys: remote.keys.len(),
+        findings,
         actions: queue.actions,
         warnings,
-        unsigned_uploads,
+        unsigned,
         require_signatures: input.require_signatures,
     }
-}
-
-fn status_of(findings: &[Finding]) -> Status {
-    let mut status = Status::Ok;
-    for finding in findings {
-        let found = match finding {
-            Finding::Missing { .. } => Status::Missing,
-            Finding::StaleSize { .. } | Finding::StaleHash { .. } => Status::Stale,
-            Finding::IdMismatch { .. } => Status::IdMismatch,
-            Finding::Extra { .. } => Status::Extra,
-            Finding::NoSignature { .. } => Status::Unsigned,
-            Finding::NoDirectory { .. } => Status::NoDirectory,
-            Finding::NoLock { .. } => Status::NoLock,
-        };
-        if found.rank() > status.rank() {
-            status = found;
-        }
-    }
-    status
 }
 
 /// Collect actions once per remote path.
@@ -246,33 +242,14 @@ struct Queue {
 }
 
 impl Queue {
-    fn upload(&mut self, id: &str, name: &str, local: &Path, remote: String) {
+    fn upload(&mut self, name: &str, local: &Path, remote: String) {
         if self.queued.insert(remote.clone()) {
             self.actions.push(Action::Upload {
-                id: id.to_string(),
                 name: name.to_string(),
-                local: Some(local.to_path_buf()),
+                local: local.to_path_buf(),
                 remote,
             });
         }
-    }
-
-    fn upload_meta(&mut self, id: &str, local: Option<PathBuf>, dir: &str) {
-        let remote = join_remote(dir, "meta.cpp");
-        if self.queued.insert(remote.clone()) {
-            self.actions.push(Action::Upload {
-                id: id.to_string(),
-                name: "meta.cpp".to_string(),
-                local,
-                remote,
-            });
-        }
-    }
-
-    fn has_upload(&self, id: &str) -> bool {
-        self.actions
-            .iter()
-            .any(|a| matches!(a, Action::Upload { id: other, .. } if other == id))
     }
 
     fn remove(&mut self, remote: String) {
