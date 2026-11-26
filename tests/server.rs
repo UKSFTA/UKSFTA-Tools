@@ -240,6 +240,10 @@ printf 'ARGV %s\n' "$*" >> "$log"
 cat > "$commands"
 printf 'CMDS\n' >> "$log"
 cat "$commands" >> "$log"
+if [ -n "${UKSFTA_TEST_FAIL_CONNECT:-}" ]; then
+  echo 'Connection refused' >&2
+  exit 1
+fi
 if [ -n "${UKSFTA_TEST_HOST_KEY_FAIL:-}" ]; then
   echo 'Host key verification failed.' >&2
   exit 1
@@ -1225,4 +1229,152 @@ fn the_config_is_not_fetched_without_the_flag() {
         "no config is fetched: {}",
         fixture.log()
     );
+}
+
+/// Parse the one JSON object on stdout.
+fn json_stdout(output: &std::process::Output) -> serde_json::Value {
+    let text = String::from_utf8(output.stdout.clone()).expect("utf-8 output");
+    assert_eq!(
+        text.lines().count(),
+        1,
+        "standard output holds one JSON line: {text}"
+    );
+    serde_json::from_str(&text).expect("valid JSON")
+}
+
+#[test]
+fn json_reports_a_matching_pack() {
+    let fixture = Fixture::new(LISTING_MATCH);
+
+    let assert = fixture
+        .command()
+        .args(["server", "--json"])
+        .assert()
+        .success();
+    let value = json_stdout(assert.get_output());
+
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["result"], "ok");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["pack"]["id"], ID);
+    assert_eq!(value["server"]["port"], 2022);
+    assert_eq!(value["server"]["buffer"], 32768);
+    assert_eq!(value["server"]["requests"], 64);
+    assert_eq!(value["counts"]["local_pbos"], 1);
+    assert!(value["timings"]["connect_ms"].as_u64().is_some());
+    assert!(value["timings"]["total_ms"].as_u64().is_some());
+    assert!(value["findings"].is_array());
+    assert!(value["actions"].is_array());
+}
+
+#[test]
+fn json_reports_a_missing_pack_as_check_failed() {
+    let fixture = Fixture::new(LISTING_MISSING);
+
+    let assert = fixture
+        .command()
+        .args(["server", "--json"])
+        .assert()
+        .code(1);
+    let value = json_stdout(assert.get_output());
+
+    assert_eq!(value["result"], "check-failed");
+    assert_eq!(value["status"], "missing");
+    assert!(value["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .any(|finding| finding["kind"] == "missing" && finding["name"] == "uksfta_main.pbo"));
+}
+
+#[test]
+fn json_survives_an_input_error() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    fs::remove_file(fixture.dir.path().join("meta.cpp")).expect("remove meta.cpp");
+
+    let assert = fixture
+        .command()
+        .args(["server", "--json"])
+        .assert()
+        .code(2);
+    let value = json_stdout(assert.get_output());
+
+    assert_eq!(value["result"], "input-error");
+    assert!(value["error"]
+        .as_str()
+        .is_some_and(|text| text.contains("meta.cpp")));
+}
+
+#[test]
+fn doctor_reports_every_effective_setting() {
+    let fixture = Fixture::new(LISTING_MATCH);
+
+    fixture
+        .command()
+        .args(["server", "--doctor"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "doctor: destination tester@example.invalid",
+        ))
+        .stdout(predicate::str::contains("doctor: port 2022"))
+        .stdout(predicate::str::contains("doctor: root /srv/arma"))
+        .stdout(predicate::str::contains("doctor: known_hosts"))
+        .stdout(predicate::str::contains("doctor: host_key_policy yes"))
+        .stdout(predicate::str::contains("doctor: buffer 32768"))
+        .stdout(predicate::str::contains("doctor: requests 64"))
+        .stdout(predicate::str::contains("doctor: connect ok"))
+        .stdout(predicate::str::contains("doctor: pack ok"))
+        .stdout(predicate::str::contains("doctor: free space unknown"));
+}
+
+#[test]
+fn doctor_reports_an_unreachable_server_and_exits_two() {
+    let fixture = Fixture::new(LISTING_MATCH);
+
+    fixture
+        .command()
+        .args(["server", "--doctor"])
+        .env("UKSFTA_TEST_FAIL_CONNECT", "1")
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("doctor: connect failed"))
+        .stdout(predicate::str::contains("doctor: buffer 32768"));
+}
+
+#[test]
+fn doctor_works_with_json() {
+    let fixture = Fixture::new(LISTING_MATCH);
+
+    let assert = fixture
+        .command()
+        .args(["server", "--doctor", "--json"])
+        .assert()
+        .success();
+    let value = json_stdout(assert.get_output());
+
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["mode"], "doctor");
+    assert_eq!(value["result"], "ok");
+    assert_eq!(value["server"]["buffer"], 32768);
+    assert!(value["free_space_bytes"].is_null());
+    assert!(value["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .any(|check| check["name"] == "connect" && check["ok"] == true));
+    assert!(value["timings"]["connect_ms"].as_u64().is_some());
+}
+
+#[test]
+fn human_runs_print_one_timing_line() {
+    let fixture = Fixture::new(LISTING_MATCH);
+
+    fixture
+        .command()
+        .arg("server")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("timing: connect/list"))
+        .stderr(predicate::str::contains("total"));
 }

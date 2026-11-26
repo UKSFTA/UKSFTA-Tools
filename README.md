@@ -629,6 +629,30 @@ warns. `equalModRequired` is shown for information and never fails. A
 missing `verifySignatures` fails, because the engine default is 0. A
 comment and a quoted string cannot hide a setting.
 
+### JSON output and the doctor
+
+`--json` writes one JSON object to standard output, and it writes nothing
+else there. The human report and the warnings move to standard error, so
+a script can parse the object. The object has `schema_version` (1),
+`pack`, `server`, `status`, `counts`, `findings`, `actions`, `timings`
+and `result`. `result` is `ok`, `check-failed` or `input-error`. The
+`server` object holds the destination, port, root, known_hosts path,
+host key policy, buffer and requests. It holds no credential, and the
+`server.cfg` contents are never included. With `--doctor`, the object has
+`mode`, `checks`, `free_space_bytes` and the timings instead of a plan.
+
+`--doctor` is a read-only preflight. It prints the effective settings,
+checks the known_hosts file, runs one `pwd` and listing batch at the pack
+folder, and asks the server for free space. It does not plan, verify,
+upload or create a directory. It exits 0 when the connection and pack
+folder are usable, and 2 otherwise. A server without `df` support reports
+unknown free space, which is not an error.
+
+Every human run prints one `timing:` line on standard error with the
+connect/list, deep, upload and total times in milliseconds. A failed run
+reports the phases it completed. The same values are in the JSON
+`timings` object.
+
 Run the command from the pack repo root. It reads `meta.cpp` for the pack
 id and name, and compares `.hemttout/release` with the server. Use
 `--meta PATH` and `--local PATH` to change either. When
@@ -655,6 +679,12 @@ uksfta server --launch-line launch.txt --server-cfg /server.cfg
 
 # Make a failing opt-in check exit 1
 uksfta server --server-cfg /server.cfg --strict-config
+
+# Print one JSON object for a script
+uksfta server --json
+
+# Run the read-only preflight
+uksfta server --doctor
 
 # Raise the transfer window for a fast link
 uksfta server --upload --buffer 261120 --requests 128

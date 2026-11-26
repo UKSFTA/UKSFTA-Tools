@@ -55,7 +55,9 @@ fn server_help_lists_the_opt_in_config_checks() {
         .success()
         .stdout(predicate::str::contains("--launch-line"))
         .stdout(predicate::str::contains("--server-cfg"))
-        .stdout(predicate::str::contains("--strict-config"));
+        .stdout(predicate::str::contains("--strict-config"))
+        .stdout(predicate::str::contains("--json"))
+        .stdout(predicate::str::contains("--doctor"));
 }
 
 #[test]

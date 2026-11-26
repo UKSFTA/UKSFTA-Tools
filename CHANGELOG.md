@@ -9,6 +9,11 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `uksfta server --json` writes one machine-readable object to standard
+  output, with the plan, counts, timings and a result. `--doctor` is a
+  read-only preflight of the connection, the pack folder and free space.
+  Every human run prints one `timing:` line on standard error.
+
 - Opt-in launch-line and `server.cfg` checks. `--launch-line` reads a
   local copy and finds `@<id>` in `-mod` or `-serverMod`. `--server-cfg`
   reads one file over SFTP and checks `verifySignatures` and
