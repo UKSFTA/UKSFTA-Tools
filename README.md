@@ -587,6 +587,12 @@ uksfta server --upload --prune --dry-run
 # Retry a failed upload up to three times
 uksfta server --upload --retries 3
 
+# Upload two files at a time
+uksfta server --upload --jobs 2
+
+# Use the meter path with redirected output
+uksfta server --upload --progress
+
 # Prune an extra PBO that mods.lock lists
 uksfta server --prune --force-prune
 ```
@@ -643,6 +649,25 @@ attempts. Use `--retries N` to change the count. A value of 0 makes one
 attempt. The wait is 2 seconds after the first attempt, then 4 seconds.
 Each attempt prints the attempt number, the file count, the attempted
 bytes, the elapsed time and the rate in MB/s.
+
+`--jobs N` uploads N files at the same time. The default is 1, which is
+a single batch, and the maximum is 8. Each job runs in its own `sftp`
+process, so parallel uploads need non-interactive authentication. Use an
+agent or an identity file. A password prompt cannot serve several
+workers.
+
+The gain on the current line is small. Two streams gave 1.80 MB/s. One
+stream gave 1.70 to 1.81 MB/s. Use more jobs only on a link with a high
+latency. Each attempt puts the files that are still missing or stale
+again, and the files are balanced across the workers by size.
+
+An interactive upload shows the client's own meter for each file, with
+the percentage, the bytes, the rate and the time left. The meter is on
+by default when the output is a terminal and `--jobs` is 1. Use
+`--no-progress` to hide it. Use `--progress` to choose the meter path
+when the output is redirected. A parallel upload runs without the meter,
+because concurrent meters overwrite each other. The verify phases always
+run quiet, so their output stays parseable.
 
 An interrupted upload restarts the file from byte zero. The command does
 not resume part of a file. In testing, `reput` trusted the remote size

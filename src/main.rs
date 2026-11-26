@@ -216,6 +216,15 @@ enum Commands {
         /// Retry an upload this many times (0 means one attempt)
         #[arg(long, default_value_t = 2)]
         retries: u8,
+        /// Upload this many files in parallel (1 to 8)
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=8))]
+        jobs: u8,
+        /// Show the sftp transfer meter (default: a terminal, single job)
+        #[arg(long, group = "progress_mode")]
+        progress: bool,
+        /// Hide the sftp transfer meter
+        #[arg(long, group = "progress_mode")]
+        no_progress: bool,
     },
     /// Show the installed version and check for updates
     Version,
@@ -355,22 +364,36 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             dry_run,
             require_signatures,
             retries,
-        } => server::run(ServerOptions {
-            config,
-            destination,
-            port,
-            root,
-            identity,
-            meta,
-            local,
-            deep,
-            upload,
-            prune,
-            force_prune,
-            dry_run,
-            require_signatures,
-            retries,
-        })?,
+            jobs,
+            progress,
+            no_progress,
+        } => {
+            let mode = if progress {
+                server::Progress::Always
+            } else if no_progress {
+                server::Progress::Never
+            } else {
+                server::Progress::Auto
+            };
+            server::run(ServerOptions {
+                config,
+                destination,
+                port,
+                root,
+                identity,
+                meta,
+                local,
+                deep,
+                upload,
+                prune,
+                force_prune,
+                dry_run,
+                require_signatures,
+                retries,
+                jobs,
+                progress: mode,
+            })?
+        }
         Commands::Version => version(),
         Commands::Docs {
             root,

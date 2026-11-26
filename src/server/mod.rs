@@ -12,6 +12,7 @@ mod verify;
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -20,12 +21,26 @@ use crate::lock::{load_lock, LockFile};
 use crate::modlist::{parse_mod_sources, ModEntry};
 use crate::util::human_size;
 
-use self::config::Overrides;
+use self::config::{Overrides, Settings};
 use self::plan::{is_bikey, is_bisign, is_pbo, Action, LocalFile, LocalPack, Plan};
-use self::report::{print_plan, print_report, upload_batch};
+use self::report::{
+    plan_workers, print_plan, print_report, put_line, upload_batch, upload_dirs, upload_units,
+    UploadUnit,
+};
 use self::sftp::ScratchDir;
 use self::sftp::Sftp;
 use self::verify::Verifier;
+
+/// When to show the client's own transfer meter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    /// A terminal and a single job.
+    Auto,
+    /// Use the meter path even when the output is redirected.
+    Always,
+    /// Never show the meter.
+    Never,
+}
 
 /// The `server` command flags.
 pub struct ServerOptions {
@@ -44,6 +59,10 @@ pub struct ServerOptions {
     pub require_signatures: bool,
     /// Upload attempts after the first. Zero means one attempt.
     pub retries: u8,
+    /// Uploads to run at the same time. One is a single batch.
+    pub jobs: u8,
+    /// When to show the client's transfer meter.
+    pub progress: Progress,
 }
 
 /// Verify the pack, then upload or prune when asked.
@@ -74,6 +93,11 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
     let scratch = ScratchDir::new("uksfta-server-")?;
     let locked = locked_pbos()?;
     let cross_checks = cross_checks(&local)?;
+    let show_progress = match opts.progress {
+        Progress::Always => true,
+        Progress::Never => false,
+        Progress::Auto => opts.jobs == 1 && std::io::stdout().is_terminal(),
+    };
     let verifier = Verifier {
         client: Sftp::new(&settings),
         settings: &settings,
@@ -102,7 +126,7 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
     if opts.dry_run {
         println!("dry run: no changes made");
     } else if opts.upload {
-        plan = upload_with_retries(&verifier, plan, opts.retries)?;
+        plan = upload_with_retries(&verifier, plan, opts.retries, opts.jobs, show_progress)?;
     }
 
     if opts.prune && !opts.dry_run {
@@ -155,6 +179,8 @@ fn upload_with_retries(
     verifier: &Verifier<'_>,
     mut plan: Plan,
     retries: u8,
+    jobs: u8,
+    progress: bool,
 ) -> Result<Plan, UksftaError> {
     let limit = u16::from(retries) + 1;
     let mut attempted = false;
@@ -167,8 +193,17 @@ fn upload_with_retries(
         let files = plan.uploads().count();
         let bytes = plan.upload_bytes();
         let started = Instant::now();
-        if let Err(e) = verifier.client.batch(&batch) {
-            eprintln!("Warning: upload attempt {attempt}: {e}");
+        if jobs <= 1 {
+            let sent = if progress {
+                verifier.client.batch_progress(&batch)
+            } else {
+                verifier.client.batch(&batch).map(|_| ())
+            };
+            if let Err(e) = sent {
+                eprintln!("Warning: upload attempt {attempt}: {e}");
+            }
+        } else {
+            send_parallel(verifier, &plan, jobs, attempt)?;
         }
         plan = verifier.verify()?;
         let elapsed = started.elapsed();
@@ -188,6 +223,58 @@ fn upload_with_retries(
         print_report(&plan);
     }
     Ok(plan)
+}
+
+/// Make the directories once, then send one batch per worker. Each worker
+/// builds its own client, so the workers run at the same time.
+fn send_parallel(
+    verifier: &Verifier<'_>,
+    plan: &Plan,
+    jobs: u8,
+    attempt: u16,
+) -> Result<(), UksftaError> {
+    let dirs = upload_dirs(plan)?;
+    if !dirs.is_empty() {
+        if let Err(e) = verifier.client.batch(&dirs) {
+            eprintln!("Warning: upload attempt {attempt}: {e}");
+        }
+    }
+
+    let workers = plan_workers(upload_units(plan), jobs);
+    let results: Vec<Result<(), UksftaError>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = workers
+            .iter()
+            .map(|units| scope.spawn(move || upload_worker(verifier.settings, units)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle.join().unwrap_or_else(|_| {
+                    Err(UksftaError::Input(
+                        "an upload worker stopped unexpectedly".to_string(),
+                    ))
+                })
+            })
+            .collect()
+    });
+    for (index, result) in results.iter().enumerate() {
+        if let Err(e) = result {
+            eprintln!(
+                "Warning: upload attempt {attempt} worker {}: {e}",
+                index + 1
+            );
+        }
+    }
+    Ok(())
+}
+
+/// One worker: a private client and its own `put -p` batch.
+fn upload_worker(settings: &Settings, units: &[UploadUnit]) -> Result<(), UksftaError> {
+    let mut batch = Vec::new();
+    for unit in units {
+        batch.push(put_line(unit)?);
+    }
+    Sftp::new(settings).batch(&batch).map(|_| ())
 }
 
 /// Stop when every file is in place, or when no attempt remains.

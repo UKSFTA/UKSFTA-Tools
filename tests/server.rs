@@ -137,9 +137,9 @@ sftp> ls -l
 
 const STUB: &str = r#"#!/bin/sh
 set -eu
-log="$UKSFTA_TEST_LOG"
+log="$UKSFTA_TEST_LOG.$$"
+commands="$UKSFTA_TEST_STDIN.$$"
 printf 'ARGV %s\n' "$*" >> "$log"
-commands="$UKSFTA_TEST_STDIN"
 cat > "$commands"
 printf 'CMDS\n' >> "$log"
 cat "$commands" >> "$log"
@@ -220,7 +220,6 @@ impl Fixture {
         let listing_path = base.join("listing.txt");
         fs::write(&listing_path, listing).expect("write the listing");
         let log = base.join("sftp.log");
-        fs::write(&log, b"").expect("create the log");
         let stdin = base.join("stdin.txt");
 
         let stub = base.join("fake-sftp");
@@ -254,8 +253,23 @@ impl Fixture {
         command
     }
 
+    /// Every stub invocation writes its own part file, so parallel workers
+    /// cannot interleave their output. The parts are read in path order.
     fn log(&self) -> String {
-        fs::read_to_string(&self.log).expect("read the stub log")
+        let prefix = format!("{}.", self.log.display());
+        let dir = self.log.parent().expect("the log has a directory");
+        let mut parts: Vec<PathBuf> = fs::read_dir(dir)
+            .expect("read the fixture directory")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.to_string_lossy().starts_with(&prefix))
+            .collect();
+        parts.sort();
+        let mut text = String::new();
+        for part in parts {
+            text.push_str(&fs::read_to_string(part).expect("read a stub log part"));
+        }
+        text
     }
 
     fn write_lock(&self, id: &str, files: &[&str]) {
@@ -493,5 +507,89 @@ fn a_failed_upload_is_retried_and_reported() {
     assert!(
         !log.contains("reput"),
         "an interrupted upload restarts the file: {log}"
+    );
+}
+
+#[test]
+fn parallel_upload_puts_each_file_exactly_once() {
+    let fixture = Fixture::new(LISTING_MISSING);
+    fixture
+        .command()
+        .args(["server", "--upload", "--jobs", "2", "--retries", "0"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("attempt 1: 2 file(s)"));
+
+    let log = fixture.log();
+    let puts: Vec<&str> = log
+        .lines()
+        .filter(|line| line.starts_with("put -p "))
+        .collect();
+    assert_eq!(puts.len(), 2, "one put per file: {log}");
+    assert_eq!(
+        puts.iter()
+            .filter(|line| line.ends_with("/uksfta_main.pbo\""))
+            .count(),
+        1,
+        "{log}"
+    );
+    assert_eq!(
+        puts.iter()
+            .filter(|line| line.ends_with(".bisign\""))
+            .count(),
+        1,
+        "{log}"
+    );
+    assert!(!log.contains("reput"), "{log}");
+}
+
+/// The upload phase is the only run that may omit `-q`.
+fn argv_without_quiet(log: &str) -> Vec<String> {
+    log.lines()
+        .filter(|line| line.starts_with("ARGV "))
+        .filter(|line| !line.split_whitespace().any(|arg| arg == "-q"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn the_meter_path_leaves_out_quiet_on_the_upload() {
+    let fixture = Fixture::new(LISTING_MISSING);
+
+    fixture
+        .command()
+        .args(["server", "--upload", "--progress", "--retries", "0"])
+        .assert()
+        .code(1);
+
+    let log = fixture.log();
+    assert!(log.contains("put -p "), "the upload must run: {log}");
+    let quietless = argv_without_quiet(&log);
+    assert_eq!(
+        quietless.len(),
+        1,
+        "only the upload phase drops -q: {quietless:?}"
+    );
+    assert!(
+        quietless[0].contains("-B 32768"),
+        "the buffer stays: {quietless:?}"
+    );
+}
+
+#[test]
+fn a_default_upload_is_quiet_without_a_terminal() {
+    let fixture = Fixture::new(LISTING_MISSING);
+
+    fixture
+        .command()
+        .args(["server", "--upload", "--retries", "0"])
+        .assert()
+        .code(1);
+
+    let log = fixture.log();
+    assert!(log.contains("put -p "), "the upload must run: {log}");
+    assert!(
+        argv_without_quiet(&log).is_empty(),
+        "a piped upload keeps -q: {log}"
     );
 }

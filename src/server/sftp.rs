@@ -8,7 +8,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::config::Settings;
@@ -50,9 +50,15 @@ impl Sftp {
         }
     }
 
-    /// The full argument list for one client run.
-    fn args(&self) -> Vec<String> {
-        let mut args = vec!["-q".to_string(), "-P".to_string(), self.port.to_string()];
+    /// The full argument list for one client run. `-q` suppresses the
+    /// client's own meter, so the verify phases stay parseable.
+    fn args(&self, quiet: bool) -> Vec<String> {
+        let mut args = Vec::new();
+        if quiet {
+            args.push("-q".to_string());
+        }
+        args.push("-P".to_string());
+        args.push(self.port.to_string());
         if let Some(path) = &self.identity {
             args.push("-i".to_string());
             args.push(path.display().to_string());
@@ -71,31 +77,27 @@ impl Sftp {
         args
     }
 
-    /// Send one phase of commands and return the client's standard output.
-    ///
-    /// # Errors
-    /// Returns `Input` when the client cannot start, cannot take the
-    /// commands, or exits non-zero.
-    pub fn batch(&self, lines: &[String]) -> Result<String, UksftaError> {
-        if lines.is_empty() {
-            return Ok(String::new());
-        }
+    /// A client run with its commands on standard input.
+    fn command(&self, quiet: bool) -> Command {
+        let mut command = Command::new(&self.binary);
+        command.args(self.args(quiet)).stdin(Stdio::piped());
+        command
+    }
+
+    fn spawn(&self, mut command: Command) -> Result<Child, UksftaError> {
+        command
+            .spawn()
+            .map_err(|e| UksftaError::Input(format!("cannot run {}: {e}", self.binary)))
+    }
+
+    /// Write the commands, then close standard input so the client sees the
+    /// end of the batch.
+    fn send(&self, child: &mut Child, lines: &[String]) -> Result<(), UksftaError> {
         let mut body = String::new();
         for line in lines {
             body.push_str(line);
             body.push('\n');
         }
-
-        let mut command = Command::new(&self.binary);
-        command
-            .args(self.args())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = command
-            .spawn()
-            .map_err(|e| UksftaError::Input(format!("cannot run {}: {e}", self.binary)))?;
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(e) = stdin.write_all(body.as_bytes()) {
                 let _ = child.kill();
@@ -105,8 +107,24 @@ impl Sftp {
                     self.binary
                 )));
             }
-            // The handle drops here, so the client sees end of input.
         }
+        Ok(())
+    }
+
+    /// Send one phase of commands and return the client's standard output.
+    ///
+    /// # Errors
+    /// Returns `Input` when the client cannot start, cannot take the
+    /// commands, or exits non-zero.
+    pub fn batch(&self, lines: &[String]) -> Result<String, UksftaError> {
+        if lines.is_empty() {
+            return Ok(String::new());
+        }
+
+        let mut command = self.command(true);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = self.spawn(command)?;
+        self.send(&mut child, lines)?;
         let output = child.wait_with_output().map_err(|e| {
             UksftaError::Input(format!("cannot read the output of {}: {e}", self.binary))
         })?;
@@ -120,6 +138,34 @@ impl Sftp {
             return Err(UksftaError::Input(format!("sftp failed: {detail}")));
         }
         Ok(stdout)
+    }
+
+    /// Send one phase with the client's meter attached to this terminal.
+    /// The output is not captured, so the meter needs a real terminal.
+    ///
+    /// # Errors
+    /// Returns `Input` when the client cannot start, cannot take the
+    /// commands, or exits non-zero.
+    pub fn batch_progress(&self, lines: &[String]) -> Result<(), UksftaError> {
+        if lines.is_empty() {
+            return Ok(());
+        }
+
+        let mut command = self.command(false);
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        let mut child = self.spawn(command)?;
+        self.send(&mut child, lines)?;
+        let status = child
+            .wait()
+            .map_err(|e| UksftaError::Input(format!("cannot wait for {}: {e}", self.binary)))?;
+        if !status.success() {
+            let detail = status.code().map_or_else(
+                || "terminated by a signal".to_string(),
+                |code| format!("exit {code}"),
+            );
+            return Err(UksftaError::Input(format!("sftp failed: {detail}")));
+        }
+        Ok(())
     }
 }
 
@@ -188,7 +234,7 @@ mod tests {
             identity: Some(PathBuf::from("/home/user/.ssh/id_ed25519")),
         };
 
-        let args = client.args();
+        let args = client.args(true);
         assert!(
             !args.iter().any(|arg| arg == "262144"),
             "the buffer must stay inside the server-safe limit: {args:?}"
@@ -211,6 +257,29 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["-i", "/home/user/.ssh/id_ed25519"]));
+    }
+
+    #[test]
+    fn quiet_adds_the_flag_and_the_meter_path_leaves_it_out() {
+        let client = Sftp {
+            binary: "sftp".to_string(),
+            destination: "tester@example.invalid".to_string(),
+            port: 2022,
+            identity: None,
+        };
+
+        let quiet = client.args(true);
+        assert!(quiet.iter().any(|arg| arg == "-q"), "{quiet:?}");
+
+        let meter = client.args(false);
+        assert!(!meter.iter().any(|arg| arg == "-q"), "{meter:?}");
+        assert!(meter.windows(2).any(|pair| pair == ["-B", "32768"]));
+        for option in LIVENESS {
+            assert!(
+                meter.windows(2).any(|pair| pair == ["-o", option]),
+                "{meter:?}"
+            );
+        }
     }
 
     #[test]
