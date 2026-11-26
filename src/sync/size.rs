@@ -3,9 +3,12 @@ use std::fs;
 use std::path::Path;
 
 use crate::error::UksftaError;
+use crate::lock::{load_lock, LockFile, ModLockEntry};
 use crate::modlist::parse_modlist_html;
 use crate::steam::{fetch_workshop_sizes, load_workshop_items, WorkshopItem};
-use crate::util::{human_size, paint, stdout_is_tty, C_BOLD, C_DIM, C_GREEN, C_RED, C_YELLOW};
+use crate::util::{
+    find_pbos, human_size, paint, stdout_is_tty, C_BOLD, C_DIM, C_GREEN, C_RED, C_YELLOW,
+};
 
 /// Print each Steam mod in an Arma 3 launcher modlist HTML file with its
 /// download size from the local Workshop cache, then the total. With
@@ -154,4 +157,402 @@ pub fn missing_size_ids(
         }
     }
     ids
+}
+
+// --- Installed pack size ---
+
+/// One mod's installed size in `addons/`.
+pub struct ModSize {
+    pub id: String,
+    pub name: String,
+    pub pbo_count: usize,
+    pub bytes: u64,
+    pub missing: usize,
+}
+
+/// Installed pack totals, derived from `mods.lock` and the files on disk.
+pub struct PackSize {
+    pub mods: Vec<ModSize>,
+    pub tracked_bytes: u64,
+    pub tracked_files: usize,
+    pub untracked_count: usize,
+    pub untracked_bytes: u64,
+    pub missing_files: usize,
+}
+
+/// Order for the installed pack report.
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
+pub enum SortKey {
+    #[default]
+    Size,
+    Name,
+}
+
+/// Normalise a lock path to the form `walkdir` reports from the relative
+/// directory: forward slashes, no `./` prefix, lowercase.
+fn path_key(path: &str) -> String {
+    let slashed = path.replace('\\', "/");
+    slashed
+        .strip_prefix("./")
+        .unwrap_or(&slashed)
+        .to_lowercase()
+}
+
+/// Sum the installed size of each mod in the lock. `disk` maps a normalised
+/// path key to its file size. A file counts once across the pack, so
+/// `tracked_bytes` is not the sum of the per-mod bytes.
+pub fn pack_size(lock: &LockFile, disk: &HashMap<String, u64>) -> PackSize {
+    let mut mods = Vec::with_capacity(lock.mods.len());
+    let mut tracked_keys: HashSet<String> = HashSet::new();
+    let mut tracked_bytes = 0u64;
+    let mut missing_files = 0usize;
+
+    for (id, entry) in &lock.mods {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut bytes = 0u64;
+        let mut pbo_count = 0usize;
+        let mut missing = 0usize;
+
+        for file in &entry.files {
+            let key = path_key(file);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            match disk.get(&key) {
+                Some(size) => {
+                    bytes = bytes.saturating_add(*size);
+                    pbo_count += 1;
+                    if tracked_keys.insert(key.clone()) {
+                        tracked_bytes = tracked_bytes.saturating_add(*size);
+                    }
+                }
+                None => missing += 1,
+            }
+        }
+
+        missing_files += missing;
+        mods.push(ModSize {
+            id: id.clone(),
+            name: if entry.name.is_empty() {
+                format!("Mod {id}")
+            } else {
+                entry.name.clone()
+            },
+            pbo_count,
+            bytes,
+            missing,
+        });
+    }
+
+    let mut untracked_count = 0usize;
+    let mut untracked_bytes = 0u64;
+    for (key, size) in disk {
+        if !tracked_keys.contains(key) {
+            untracked_count += 1;
+            untracked_bytes = untracked_bytes.saturating_add(*size);
+        }
+    }
+
+    PackSize {
+        mods,
+        tracked_bytes,
+        tracked_files: tracked_keys.len(),
+        untracked_count,
+        untracked_bytes,
+        missing_files,
+    }
+}
+
+/// Sort the report by size (largest first) or by name (case-insensitive).
+pub fn sort_mod_sizes(mods: &mut [ModSize], sort: SortKey) {
+    match sort {
+        SortKey::Size => mods.sort_by(|a, b| {
+            b.bytes
+                .cmp(&a.bytes)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.id.cmp(&b.id))
+        }),
+        SortKey::Name => mods.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.id.cmp(&b.id))
+        }),
+    }
+}
+
+/// PBOs of one mod that are present on disk, with the file name and size,
+/// largest first.
+fn mod_pbos(entry: &ModLockEntry, disk: &HashMap<String, u64>) -> Vec<(String, u64)> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut rows = Vec::new();
+    for file in &entry.files {
+        let key = path_key(file);
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        if let Some(size) = disk.get(&key) {
+            let slashed = file.replace('\\', "/");
+            let name = slashed.rsplit('/').next().unwrap_or(&slashed).to_string();
+            rows.push((name, *size));
+        }
+    }
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows
+}
+
+/// Print the installed size of each mod in `mods.lock` against `addons/`,
+/// the PBOs no lock entry tracks, and any locked PBOs that are absent.
+pub fn installed_size(show_pbos: bool, sort: SortKey) -> Result<(), UksftaError> {
+    let addons = Path::new("addons");
+    if !addons.is_dir() {
+        return Err(UksftaError::Input("No addons/ directory".to_string()));
+    }
+
+    let lock = load_lock(Path::new("mods.lock"))?;
+
+    let mut disk: HashMap<String, u64> = HashMap::new();
+    for pbo in find_pbos(addons) {
+        match fs::metadata(&pbo) {
+            Ok(meta) => {
+                disk.insert(path_key(&pbo.to_string_lossy()), meta.len());
+            }
+            Err(e) => eprintln!("Warning: cannot read {}: {}", pbo.display(), e),
+        }
+    }
+
+    let mut pack = pack_size(&lock, &disk);
+    sort_mod_sizes(&mut pack.mods, sort);
+    let use_colour = stdout_is_tty();
+
+    println!("Installed pack size:");
+    println!(
+        "  {} PBO(s), {} mod(s), {}",
+        pack.tracked_files,
+        pack.mods.len(),
+        human_size(pack.tracked_bytes)
+    );
+    if !pack.mods.is_empty() {
+        println!();
+    }
+
+    for m in &pack.mods {
+        let share = if pack.tracked_bytes > 0 {
+            m.bytes as f64 / pack.tracked_bytes as f64
+        } else {
+            0.0
+        };
+        let cell = format!("{:>10}", human_size(m.bytes));
+        println!(
+            "  {}  {:>5.1}%  {} ({})  {} PBO(s)",
+            paint(use_colour, size_share_colour(share), &cell),
+            share * 100.0,
+            m.name,
+            m.id,
+            m.pbo_count
+        );
+        if show_pbos {
+            if let Some(entry) = lock.mods.get(&m.id) {
+                for (name, size) in mod_pbos(entry, &disk) {
+                    println!("    {:>10}  {}", human_size(size), name);
+                }
+            }
+        }
+    }
+
+    println!();
+    if pack.missing_files > 0 {
+        println!(
+            "  Missing:   {} locked PBO(s) not found in addons/",
+            pack.missing_files
+        );
+    }
+    println!(
+        "  Untracked: {} PBO(s), {}",
+        pack.untracked_count,
+        human_size(pack.untracked_bytes)
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(files: &[&str], name: &str) -> ModLockEntry {
+        ModLockEntry {
+            files: files.iter().map(|f| f.to_string()).collect(),
+            name: name.to_string(),
+            tags: Vec::new(),
+            dependencies: Vec::new(),
+            updated: String::new(),
+        }
+    }
+
+    fn lock_of(items: &[(&str, ModLockEntry)]) -> LockFile {
+        LockFile {
+            version: 1,
+            mods: items
+                .iter()
+                .map(|(id, entry)| ((*id).to_string(), entry.clone()))
+                .collect(),
+        }
+    }
+
+    fn disk_of(items: &[(&str, u64)]) -> HashMap<String, u64> {
+        items
+            .iter()
+            .map(|(path, size)| ((*path).to_string(), *size))
+            .collect()
+    }
+
+    fn by_id<'a>(pack: &'a PackSize, id: &str) -> &'a ModSize {
+        pack.mods
+            .iter()
+            .find(|m| m.id == id)
+            .unwrap_or_else(|| panic!("mod {id} not in report"))
+    }
+
+    #[test]
+    fn pack_size_sums_two_files_for_one_mod() {
+        let lock = lock_of(&[("111", entry(&["addons/a.pbo", "addons/b.pbo"], "Mod A"))]);
+        let disk = disk_of(&[("addons/a.pbo", 100), ("addons/b.pbo", 200)]);
+
+        let pack = pack_size(&lock, &disk);
+
+        let m = by_id(&pack, "111");
+        assert_eq!(m.pbo_count, 2);
+        assert_eq!(m.bytes, 300);
+        assert_eq!(m.missing, 0);
+        assert_eq!(pack.tracked_bytes, 300);
+        assert_eq!(pack.tracked_files, 2);
+        assert_eq!(pack.untracked_count, 0);
+        assert_eq!(pack.missing_files, 0);
+    }
+
+    #[test]
+    fn pack_size_counts_untracked_file_separately() {
+        let lock = lock_of(&[("111", entry(&["addons/a.pbo"], "Mod A"))]);
+        let disk = disk_of(&[("addons/a.pbo", 100), ("addons/z.pbo", 50)]);
+
+        let pack = pack_size(&lock, &disk);
+
+        assert_eq!(pack.tracked_bytes, 100);
+        assert_eq!(pack.tracked_files, 1);
+        assert_eq!(pack.untracked_count, 1);
+        assert_eq!(pack.untracked_bytes, 50);
+    }
+
+    #[test]
+    fn pack_size_counts_missing_locked_file_without_bytes() {
+        let lock = lock_of(&[("111", entry(&["addons/a.pbo", "addons/c.pbo"], "Mod A"))]);
+        let disk = disk_of(&[("addons/a.pbo", 100)]);
+
+        let pack = pack_size(&lock, &disk);
+
+        let m = by_id(&pack, "111");
+        assert_eq!(m.pbo_count, 1);
+        assert_eq!(m.bytes, 100);
+        assert_eq!(m.missing, 1);
+        assert_eq!(pack.missing_files, 1);
+        assert_eq!(pack.tracked_bytes, 100);
+    }
+
+    #[test]
+    fn pack_size_counts_a_duplicate_path_once() {
+        let lock = lock_of(&[
+            ("111", entry(&["addons/a.pbo", "addons/a.pbo"], "Mod A")),
+            ("222", entry(&["addons/a.pbo"], "Mod B")),
+        ]);
+        let disk = disk_of(&[("addons/a.pbo", 100)]);
+
+        let pack = pack_size(&lock, &disk);
+
+        assert_eq!(by_id(&pack, "111").pbo_count, 1);
+        assert_eq!(by_id(&pack, "111").bytes, 100);
+        assert_eq!(by_id(&pack, "222").bytes, 100);
+        assert_eq!(pack.tracked_bytes, 100);
+        assert_eq!(pack.tracked_files, 1);
+    }
+
+    #[test]
+    fn pack_size_matches_normalised_lock_path() {
+        let lock = lock_of(&[("111", entry(&["./addons\\A.pbo", "ADDONS/B.PBO"], "Mod A"))]);
+        let disk = disk_of(&[("addons/a.pbo", 10), ("addons/b.pbo", 20)]);
+
+        let pack = pack_size(&lock, &disk);
+
+        let m = by_id(&pack, "111");
+        assert_eq!(m.pbo_count, 2);
+        assert_eq!(m.bytes, 30);
+        assert_eq!(pack.untracked_count, 0);
+    }
+
+    #[test]
+    fn pack_size_falls_back_to_mod_id_name() {
+        let lock = lock_of(&[("450814997", entry(&[], ""))]);
+        let pack = pack_size(&lock, &HashMap::new());
+
+        assert_eq!(by_id(&pack, "450814997").name, "Mod 450814997");
+    }
+
+    #[test]
+    fn pack_size_zero_bytes_leaves_shares_at_zero() {
+        let lock = lock_of(&[("111", entry(&["addons/c.pbo"], "Mod A"))]);
+        let pack = pack_size(&lock, &HashMap::new());
+
+        assert_eq!(pack.tracked_bytes, 0);
+        assert_eq!(pack.tracked_files, 0);
+        assert_eq!(pack.missing_files, 1);
+    }
+
+    #[test]
+    fn sort_mod_sizes_orders_by_size_descending() {
+        let mut mods = vec![
+            ModSize {
+                id: "1".to_string(),
+                name: "Bravo".to_string(),
+                pbo_count: 1,
+                bytes: 10,
+                missing: 0,
+            },
+            ModSize {
+                id: "2".to_string(),
+                name: "Alpha".to_string(),
+                pbo_count: 1,
+                bytes: 30,
+                missing: 0,
+            },
+        ];
+
+        sort_mod_sizes(&mut mods, SortKey::Size);
+
+        assert_eq!(mods[0].name, "Alpha");
+        assert_eq!(mods[1].name, "Bravo");
+    }
+
+    #[test]
+    fn sort_mod_sizes_orders_by_name_case_insensitively() {
+        let mut mods = vec![
+            ModSize {
+                id: "1".to_string(),
+                name: "bravo".to_string(),
+                pbo_count: 1,
+                bytes: 30,
+                missing: 0,
+            },
+            ModSize {
+                id: "2".to_string(),
+                name: "Alpha".to_string(),
+                pbo_count: 1,
+                bytes: 10,
+                missing: 0,
+            },
+        ];
+
+        sort_mod_sizes(&mut mods, SortKey::Name);
+
+        assert_eq!(mods[0].name, "Alpha");
+        assert_eq!(mods[1].name, "bravo");
+    }
 }

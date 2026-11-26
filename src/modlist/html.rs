@@ -8,7 +8,7 @@ const MODLIST_TEMPLATE_HEADER: &str = "\
 <!--Exported with uksfta: https://github.com/UKSFTA/UKSFTA-Tools-->\n\
   <head>\n\
     <meta name=\"arma:Type\" content=\"preset\" />\n\
-    <meta name=\"arma:PresetName\" content=\"UKSFTA Missing Mods\" />\n\
+    <meta name=\"arma:PresetName\" content=\"{{PRESET_NAME}}\" />\n\
     <meta name=\"generator\" content=\"uksfta\" />\n\
     <title>Arma 3</title>\n\
     <link href=\"https://fonts.googleapis.com/css?family=Roboto\" rel=\"stylesheet\" type=\"text/css\" />\n\
@@ -85,7 +85,7 @@ a:hover {\n\
 </style>\n\
   </head>\n\
   <body>\n\
-    <h1>Arma 3  - Preset <strong>UKSFTA Missing Mods</strong></h1>\n\
+    <h1>Arma 3  - Preset <strong>{{PRESET_NAME}}</strong></h1>\n\
     <p class=\"before-list\">\n\
       <em>To import this preset, drag this file onto the Launcher window. Or click the MODS tab, then PRESET in the top right, then IMPORT at the bottom, and finally select this file.</em>\n\
     </p>\n\
@@ -124,20 +124,36 @@ pub fn modlist_row_html(id: &str, name: &str) -> String {
     )
 }
 
+/// Build the full modlist HTML for a preset name and an ordered mod list.
+/// The preset name is HTML-escaped before it enters the header.
+pub fn preset_html(mods: &[(String, String)], preset_name: &str) -> String {
+    let escaped_preset = html_escape::encode_safe(preset_name);
+    let mut html = MODLIST_TEMPLATE_HEADER.replace("{{PRESET_NAME}}", &escaped_preset);
+    for (id, name) in mods {
+        html.push_str(&modlist_row_html(id, name));
+    }
+    html.push_str(MODLIST_TEMPLATE_FOOTER);
+    html
+}
+
+/// Write the modlist HTML for `mods` with the given preset name.
+pub fn generate_preset(
+    mods: &[(String, String)],
+    path: &Path,
+    preset_name: &str,
+) -> Result<(), UksftaError> {
+    let html = preset_html(mods, preset_name);
+    crate::atomic::write_atomic(path, html.as_bytes())?;
+    println!("Modlist written to {}", path.display());
+    Ok(())
+}
+
 pub fn generate_modlist(missing: &[(String, String)], path: &Path) -> Result<(), UksftaError> {
     if missing.is_empty() {
         return Ok(());
     }
 
-    let mut html = String::from(MODLIST_TEMPLATE_HEADER);
-    for (id, name) in missing {
-        html.push_str(&modlist_row_html(id, name));
-    }
-    html.push_str(MODLIST_TEMPLATE_FOOTER);
-
-    crate::atomic::write_atomic(path, html.as_bytes())?;
-    println!("Modlist written to {}", path.display());
-    Ok(())
+    generate_preset(missing, path, "UKSFTA Missing Mods")
 }
 
 #[cfg(test)]
@@ -162,5 +178,42 @@ mod tests {
         let quoted = modlist_row_html("1234567890", "Mod \"quoted\"");
         assert!(quoted.contains("Mod &quot;quoted&quot;"));
         assert!(!quoted.contains("Mod \"quoted\""));
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("uksfta-html-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn generate_modlist_writes_nothing_when_empty() {
+        let dir = temp_dir("empty");
+        let path = dir.join("missing-mods.html");
+        generate_modlist(&[], &path).unwrap();
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generate_modlist_keeps_missing_mods_preset_and_title() {
+        let dir = temp_dir("missing");
+        let path = dir.join("missing-mods.html");
+        generate_modlist(&[("450814997".to_string(), "CBA_A3".to_string())], &path).unwrap();
+        let html = std::fs::read_to_string(&path).unwrap();
+        assert!(html.contains("content=\"UKSFTA Missing Mods\""));
+        assert!(html.contains("<strong>UKSFTA Missing Mods</strong>"));
+        assert!(html.contains("<title>Arma 3</title>"));
+        assert!(html.contains("CBA_A3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preset_html_escapes_preset_name() {
+        let html = preset_html(&[], "<b>Pack</b>");
+        assert!(html.contains("content=\"&lt;b&gt;Pack&lt;&#x2F;b&gt;\""));
+        assert!(html.contains("<strong>&lt;b&gt;Pack&lt;&#x2F;b&gt;</strong>"));
+        assert!(!html.contains("<b>Pack</b>"));
     }
 }

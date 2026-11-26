@@ -85,11 +85,26 @@ uksfta import ./my-modlist.html
 # Preview what would be imported without changing mod_sources.txt
 uksfta import ./my-modlist.html --dry-run
 
+# Export mod_sources.txt as an Arma 3 launcher modlist
+uksfta export
+
+# Export to a chosen path with a chosen preset name
+uksfta export ./modlist.html --preset-name "UKSFTA Modpack"
+
+# Print the entries without writing a file
+uksfta export --dry-run
+
 # Show each mod's size from a launcher modlist HTML, and the total
 uksfta size ./my-modlist.html
 
 # Also fetch sizes for mods not installed locally (Workshop API)
 uksfta size ./my-modlist.html --online
+
+# Show the installed pack size per mod from mods.lock and addons/
+uksfta size
+
+# Print one line per PBO, and sort the report by name
+uksfta size --pbo --sort name
 ```
 
 ## Publish Files
@@ -283,6 +298,41 @@ Each Steam mod is appended as `{id} # {name}`. Mods already present in
 mods without a Workshop ID are skipped with a warning. New entries are
 inserted before the `[ignore]` section if one exists.
 
+## Exporting a modlist
+
+Use `export` to write every enabled mod in `mod_sources.txt` as an Arma 3
+launcher preset file (HTML):
+
+```bash
+# Write modlist.html in the current directory
+uksfta export
+
+# Write to a chosen path
+uksfta export ./out/modlist.html
+
+# Set the preset name shown in the launcher
+uksfta export --preset-name "UKSFTA Modpack"
+
+# Print the entries and write no file
+uksfta export --dry-run
+```
+
+The output path defaults to `modlist.html` in the current directory. The
+preset name defaults to the name of the current directory, and falls back
+to `UKSFTA Modpack` when that name is not usable. `--preset-name` sets the
+name in the `arma:PresetName` meta tag and the page heading.
+
+Entries with `role = "ignore"` or `enabled = false` are left out. The mod
+order follows `mod_sources.txt`. A source name of `Mod <id>` is replaced
+by the name in `mods.lock` when the lock holds one.
+
+`--dry-run` prints the entries that would be written and writes no file.
+
+The output is a normal launcher preset, so `uksfta import` reads it back.
+
+Local mods cannot be exported. `mod_sources.txt` holds Workshop ids only,
+and a local mod has no Workshop id.
+
 ## Modlist size
 
 Use `size` to list the download size of every mod in an Arma 3 launcher
@@ -305,6 +355,31 @@ offline.
 When the output is a terminal, each size is coloured by its share of the
 total: green under 5%, yellow under 20%, red at or above 20%. Mods with no
 known size are shown in grey.
+
+### Installed pack size
+
+Run `size` with no file to report the installed size of each mod in
+`mods.lock`. The command reads every PBO path in the lock and measures
+the file in `addons/`:
+
+```bash
+uksfta size
+```
+
+The report is sorted by size, largest first. Each line shows the size,
+the share of the tracked total, the mod name, the Workshop ID, and the
+PBO count. The command also reports PBOs that no lock entry tracks and
+locked PBOs that are absent from `addons/`. A missing PBO adds no bytes
+to the total.
+
+Add `--pbo` to print each PBO and its size under its mod. Add `--sort name`
+to sort the report by mod name in case-insensitive order. The default order
+is by size:
+
+```bash
+uksfta size --pbo
+uksfta size --sort name
+```
 
 ## Investigating PBO origins
 
