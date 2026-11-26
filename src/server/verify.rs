@@ -8,11 +8,15 @@ use std::path::PathBuf;
 use super::config::Settings;
 use super::parse::{self, Block};
 use super::plan::{
-    build_plan, join_remote, mod_dir, LocalPack, Plan, PlanInput, RemoteFile, RemotePack,
+    build_plan, is_bikey, join_remote, mod_dir, LocalPack, Plan, PlanInput, RemoteFile, RemotePack,
 };
 use super::sftp::{quote, ScratchDir, Sftp};
+use super::signature;
 use crate::error::UksftaError;
 use crate::util::file_sha256;
+
+/// The most remote key files read in one run.
+const MAX_REMOTE_KEYS: usize = 64;
 
 /// The inputs that stay fixed for one command run.
 pub struct Verifier<'a> {
@@ -33,21 +37,84 @@ impl Verifier<'_> {
         let dir = mod_dir(&self.settings.root, &self.local.id);
         let mut remote = self.list(&dir)?;
         self.fetch_meta(&dir, &mut remote)?;
+        let (remote_key_authorities, mut warnings) = self.fetch_remote_keys(&dir, &remote)?;
         let deep = if self.deep {
             self.deep_hashes(&dir, &remote)?
         } else {
             HashMap::new()
         };
-        Ok(build_plan(&PlanInput {
+        let mut plan = build_plan(&PlanInput {
             local: self.local,
             remote_dir: &dir,
             remote: &remote,
             meta_upload: Some(&self.meta_upload),
             deep: &deep,
             locked: self.locked,
+            local_signature_authorities: &self.local.signature_authorities,
+            local_key_authorities: &self.local.key_authorities,
+            remote_key_authorities: &remote_key_authorities,
             force_prune: self.force_prune,
             require_signatures: self.require_signatures,
-        }))
+        });
+        plan.warnings.append(&mut warnings);
+        Ok(plan)
+    }
+
+    /// One batch downloads every remote `keys/*.bikey` and reads its
+    /// authority. A failure is a warning, so the remote set stays unknown.
+    fn fetch_remote_keys(
+        &self,
+        dir: &str,
+        remote: &RemotePack,
+    ) -> Result<(HashSet<String>, Vec<String>), UksftaError> {
+        let mut warnings = Vec::new();
+        let mut names: Vec<&str> = remote
+            .keys
+            .iter()
+            .map(|file| file.name.as_str())
+            .filter(|name| is_bikey(name))
+            .collect();
+        names.sort_unstable();
+        if names.len() > MAX_REMOTE_KEYS {
+            warnings.push(format!(
+                "keys/: {} key(s); only the first {MAX_REMOTE_KEYS} are read",
+                names.len()
+            ));
+            names.truncate(MAX_REMOTE_KEYS);
+        }
+        if names.is_empty() {
+            return Ok((HashSet::new(), warnings));
+        }
+
+        let keys_dir = join_remote(dir, "keys");
+        let out_dir = self.scratch.join("remote-keys");
+        fs::create_dir_all(&out_dir).map_err(UksftaError::Io)?;
+        let mut lines = Vec::new();
+        let mut targets = Vec::new();
+        for name in names {
+            let target = out_dir.join(name);
+            lines.push(format!(
+                "-get {} {}",
+                quote(&join_remote(&keys_dir, name))?,
+                quote(&target.display().to_string())?
+            ));
+            targets.push((name.to_string(), target));
+        }
+        if let Err(e) = self.client.batch(&lines) {
+            warnings.push(format!("keys/: cannot download the remote keys: {e}"));
+            return Ok((HashSet::new(), warnings));
+        }
+
+        let mut authorities = HashSet::new();
+        for (name, path) in targets {
+            match signature::read_key_file(&path) {
+                Ok(key) => {
+                    authorities.insert(key.name);
+                }
+                Err(e) => warnings.push(format!("keys/{name}: {e}")),
+            }
+        }
+        Ok((authorities, warnings))
     }
 
     /// One batch lists the pack folder and its `addons/` and `keys/`.

@@ -33,6 +33,9 @@ struct Fixture {
     remote: RemotePack,
     deep: HashMap<String, bool>,
     locked: HashSet<String>,
+    signature_authorities: HashMap<String, String>,
+    key_authorities: HashSet<String>,
+    remote_key_authorities: HashSet<String>,
     force_prune: bool,
 }
 
@@ -48,6 +51,7 @@ impl Fixture {
             meta: Some(local_file("/local", "meta.cpp", 4)),
             mod_cpp: Some(local_file("/local", "mod.cpp", 20)),
             meta_source: PathBuf::from("/repo/meta.cpp"),
+            ..LocalPack::default()
         };
         let remote = RemotePack {
             exists: true,
@@ -63,6 +67,9 @@ impl Fixture {
             remote,
             deep: HashMap::new(),
             locked: HashSet::new(),
+            signature_authorities: HashMap::new(),
+            key_authorities: HashSet::new(),
+            remote_key_authorities: HashSet::new(),
             force_prune: false,
         }
     }
@@ -79,6 +86,9 @@ impl Fixture {
             meta_upload: Some(Path::new("/local/meta.cpp")),
             deep: &self.deep,
             locked: &self.locked,
+            local_signature_authorities: &self.signature_authorities,
+            local_key_authorities: &self.key_authorities,
+            remote_key_authorities: &self.remote_key_authorities,
             force_prune: self.force_prune,
             require_signatures,
         })
@@ -440,4 +450,78 @@ fn a_generated_meta_cpp_adds_no_upload_bytes() {
         Action::Upload { name, size, .. } if name == "meta.cpp" && *size == 0
     )));
     assert_eq!(plan.upload_bytes(), 0);
+}
+
+#[test]
+fn a_signature_authority_with_a_shipped_key_passes() {
+    let mut fixture = Fixture::new();
+    fixture
+        .signature_authorities
+        .insert(SIG.to_string(), "uksfta_1.0.1".to_string());
+    fixture.key_authorities.insert("uksfta_1.0.1".to_string());
+    fixture
+        .remote_key_authorities
+        .insert("uksfta_1.0.1".to_string());
+
+    let plan = fixture.plan();
+    assert!(
+        !plan
+            .findings
+            .iter()
+            .any(|f| matches!(f, Finding::KeyAuthorityMissing { .. })),
+        "{:?}",
+        plan.findings
+    );
+    assert_eq!(plan.status(), Status::Ok);
+}
+
+#[test]
+fn a_renamed_key_with_the_same_authority_passes_and_warns() {
+    let mut fixture = Fixture::new();
+    fixture
+        .signature_authorities
+        .insert(SIG.to_string(), "uksfta_1.0.1".to_string());
+    fixture.key_authorities.insert("uksfta_1.0.1".to_string());
+    fixture.local.authority_warnings =
+        vec!["renamed.bikey: embedded authority is uksfta_1.0.1".to_string()];
+
+    let plan = fixture.plan();
+    assert_eq!(plan.status(), Status::Ok);
+    assert!(plan.warnings.iter().any(|w| w.contains("renamed.bikey")));
+}
+
+#[test]
+fn a_signature_authority_without_a_key_fails() {
+    let mut fixture = Fixture::new();
+    fixture
+        .signature_authorities
+        .insert(SIG.to_string(), "other_1".to_string());
+    fixture.key_authorities.insert("uksfta_1.0.1".to_string());
+
+    let plan = fixture.plan();
+    assert!(plan.findings.iter().any(|f| matches!(
+        f,
+        Finding::KeyAuthorityMissing { signature, authority }
+            if signature == SIG && authority == "other_1"
+    )));
+    assert_eq!(plan.status(), Status::Missing);
+    assert!(plan.failed());
+}
+
+#[test]
+fn a_signature_authority_missing_from_the_remote_keys_fails() {
+    let mut fixture = Fixture::new();
+    fixture
+        .signature_authorities
+        .insert(SIG.to_string(), "uksfta_1.0.1".to_string());
+    fixture.key_authorities.insert("uksfta_1.0.1".to_string());
+    fixture
+        .remote_key_authorities
+        .insert("another_authority".to_string());
+
+    let plan = fixture.plan();
+    assert!(plan
+        .findings
+        .iter()
+        .any(|f| matches!(f, Finding::KeyAuthorityMissing { .. })));
 }
