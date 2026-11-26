@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
 use crate::error::UksftaError;
 use crate::lock::{load_lock, LockFile, ModLockEntry};
-use crate::modlist::parse_modlist_html;
+use crate::modlist::{parse_mod_sources, parse_modlist_html, ModEntry};
 use crate::steam::{fetch_workshop_sizes, load_workshop_items, WorkshopItem};
 use crate::util::{
     find_pbos, human_size, paint, stdout_is_tty, C_BOLD, C_DIM, C_GREEN, C_RED, C_YELLOW,
@@ -177,7 +177,9 @@ pub struct PackSize {
     pub tracked_files: usize,
     pub untracked_count: usize,
     pub untracked_bytes: u64,
+    pub untracked_keys: Vec<String>,
     pub missing_files: usize,
+    pub missing: Vec<String>,
 }
 
 /// Order for the installed pack report.
@@ -206,12 +208,13 @@ pub fn pack_size(lock: &LockFile, disk: &HashMap<String, u64>) -> PackSize {
     let mut tracked_keys: HashSet<String> = HashSet::new();
     let mut tracked_bytes = 0u64;
     let mut missing_files = 0usize;
+    let mut missing: BTreeSet<String> = BTreeSet::new();
 
     for (id, entry) in &lock.mods {
         let mut seen: HashSet<String> = HashSet::new();
         let mut bytes = 0u64;
         let mut pbo_count = 0usize;
-        let mut missing = 0usize;
+        let mut missing_here = 0usize;
 
         for file in &entry.files {
             let key = path_key(file);
@@ -226,11 +229,14 @@ pub fn pack_size(lock: &LockFile, disk: &HashMap<String, u64>) -> PackSize {
                         tracked_bytes = tracked_bytes.saturating_add(*size);
                     }
                 }
-                None => missing += 1,
+                None => {
+                    missing_here += 1;
+                    missing.insert(file.clone());
+                }
             }
         }
 
-        missing_files += missing;
+        missing_files += missing_here;
         mods.push(ModSize {
             id: id.clone(),
             name: if entry.name.is_empty() {
@@ -240,26 +246,25 @@ pub fn pack_size(lock: &LockFile, disk: &HashMap<String, u64>) -> PackSize {
             },
             pbo_count,
             bytes,
-            missing,
+            missing: missing_here,
         });
     }
 
-    let mut untracked_count = 0usize;
-    let mut untracked_bytes = 0u64;
-    for (key, size) in disk {
-        if !tracked_keys.contains(key) {
-            untracked_count += 1;
-            untracked_bytes = untracked_bytes.saturating_add(*size);
-        }
-    }
+    let mut untracked: Vec<(&String, &u64)> = disk
+        .iter()
+        .filter(|(key, _)| !tracked_keys.contains(*key))
+        .collect();
+    untracked.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
 
     PackSize {
         mods,
         tracked_bytes,
         tracked_files: tracked_keys.len(),
-        untracked_count,
-        untracked_bytes,
+        untracked_count: untracked.len(),
+        untracked_bytes: untracked.iter().map(|(_, size)| **size).sum(),
+        untracked_keys: untracked.iter().map(|(key, _)| (*key).clone()).collect(),
         missing_files,
+        missing: missing.into_iter().collect(),
     }
 }
 
@@ -312,10 +317,15 @@ pub fn installed_size(show_pbos: bool, sort: SortKey) -> Result<(), UksftaError>
     let lock = load_lock(Path::new("mods.lock"))?;
 
     let mut disk: HashMap<String, u64> = HashMap::new();
+    let mut display: HashMap<String, String> = HashMap::new();
     for pbo in find_pbos(addons) {
+        let key = path_key(&pbo.to_string_lossy());
         match fs::metadata(&pbo) {
             Ok(meta) => {
-                disk.insert(path_key(&pbo.to_string_lossy()), meta.len());
+                if let Some(name) = pbo.file_name() {
+                    display.insert(key.clone(), name.to_string_lossy().to_string());
+                }
+                disk.insert(key, meta.len());
             }
             Err(e) => eprintln!("Warning: cannot read {}: {}", pbo.display(), e),
         }
@@ -366,13 +376,62 @@ pub fn installed_size(show_pbos: bool, sort: SortKey) -> Result<(), UksftaError>
             "  Missing:   {} locked PBO(s) not found in addons/",
             pack.missing_files
         );
+        if show_pbos {
+            for path in &pack.missing {
+                let name = path.rsplit(['/', '\\']).next().unwrap_or(path.as_str());
+                println!("    {name}");
+            }
+        }
     }
     println!(
         "  Untracked: {} PBO(s), {}",
         pack.untracked_count,
         human_size(pack.untracked_bytes)
     );
+    if show_pbos {
+        for key in &pack.untracked_keys {
+            if let Some(size) = disk.get(key) {
+                let name = display.get(key).map(String::as_str).unwrap_or(key.as_str());
+                println!("    {:>10}  {}", human_size(*size), name);
+            }
+        }
+    }
+
+    let sources = Path::new("mod_sources.txt");
+    if sources.exists() {
+        match parse_mod_sources(sources) {
+            Ok((mods, _ignored)) => {
+                let not_installed = sources_not_in_lock(&lock, &mods);
+                if !not_installed.is_empty() {
+                    println!(
+                        "  Not installed: {} enabled mod(s) in mod_sources.txt",
+                        not_installed.len()
+                    );
+                    for (name, id) in &not_installed {
+                        println!("    {name} ({id})");
+                    }
+                }
+            }
+            Err(e) => eprintln!("Warning: {e}"),
+        }
+    }
     Ok(())
+}
+
+/// Enabled `mod_sources.txt` mods that no `mods.lock` entry covers, as
+/// `(name, id)` pairs sorted by name and then id.
+fn sources_not_in_lock(lock: &LockFile, mods: &[ModEntry]) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = mods
+        .iter()
+        .filter(|m| !lock.mods.contains_key(&m.id))
+        .map(|m| (m.name.clone(), m.id.clone()))
+        .collect();
+    rows.sort_by(|a, b| {
+        a.0.to_lowercase()
+            .cmp(&b.0.to_lowercase())
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    rows
 }
 
 #[cfg(test)]
@@ -404,6 +463,17 @@ mod tests {
             .iter()
             .map(|(path, size)| ((*path).to_string(), *size))
             .collect()
+    }
+
+    fn mod_entry(id: &str, name: &str) -> ModEntry {
+        ModEntry {
+            id: id.to_string(),
+            name: name.to_string(),
+            tags: Vec::new(),
+            role: "include".to_string(),
+            enabled: true,
+            dependencies: Vec::new(),
+        }
     }
 
     fn by_id<'a>(pack: &'a PackSize, id: &str) -> &'a ModSize {
@@ -554,5 +624,59 @@ mod tests {
 
         assert_eq!(mods[0].name, "Alpha");
         assert_eq!(mods[1].name, "bravo");
+    }
+
+    #[test]
+    fn pack_size_untracked_keys_sorted_by_size_descending() {
+        let lock = lock_of(&[("111", entry(&["addons/a.pbo"], "Mod A"))]);
+        let disk = disk_of(&[
+            ("addons/a.pbo", 100),
+            ("addons/small.pbo", 10),
+            ("addons/large.pbo", 500),
+            ("addons/mid.pbo", 50),
+        ]);
+
+        let pack = pack_size(&lock, &disk);
+
+        assert_eq!(
+            pack.untracked_keys,
+            vec!["addons/large.pbo", "addons/mid.pbo", "addons/small.pbo"]
+        );
+        assert_eq!(pack.untracked_count, 3);
+        assert_eq!(pack.untracked_bytes, 560);
+    }
+
+    #[test]
+    fn pack_size_missing_lists_original_paths_once_sorted() {
+        let lock = lock_of(&[
+            ("111", entry(&["ADDONS\\Z.pbo", "addons/a.pbo"], "Mod A")),
+            ("222", entry(&["addons/M.pbo", "ADDONS\\Z.pbo"], "Mod B")),
+        ]);
+        let disk = disk_of(&[("addons/a.pbo", 100)]);
+
+        let pack = pack_size(&lock, &disk);
+
+        assert_eq!(pack.missing, vec!["ADDONS\\Z.pbo", "addons/M.pbo"]);
+        assert_eq!(pack.missing_files, 3);
+    }
+
+    #[test]
+    fn sources_not_in_lock_excludes_locked_ids_and_sorts_by_name() {
+        let lock = lock_of(&[("111", entry(&[], "Locked"))]);
+        let mods = vec![
+            mod_entry("333", "bravo"),
+            mod_entry("111", "Locked"),
+            mod_entry("222", "Alpha"),
+        ];
+
+        let rows = sources_not_in_lock(&lock, &mods);
+
+        assert_eq!(
+            rows,
+            vec![
+                ("Alpha".to_string(), "222".to_string()),
+                ("bravo".to_string(), "333".to_string()),
+            ]
+        );
     }
 }

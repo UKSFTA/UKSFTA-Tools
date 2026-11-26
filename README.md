@@ -381,6 +381,13 @@ uksfta size --pbo
 uksfta size --sort name
 ```
 
+With `--pbo`, the command also lists each untracked PBO with its size and
+the name of each locked PBO that is absent from `addons/`. Enabled mods in
+`mod_sources.txt` that are not in `mods.lock` appear under `Not installed`,
+with the name and the Workshop ID. The command stays silent when there is
+no `mod_sources.txt`. It prints a warning to stderr when the file exists
+but cannot be parsed.
+
 ## Investigating PBO origins
 
 Use `investigate` to trace PBOs in `addons/` back to their Workshop
