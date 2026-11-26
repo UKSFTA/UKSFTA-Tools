@@ -32,7 +32,13 @@ pub use crate::util::*;
 pub use crate::version::*;
 
 #[derive(Parser)]
-#[command(name = "uksfta", about = "UKSFTA modpack manager", version)]
+#[command(
+    name = "uksfta",
+    about = "UKSFTA modpack manager",
+    long_about = "UKSFTA modpack manager\n\nSync, verify, inspect and export the mods of an Arma 3 modpack. Most commands run from a mod repository root that contains mod_sources.txt and addons/.",
+    after_help = "Examples:\n  uksfta sync --dry-run\n  uksfta size --pbo\n  uksfta export ./modlist.html",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -40,24 +46,31 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Sync mods from Workshop cache into addons/
+    /// Sync mods from the Workshop cache into addons/
+    ///
+    /// Copies every mod's PBOs from the local Steam Workshop cache, writes
+    /// mods.lock, and reports mods that are missing. With --modlist, writes a
+    /// launcher preset for the missing mods.
+    #[command(
+        after_help = "Examples:\n  uksfta sync --dry-run\n  uksfta sync --offline\n  uksfta sync --modlist --resolve-deps"
+    )]
     Sync {
-        /// Show what would change without doing it
+        /// Show the planned changes without copying files
         #[arg(long)]
         dry_run: bool,
-        /// Skip dependency resolution (offline mode)
+        /// Skip dependency resolution and network access
         #[arg(long)]
         offline: bool,
-        /// Generate an Arma 3 launcher modlist for missing mods
+        /// Write a launcher preset for mods missing from the cache
         #[arg(long)]
         modlist: bool,
-        /// Output path for the modlist HTML (default: missing-mods.html)
+        /// Output path for the missing-mod preset
         #[arg(long, default_value = "missing-mods.html")]
         modlist_path: PathBuf,
-        /// Resolve every mod's dependencies from Workshop pages
+        /// Resolve each mod's dependencies from Workshop pages
         #[arg(long)]
         resolve_deps: bool,
-        /// Satisfy discovered dependencies from an Arma 3 launcher modlist HTML file
+        /// Satisfy dependencies from a launcher preset HTML
         #[arg(long, value_name = "PATH")]
         fill_from: Option<PathBuf>,
     },
@@ -73,34 +86,60 @@ enum Commands {
     },
     /// Check for updates available in Workshop cache
     Updates,
-    /// Import mods from an Arma 3 launcher modlist HTML file
+    /// Import a launcher modlist into mod_sources.txt
+    ///
+    /// Adds each Steam mod from an Arma 3 launcher preset to mod_sources.txt
+    /// and skips ids that are already present. Local mods have no Workshop id
+    /// and are skipped with a message.
+    #[command(
+        after_help = "Examples:\n  uksfta import ./my-modlist.html\n  uksfta import ./my-modlist.html --dry-run"
+    )]
     Import {
-        /// Path to the modlist HTML file
+        /// Launcher preset HTML to read
         modlist_file: PathBuf,
-        /// Show what would be imported without modifying mod_sources.txt
+        /// Print the entries without writing mod_sources.txt
         #[arg(long)]
         dry_run: bool,
     },
-    /// Export mod_sources.txt as an Arma 3 launcher modlist
+    /// Export mod_sources.txt as a launcher modlist
+    ///
+    /// Writes every enabled, non-ignored mod in mod_sources.txt as an Arma 3
+    /// launcher preset. Local mods cannot be exported because they have no
+    /// Workshop id.
+    #[command(
+        after_help = "Examples:\n  uksfta export\n  uksfta export ./pack.html --preset-name \"UKSFTA Modpack\"\n  uksfta export --dry-run"
+    )]
     Export {
-        /// Output path for the modlist HTML (default: modlist.html)
+        /// Output file (default: modlist.html)
         #[arg(value_name = "PATH")]
         output: Option<PathBuf>,
         /// Preset name shown in the launcher (default: current directory name)
         #[arg(long, value_name = "NAME")]
         preset_name: Option<String>,
-        /// Print the entries without writing the file
+        /// Print the entries without writing a file
         #[arg(long)]
         dry_run: bool,
     },
-    /// Show mod sizes from a modlist HTML file, or the installed pack size
+    /// Show mod sizes from a launcher preset or the installed pack
+    ///
+    /// With an HTML file, reports the Workshop download size of each mod in
+    /// an Arma 3 launcher preset, using the local Workshop cache.
+    ///
+    /// Without a file, measures the PBOs in mods.lock against addons/ and
+    /// reports each mod's size, the pack total, untracked PBOs and missing
+    /// files. Enabled mods in mod_sources.txt that are absent from mods.lock
+    /// are listed as not installed.
+    #[command(
+        after_help = "Examples:\n  uksfta size\n  uksfta size --pbo --sort name\n  uksfta size ./my-modlist.html --online"
+    )]
     Size {
-        /// Path to the modlist HTML file
+        /// Launcher preset HTML; omit to measure the installed pack
+        #[arg(value_name = "HTML")]
         modlist_file: Option<PathBuf>,
-        /// Print one line per PBO under each mod
+        /// List each PBO, plus untracked and missing PBO names
         #[arg(long, conflicts_with = "modlist_file")]
         pbo: bool,
-        /// Sort by size (default) or by name
+        /// Order the installed report by size or name
         #[arg(
             long,
             value_enum,
@@ -108,7 +147,7 @@ enum Commands {
             conflicts_with = "modlist_file"
         )]
         sort: SortKey,
-        /// Fetch sizes for mods not installed locally from the Workshop API
+        /// Fetch sizes for mods missing from the local Workshop cache
         #[arg(long, requires = "modlist_file")]
         online: bool,
     },
