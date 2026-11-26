@@ -24,6 +24,105 @@ pub const MIN_REQUESTS: u16 = 1;
 /// The largest outstanding-request count this command allows.
 pub const MAX_REQUESTS: u16 = 256;
 
+/// The smallest segmented chunk.
+pub const MIN_SEGMENT_CHUNK: u32 = 1024 * 1024;
+/// The largest segmented chunk.
+pub const MAX_SEGMENT_CHUNK: u32 = 64 * 1024 * 1024;
+/// The most segmented connections.
+pub const MAX_SEGMENT_CONNECTIONS: u8 = 16;
+/// The largest minimum size that still uses the whole-file path.
+pub const MAX_SEGMENT_MIN: u64 = 1024 * 1024 * 1024 * 1024;
+/// The most reconnects per segmented run.
+pub const MAX_SEGMENT_RECONNECTS: u8 = 10;
+
+/// How a segmented run treats an earlier interrupted transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentResume {
+    Auto,
+    Off,
+}
+
+impl SegmentResume {
+    // The segmented upload surface prints this name in Wave 2.
+    #[allow(dead_code)]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SegmentResume::Auto => "auto",
+            SegmentResume::Off => "off",
+        }
+    }
+
+    /// # Errors
+    /// Returns `Input` for a value that is not `auto` or `off`.
+    pub fn parse(value: &str) -> Result<Self, UksftaError> {
+        match value {
+            "auto" => Ok(SegmentResume::Auto),
+            "off" => Ok(SegmentResume::Off),
+            other => Err(UksftaError::Input(format!(
+                "segment resume must be auto or off: {other:?}"
+            ))),
+        }
+    }
+}
+
+/// The opt-in segmented upload settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Segment {
+    pub enabled: bool,
+    pub min_bytes: u64,
+    pub connections: u8,
+    pub chunk: Option<u32>,
+    pub resume: SegmentResume,
+    pub reconnects: u8,
+}
+
+impl Default for Segment {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_bytes: 64 * 1024 * 1024,
+            connections: 4,
+            chunk: None,
+            resume: SegmentResume::Auto,
+            reconnects: 3,
+        }
+    }
+}
+
+impl Segment {
+    /// # Errors
+    /// Returns `Input` when a value is outside its range or a chunk is not a
+    /// 4096-byte multiple.
+    pub fn validate(self) -> Result<Self, UksftaError> {
+        if !(1..=MAX_SEGMENT_CONNECTIONS).contains(&self.connections) {
+            return Err(UksftaError::Input(format!(
+                "segment connections must be 1..={MAX_SEGMENT_CONNECTIONS}: {}",
+                self.connections
+            )));
+        }
+        if let Some(chunk) = self.chunk {
+            if !(MIN_SEGMENT_CHUNK..=MAX_SEGMENT_CHUNK).contains(&chunk) || chunk % 4096 != 0 {
+                return Err(UksftaError::Input(format!(
+                    "segment chunk must be {MIN_SEGMENT_CHUNK}..={MAX_SEGMENT_CHUNK} bytes and a 4096-byte multiple: {chunk}"
+                )));
+            }
+        }
+        if self.min_bytes > MAX_SEGMENT_MIN {
+            return Err(UksftaError::Input(format!(
+                "segment min must be at most {MAX_SEGMENT_MIN} bytes: {}",
+                self.min_bytes
+            )));
+        }
+        if self.reconnects > MAX_SEGMENT_RECONNECTS {
+            return Err(UksftaError::Input(format!(
+                "segment reconnects must be 0..={MAX_SEGMENT_RECONNECTS}: {}",
+                self.reconnects
+            )));
+        }
+        Ok(self)
+    }
+}
+
 /// The sftp transfer tuning. The in-flight data per connection is about
 /// `buffer * requests`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +177,12 @@ pub struct ServerConfig {
     pub host_key_policy: Option<String>,
     pub launch_line_file: Option<PathBuf>,
     pub server_cfg: Option<String>,
+    pub segment: Option<bool>,
+    pub segment_min: Option<u64>,
+    pub segment_connections: Option<u8>,
+    pub segment_chunk: Option<u32>,
+    pub segment_resume: Option<String>,
+    pub segment_reconnects: Option<u8>,
 }
 
 /// Connection fields a flag can override.
@@ -93,6 +198,12 @@ pub struct Overrides {
     pub host_key_policy: Option<String>,
     pub launch_line: Option<PathBuf>,
     pub server_cfg: Option<String>,
+    pub segment: Option<bool>,
+    pub segment_min: Option<u64>,
+    pub segment_connections: Option<u8>,
+    pub segment_chunk: Option<u32>,
+    pub segment_resume: Option<String>,
+    pub segment_reconnects: Option<u8>,
 }
 
 /// Resolved connection settings with every field present.
@@ -107,6 +218,7 @@ pub struct Settings {
     pub host_key_policy: HostKeyPolicy,
     pub launch_line: Option<PathBuf>,
     pub server_cfg: Option<String>,
+    pub segment: Segment,
 }
 
 /// Read the config file. A missing file is `None`, so the defaults apply.
@@ -182,6 +294,37 @@ pub fn resolve(config_path: Option<&Path>, overrides: &Overrides) -> Result<Sett
         host_key_policy,
         launch_line: overrides.launch_line.clone().or(config.launch_line_file),
         server_cfg: overrides.server_cfg.clone().or(config.server_cfg),
+        segment: {
+            let defaults = Segment::default();
+            Segment {
+                enabled: overrides
+                    .segment
+                    .or(config.segment)
+                    .unwrap_or(defaults.enabled),
+                min_bytes: overrides
+                    .segment_min
+                    .or(config.segment_min)
+                    .unwrap_or(defaults.min_bytes),
+                connections: overrides
+                    .segment_connections
+                    .or(config.segment_connections)
+                    .unwrap_or(defaults.connections),
+                chunk: overrides.segment_chunk.or(config.segment_chunk),
+                resume: match overrides
+                    .segment_resume
+                    .as_deref()
+                    .or(config.segment_resume.as_deref())
+                {
+                    Some(value) => SegmentResume::parse(value)?,
+                    None => defaults.resume,
+                },
+                reconnects: overrides
+                    .segment_reconnects
+                    .or(config.segment_reconnects)
+                    .unwrap_or(defaults.reconnects),
+            }
+            .validate()?
+        },
     })
 }
 
@@ -363,6 +506,85 @@ mod tests {
             .unwrap_err();
             assert!(matches!(err, UksftaError::Input(_)), "{requests}");
         }
+    }
+
+    #[test]
+    fn the_segment_defaults_keep_the_whole_file_path() {
+        let settings = resolve(None, &overrides("a@b", "/x")).unwrap();
+        assert_eq!(settings.segment, Segment::default());
+        assert!(!settings.segment.enabled);
+        assert_eq!(settings.segment.min_bytes, 64 * 1024 * 1024);
+        assert_eq!(settings.segment.connections, 4);
+        assert_eq!(settings.segment.chunk, None);
+        assert_eq!(settings.segment.resume, SegmentResume::Auto);
+        assert_eq!(settings.segment.reconnects, 3);
+    }
+
+    #[test]
+    fn a_flag_overrides_the_file_for_the_segment_settings() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("server.toml");
+        fs::write(
+            &path,
+            "destination = \"a@b\"\nroot = \"/x\"\nsegment = true\nsegment_connections = 2\nsegment_resume = \"off\"\n",
+        )
+        .unwrap();
+
+        let over = Overrides {
+            segment_connections: Some(6),
+            ..Overrides::default()
+        };
+        let settings = resolve(Some(&path), &over).unwrap();
+        assert!(settings.segment.enabled);
+        assert_eq!(settings.segment.connections, 6);
+        assert_eq!(settings.segment.resume, SegmentResume::Off);
+    }
+
+    #[test]
+    fn the_segment_settings_are_validated() {
+        assert!(matches!(
+            Segment {
+                connections: 17,
+                ..Segment::default()
+            }
+            .validate(),
+            Err(UksftaError::Input(_))
+        ));
+        assert!(matches!(
+            Segment {
+                chunk: Some(100),
+                ..Segment::default()
+            }
+            .validate(),
+            Err(UksftaError::Input(_))
+        ));
+        assert!(Segment {
+            chunk: Some(1024 * 1024),
+            ..Segment::default()
+        }
+        .validate()
+        .is_ok());
+        assert!(matches!(
+            Segment {
+                min_bytes: MAX_SEGMENT_MIN + 1,
+                ..Segment::default()
+            }
+            .validate(),
+            Err(UksftaError::Input(_))
+        ));
+        assert!(matches!(
+            Segment {
+                reconnects: 11,
+                ..Segment::default()
+            }
+            .validate(),
+            Err(UksftaError::Input(_))
+        ));
+
+        assert!(matches!(
+            SegmentResume::parse("maybe"),
+            Err(UksftaError::Input(_))
+        ));
     }
 
     #[test]

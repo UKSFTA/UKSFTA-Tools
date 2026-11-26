@@ -36,6 +36,12 @@ This project uses [Semantic Versioning](https://semver.org/).
   because the file names are ignored. The command does not verify
   cryptography, a hash or a PBO.
 
+### Changed
+
+- The minimum supported Rust version is 1.89, for the native transport
+  dependencies. The native transport is present but not active yet;
+  `--segmented` exits 2 until the segmented upload lands.
+
 ### Security
 
 - Pin the sftp host key on every run: `StrictHostKeyChecking=yes` by

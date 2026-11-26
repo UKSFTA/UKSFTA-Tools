@@ -35,6 +35,7 @@ pub use crate::util::*;
 pub use crate::version::*;
 
 #[derive(Parser)]
+#[allow(clippy::large_enum_variant)]
 #[command(
     name = "uksfta",
     about = "UKSFTA modpack manager",
@@ -47,7 +48,9 @@ struct Cli {
     command: Commands,
 }
 
+// One CLI variant carries many optional flags; the enum is parsed once.
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Sync mods from the Workshop cache into addons/
     ///
@@ -247,6 +250,24 @@ enum Commands {
         /// Fail when an opt-in config check fails
         #[arg(long)]
         strict_config: bool,
+        /// Use the native segmented transport
+        #[arg(long)]
+        segmented: bool,
+        /// Files at or above this size use the segmented path
+        #[arg(long, value_name = "BYTES")]
+        segment_min: Option<u64>,
+        /// Segmented connections (1 to 16)
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=16))]
+        segment_connections: Option<u8>,
+        /// Segmented chunk in bytes (1 MiB to 64 MiB, a 4096-byte multiple)
+        #[arg(long, value_name = "BYTES")]
+        segment_chunk: Option<u32>,
+        /// Resume policy: auto or off
+        #[arg(long, value_name = "POLICY")]
+        segment_resume: Option<String>,
+        /// Reconnects per segmented run (0 to 10)
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=10))]
+        segment_reconnects: Option<u8>,
         /// Write one JSON object to standard output
         #[arg(long)]
         json: bool,
@@ -427,6 +448,12 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             launch_line,
             server_cfg,
             strict_config,
+            segmented,
+            segment_min,
+            segment_connections,
+            segment_chunk,
+            segment_resume,
+            segment_reconnects,
             json,
             doctor,
         } => {
@@ -461,6 +488,12 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
                 launch_line,
                 server_cfg,
                 strict_config,
+                segmented,
+                segment_min,
+                segment_connections,
+                segment_chunk,
+                segment_resume,
+                segment_reconnects,
                 json,
                 doctor,
             })?

@@ -1015,7 +1015,7 @@ binary you downloaded.
 
 Or build from source: `cargo build --release` (Linux, macOS) /
 `cargo build --release --target x86_64-pc-windows-msvc` (Windows, matches
-the published release binary).
+the published release binary). The minimum supported Rust version is 1.89.
 
 ## Licence
 

@@ -1,0 +1,14 @@
+Port 2222
+ListenAddress 0.0.0.0
+HostKey /etc/ssh/id_ed25519_host
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+UsePAM no
+StrictModes no
+AuthorizedKeysFile /home/uksfta/.ssh/authorized_keys
+Subsystem sftp /usr/lib/openssh/sftp-server
+MaxSessions 32
+MaxStartups 100:30:200
+LogLevel VERBOSE
