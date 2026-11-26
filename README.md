@@ -590,6 +590,9 @@ uksfta server --upload --retries 3
 # Upload two files at a time
 uksfta server --upload --jobs 2
 
+# Raise the transfer window for a fast link
+uksfta server --upload --buffer 261120 --requests 128
+
 # Use the meter path with redirected output
 uksfta server --upload --progress
 
@@ -638,10 +641,23 @@ An upload sends the smallest file first. A failure in the middle of a
 batch therefore leaves the large files for the next attempt. Each file
 uses `put -p`, so the server keeps the local modification time.
 
-The client uses a 32 KB transfer buffer (`-B 32768`). A 256 KB buffer
-fails at once on the local client with `Outbound message too long`.
-Throughput is flat from 32 KB to 261 KB, about 1.7 to 1.8 MB/s on the
-current line. Parallel streams did not help, so the command uses one.
+The transfer has two settings, and both pass to every `sftp` run,
+including the verify phases and each parallel worker.
+
+| Flag | Range | Default | Effect |
+|---|---|---|---|
+| `--buffer BYTES` | 4096 to 261120 | 32768 | The size of one write. |
+| `--requests N` | 1 to 256 | 64 | The requests in flight. |
+
+The in-flight data for one connection is about the buffer size times the
+request count. Both values use memory at each end, so raise them only
+when the local link is faster than the transfer. The server accepts at
+most 261120 bytes in one write, which is 256 KiB minus 1024 bytes. A
+262144-byte buffer fails at once on the local client with `Outbound
+message too long`. Throughput is flat from 32 KB to 261 KB on the
+current line, about 1.7 to 1.8 MB/s, because the link is saturated. A
+larger buffer and more requests help a fast or high-latency link by
+reducing round-trip stalls.
 
 An upload attempt re-verifies the pack and retries only the files that
 are still missing or stale. The default is 2 retries, which makes three
