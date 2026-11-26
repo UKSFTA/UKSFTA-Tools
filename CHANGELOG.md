@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [0.10.1] - 2026-11-26
+
+### Fixed
+
+- Refresh the dependency tree to clear the RUSTSEC advisories in `url`,
+  `quinn-proto`, `quinn-udp` and `tokio`. `cargo audit` and `cargo deny
+  check` pass.
+
 ## [0.10.0] - 2026-11-26
 
 ### Added
