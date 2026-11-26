@@ -4,6 +4,7 @@
 //! (`mod_sources.txt`, `mods.lock`, the Workshop cache) is not used here.
 
 mod config;
+mod hostkey;
 mod parse;
 mod plan;
 mod report;
@@ -22,6 +23,7 @@ use crate::modlist::{parse_mod_sources, ModEntry};
 use crate::util::human_size;
 
 use self::config::{Overrides, Settings};
+use self::hostkey::HostKeyPolicy;
 use self::plan::{is_bikey, is_bisign, is_pbo, Action, LocalFile, LocalPack, Plan};
 use self::report::{
     plan_workers, print_plan, print_report, put_line, upload_batch, upload_dirs, upload_units,
@@ -65,6 +67,10 @@ pub struct ServerOptions {
     pub buffer: Option<u32>,
     /// sftp outstanding requests. The default is 64.
     pub requests: Option<u16>,
+    /// known_hosts file for the host key check.
+    pub known_hosts: Option<PathBuf>,
+    /// Host key policy: yes or accept-new.
+    pub host_key_policy: Option<String>,
     /// When to show the client's transfer meter.
     pub progress: Progress,
 }
@@ -84,8 +90,18 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
             identity: opts.identity.clone(),
             buffer: opts.buffer,
             requests: opts.requests,
+            known_hosts: opts.known_hosts.clone(),
+            host_key_policy: opts.host_key_policy.clone(),
         },
     )?;
+
+    hostkey::preflight(&settings)?;
+
+    let before_known_hosts = if settings.host_key_policy == HostKeyPolicy::AcceptNew {
+        hostkey::snapshot(&settings.known_hosts)
+    } else {
+        None
+    };
 
     let meta_path = opts
         .meta
@@ -126,6 +142,16 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
     }
 
     let mut plan = verifier.verify()?;
+    if settings.host_key_policy == HostKeyPolicy::AcceptNew {
+        if let Some(notice) = hostkey::acceptance_notice(
+            before_known_hosts,
+            hostkey::snapshot(&settings.known_hosts),
+            &settings.destination,
+            &settings.known_hosts,
+        ) {
+            eprintln!("{notice}");
+        }
+    }
     print_report(&plan);
     print_plan(&plan);
 
