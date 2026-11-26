@@ -824,7 +824,7 @@ the launcher supplies. Write one class on a line. A line that starts with
 `#` is a comment. The default path is `.uksfta/external-addons.txt`. Use
 `--external PATH` to choose another file.
 
-```
+```text
 # Arma 3 base game
 A3_Data_F
 A3_Data_F_Loadorder
