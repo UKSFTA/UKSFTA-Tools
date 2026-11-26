@@ -640,11 +640,21 @@ The command checks:
    not listed.
 4. Every local `keys/*.bikey` exists with the same size.
 5. `mod.cpp` exists with the same size.
+6. Every local `.bisign` names an authority that a local `keys/*.bikey`
+   carries, and, when the remote keys are readable, that the remote
+   `keys/` carries too.
 
 A name that differs only by case is the same file. One warning gives the
 number of such names, and uploads reuse the server name, so no case
 duplicate is created. A local PBO with no remote match is `missing`. A
 remote PBO with no local match is `extra`.
+
+Key matching uses the authority name inside the key file, not the file
+name. A renamed `keys/*.bikey` still matches its signatures. A file name
+that differs from the embedded authority gives a warning only. The
+command reads the authority from the first 4096 bytes of a key. It does
+not verify a signature, a hash or a PBO. A key that does not parse is a
+warning, and its authority is unknown.
 
 `--deep` downloads each remote PBO into a temporary directory and compares
 its SHA-256 with the local file. It is slow, because it transfers every PBO

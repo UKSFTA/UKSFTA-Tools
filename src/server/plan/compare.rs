@@ -243,6 +243,22 @@ pub fn build_plan(input: &PlanInput<'_>) -> Plan {
         ));
     }
 
+    warnings.extend(local.authority_warnings.iter().cloned());
+    for (signature, authority) in input.local_signature_authorities {
+        let local_ships = input.local_key_authorities.contains(authority);
+        let remote_known = !input.remote_key_authorities.is_empty();
+        let remote_ships = input.remote_key_authorities.contains(authority);
+        if !local_ships || (remote_known && !remote_ships) {
+            findings.push(Finding::KeyAuthorityMissing {
+                signature: signature.clone(),
+                authority: authority.clone(),
+            });
+        }
+    }
+    if !input.local_signature_authorities.is_empty() && input.remote_key_authorities.is_empty() {
+        warnings.push("keys/: no remote key was read; the server key set is unknown".to_string());
+    }
+
     Plan {
         id: local.id.clone(),
         local_dir: local.dir.clone(),

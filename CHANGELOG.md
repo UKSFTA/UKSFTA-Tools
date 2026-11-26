@@ -7,6 +7,13 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Match each local `.bisign` authority against the embedded names in
+  `keys/*.bikey`, locally and on the server. A renamed key still matches,
+  because the file names are ignored. The command does not verify
+  cryptography, a hash or a PBO.
+
 ### Security
 
 - Pin the sftp host key on every run: `StrictHostKeyChecking=yes` by

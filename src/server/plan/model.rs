@@ -47,6 +47,12 @@ pub struct LocalPack {
     pub mod_cpp: Option<LocalFile>,
     /// The `meta.cpp` that named the pack, used when the build has none.
     pub meta_source: PathBuf,
+    /// `.bisign` file name to the embedded authority name.
+    pub signature_authorities: HashMap<String, String>,
+    /// Embedded authority names of `keys/*.bikey`.
+    pub key_authorities: HashSet<String>,
+    /// Notes about key or signature names that differ from the authority.
+    pub authority_warnings: Vec<String>,
 }
 
 /// The state of the pack. `rank` orders the statuses so the worst is shown.
@@ -140,6 +146,11 @@ pub enum Finding {
     KeyExtra {
         name: String,
     },
+    /// A local signature names an authority that no shipped key carries.
+    KeyAuthorityMissing {
+        signature: String,
+        authority: String,
+    },
     ModCppMissing,
     ModCppStale {
         local: u64,
@@ -159,6 +170,7 @@ impl Finding {
             | Finding::StaleHash { .. }
             | Finding::KeyMissing { .. }
             | Finding::KeyStale { .. }
+            | Finding::KeyAuthorityMissing { .. }
             | Finding::ModCppMissing
             | Finding::ModCppStale { .. } => true,
         }
@@ -176,6 +188,7 @@ impl Finding {
             | Finding::KeyStale { .. }
             | Finding::ModCppStale { .. } => Status::Stale,
             Finding::Extra { .. } | Finding::KeyExtra { .. } => Status::Extra,
+            Finding::KeyAuthorityMissing { .. } => Status::Missing,
         }
     }
 }
@@ -275,6 +288,13 @@ pub struct PlanInput<'a> {
     pub deep: &'a HashMap<String, bool>,
     /// Lowercase basenames of every PBO in `mods.lock`.
     pub locked: &'a HashSet<String>,
+    /// `.bisign` file name to the embedded authority name.
+    pub local_signature_authorities: &'a HashMap<String, String>,
+    /// Embedded authority names of the local `keys/*.bikey`.
+    pub local_key_authorities: &'a HashSet<String>,
+    /// Embedded authority names of the remote `keys/*.bikey`. Empty when
+    /// the remote keys could not be read.
+    pub remote_key_authorities: &'a HashSet<String>,
     /// Prune a locked remote-only PBO as well.
     pub force_prune: bool,
     pub require_signatures: bool,

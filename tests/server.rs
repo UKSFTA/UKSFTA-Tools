@@ -135,6 +135,59 @@ sftp> ls -l
 -rw-r--r--    1 1000     1000            7 Nov 20 10:00 uksfta_1.0.1.bikey
 ";
 
+/// A public key file with the documented 24-byte header and a zero blob.
+fn synthetic_key(authority: &str, public: bool) -> Vec<u8> {
+    let bits: u32 = 1024;
+    let blob: u32 = if public { 20 + bits / 8 } else { 596 };
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(authority.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&blob.to_le_bytes());
+    bytes.push(if public { 6 } else { 7 });
+    bytes.push(2);
+    bytes.extend_from_slice(&[0, 0]);
+    bytes.extend_from_slice(&0x2400u32.to_le_bytes());
+    bytes.extend_from_slice(if public { b"RSA1" } else { b"RSA2" });
+    bytes.extend_from_slice(&bits.to_le_bytes());
+    bytes.extend_from_slice(&65537u32.to_le_bytes());
+    bytes.resize(bytes.len() + (blob - 20) as usize, 0);
+    bytes
+}
+
+/// A `.bisign` prefix: the public key then signature bytes this tool ignores.
+fn synthetic_signature(authority: &str) -> Vec<u8> {
+    let mut bytes = synthetic_key(authority, true);
+    bytes.extend_from_slice(&[0, 0, 0, 0]);
+    bytes
+}
+
+/// A listing for the signing fixtures. Only sizes and names are used.
+fn signing_listing(sig_size: usize, key_name: &str, key_size: usize) -> String {
+    format!(
+        "sftp> cd \"{ROOT}\"
+sftp> -cd \"{ROOT}/@{ID}\"
+sftp> pwd
+Remote working directory: {ROOT}/@{ID}
+sftp> ls -l
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 addons
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 keys
+-rw-r--r--    1 1000     1000          120 Nov 20 10:00 meta.cpp
+-rw-r--r--    1 1000     1000           11 Nov 20 10:00 mod.cpp
+sftp> -cd \"{ROOT}/@{ID}/addons\"
+sftp> pwd
+Remote working directory: {ROOT}/@{ID}/addons
+sftp> ls -l
+-rw-r--r--    1 1000     1000            5 Nov 20 10:00 {PBO}
+-rw-r--r--    1 1000     1000 {sig_size} Nov 20 10:00 {SIG}
+sftp> -cd \"{ROOT}/@{ID}/keys\"
+sftp> pwd
+Remote working directory: {ROOT}/@{ID}/keys
+sftp> ls -l
+-rw-r--r--    1 1000     1000 {key_size} Nov 20 10:00 {key_name}
+"
+    )
+}
+
 const STUB: &str = r#"#!/bin/sh
 set -eu
 log="$UKSFTA_TEST_LOG.$$"
@@ -325,8 +378,8 @@ fn a_matching_pack_plans_no_change() {
     let log = fixture.log();
     assert_eq!(
         log.matches("ARGV ").count(),
-        2,
-        "the listing and the meta phase only"
+        3,
+        "the listing, the meta phase and the remote key phase"
     );
     let argv: Vec<&str> = log
         .lines()
@@ -390,7 +443,7 @@ fn upload_dry_run_prints_the_plan_and_writes_nothing() {
     );
     assert_eq!(
         log.matches("ARGV ").count(),
-        2,
+        3,
         "a dry run must not start an upload phase"
     );
 }
@@ -714,4 +767,62 @@ fn an_unknown_host_key_policy_is_refused() {
         ));
 
     assert!(!fixture.log().contains("ARGV "));
+}
+
+/// A pack with a synthetic signature and one renamed, synthetic key.
+fn signing_fixture(signature_authority: &str, key_authority: &str) -> Fixture {
+    let signature = synthetic_signature(signature_authority);
+    let key = synthetic_key(key_authority, true);
+    let listing = signing_listing(signature.len(), "renamed.bikey", key.len());
+    let fixture = Fixture::new(&listing);
+
+    let release = fixture.dir.path().join(".hemttout/release");
+    fs::write(release.join("addons").join(SIG), &signature).expect("write the signature");
+    fs::remove_file(release.join("keys").join(KEY)).expect("remove the old key");
+    fs::write(release.join("keys").join("renamed.bikey"), &key).expect("write the local key");
+
+    let pack = fixture.remote.join(format!("@{ID}"));
+    fs::create_dir_all(pack.join("keys")).expect("create the remote keys dir");
+    fs::write(pack.join("keys").join("renamed.bikey"), &key).expect("write the remote key");
+    fixture
+}
+
+#[test]
+fn a_renamed_key_with_the_same_authority_passes() {
+    let fixture = signing_fixture("uksfta_1.0.1", "uksfta_1.0.1");
+
+    fixture
+        .command()
+        .arg("server")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("status: ok"))
+        .stderr(predicate::str::contains(
+            "renamed.bikey: embedded authority is uksfta_1.0.1",
+        ));
+
+    let log = fixture.log();
+    assert!(
+        log.contains(&format!("-get \"{ROOT}/@{ID}/keys/renamed.bikey\"")),
+        "the remote key is read: {log}"
+    );
+    assert!(
+        !log.lines()
+            .any(|line| line.starts_with("-get ") && line.contains(".bisign")),
+        "a remote signature is never downloaded: {log}"
+    );
+}
+
+#[test]
+fn a_signature_authority_without_a_key_exits_one() {
+    let fixture = signing_fixture("other_auth_1", "uksfta_1.0.1");
+
+    fixture
+        .command()
+        .arg("server")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(format!(
+            "signature {SIG} needs key other_auth_1, which keys/ does not ship"
+        )));
 }

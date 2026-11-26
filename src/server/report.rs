@@ -78,6 +78,10 @@ fn describe(finding: &Finding, pack_id: &str) -> String {
             human_size(*remote)
         ),
         Finding::KeyExtra { name } => format!("extra key {name}"),
+        Finding::KeyAuthorityMissing {
+            signature,
+            authority,
+        } => format!("signature {signature} needs key {authority}, which keys/ does not ship"),
         Finding::ModCppMissing => "mod.cpp is missing".to_string(),
         Finding::ModCppStale { local, remote } => format!(
             "stale mod.cpp: local {}, remote {}",

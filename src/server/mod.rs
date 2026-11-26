@@ -9,9 +9,10 @@ mod parse;
 mod plan;
 mod report;
 mod sftp;
+mod signature;
 mod verify;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -468,6 +469,8 @@ fn load_local(meta_path: &Path, local: Option<&Path>) -> Result<LocalPack, Uksft
     let keys = collect(&dir.join("keys"), is_bikey);
     let meta_file = local_file(&dir.join("meta.cpp"));
     let mod_cpp = local_file(&dir.join("mod.cpp"));
+    let (signature_authorities, key_authorities, authority_warnings) =
+        read_authorities(&signatures, &keys);
 
     Ok(LocalPack {
         id,
@@ -479,7 +482,66 @@ fn load_local(meta_path: &Path, local: Option<&Path>) -> Result<LocalPack, Uksft
         meta: meta_file,
         mod_cpp,
         meta_source: meta_path.to_path_buf(),
+        signature_authorities,
+        key_authorities,
+        authority_warnings,
     })
+}
+
+/// Read the embedded authority of every local signature and key. A file
+/// that does not parse is a warning and stays unknown.
+fn read_authorities(
+    signatures: &[LocalFile],
+    keys: &[LocalFile],
+) -> (HashMap<String, String>, HashSet<String>, Vec<String>) {
+    let mut signature_authorities = HashMap::new();
+    let mut warnings = Vec::new();
+    for file in signatures {
+        match signature::read_key_file(&file.path) {
+            Ok(key) => {
+                if let Some(named) = signature_authority(&file.name) {
+                    if named != key.name {
+                        warnings.push(format!(
+                            "{}: embedded authority is {}, not {named}",
+                            file.name, key.name
+                        ));
+                    }
+                }
+                signature_authorities.insert(file.name.clone(), key.name);
+            }
+            Err(e) => warnings.push(format!("{}: {e}", file.name)),
+        }
+    }
+
+    let mut key_authorities = HashSet::new();
+    for file in keys {
+        match signature::read_key_file(&file.path) {
+            Ok(key) => {
+                if !key_base(&file.name).eq_ignore_ascii_case(&key.name) {
+                    warnings.push(format!("{}: embedded authority is {}", file.name, key.name));
+                }
+                key_authorities.insert(key.name);
+            }
+            Err(e) => warnings.push(format!("{}: {e}", file.name)),
+        }
+    }
+    (signature_authorities, key_authorities, warnings)
+}
+
+/// The authority segment of `name.pbo.<authority>.bisign`.
+fn signature_authority(name: &str) -> Option<&str> {
+    let lower = name.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".bisign")?;
+    let pos = stem.rfind(".pbo.")?;
+    Some(&name[pos + 5..name.len() - ".bisign".len()])
+}
+
+fn key_base(name: &str) -> &str {
+    if name.len() > 6 {
+        &name[..name.len() - 6]
+    } else {
+        name
+    }
 }
 
 /// `.hemttout/release` when it exists, else `.hemttout/build`.
@@ -651,6 +713,74 @@ mod tests {
         assert_eq!(transfer_rate(1_000_000, Duration::ZERO), 0.0);
         let rate = transfer_rate(2_000_000, Duration::from_secs(2));
         assert!((rate - 1.0).abs() < f64::EPSILON, "{rate}");
+    }
+
+    #[test]
+    fn load_local_reads_the_signature_and_key_authorities() {
+        let root = tempfile::TempDir::new().unwrap();
+        let dir = pack_dir(root.path());
+        let meta = root.path().join(".hemttout/release/meta.cpp");
+
+        let release = dir.clone();
+        fs::remove_file(release.join("addons/uksfta_main.pbo.key.bisign")).unwrap();
+        let mut signature = synthetic_key("uksfta_1.0.1", true);
+        signature.extend_from_slice(&[0, 0, 0, 0]);
+        fs::write(
+            release.join("addons/uksfta_main.pbo.uksfta_1.0.1.bisign"),
+            &signature,
+        )
+        .unwrap();
+        fs::write(
+            release.join("keys/uksfta_1.0.1.bikey"),
+            synthetic_key("uksfta_1.0.1", true),
+        )
+        .unwrap();
+        fs::remove_file(release.join("keys/uksfta.bikey")).unwrap();
+
+        let local = load_local(&meta, Some(&dir)).unwrap();
+        assert_eq!(
+            local
+                .signature_authorities
+                .get("uksfta_main.pbo.uksfta_1.0.1.bisign")
+                .map(String::as_str),
+            Some("uksfta_1.0.1")
+        );
+        assert!(local.key_authorities.contains("uksfta_1.0.1"));
+        assert!(
+            local.authority_warnings.is_empty(),
+            "{:?}",
+            local.authority_warnings
+        );
+
+        fs::rename(
+            release.join("keys/uksfta_1.0.1.bikey"),
+            release.join("keys/renamed.bikey"),
+        )
+        .unwrap();
+        let local = load_local(&meta, Some(&dir)).unwrap();
+        assert!(local
+            .authority_warnings
+            .iter()
+            .any(|warning| warning.contains("renamed.bikey: embedded authority is uksfta_1.0.1")));
+        assert!(local.key_authorities.contains("uksfta_1.0.1"));
+    }
+
+    fn synthetic_key(authority: &str, public: bool) -> Vec<u8> {
+        let bits: u32 = 1024;
+        let blob: u32 = if public { 20 + bits / 8 } else { 596 };
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(authority.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&blob.to_le_bytes());
+        bytes.push(if public { 6 } else { 7 });
+        bytes.push(2);
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0x2400u32.to_le_bytes());
+        bytes.extend_from_slice(if public { b"RSA1" } else { b"RSA2" });
+        bytes.extend_from_slice(&bits.to_le_bytes());
+        bytes.extend_from_slice(&65537u32.to_le_bytes());
+        bytes.resize(bytes.len() + (blob - 20) as usize, 0);
+        bytes
     }
 
     #[test]
