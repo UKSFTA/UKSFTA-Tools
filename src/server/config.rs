@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use super::hostkey::{self, HostKeyPolicy};
 use crate::error::UksftaError;
 
 /// Port used when neither the file nor a flag sets one.
@@ -73,6 +74,8 @@ pub struct ServerConfig {
     pub port: Option<u16>,
     pub root: Option<String>,
     pub identity: Option<PathBuf>,
+    pub known_hosts: Option<PathBuf>,
+    pub host_key_policy: Option<String>,
 }
 
 /// Connection fields a flag can override.
@@ -84,6 +87,8 @@ pub struct Overrides {
     pub identity: Option<PathBuf>,
     pub buffer: Option<u32>,
     pub requests: Option<u16>,
+    pub known_hosts: Option<PathBuf>,
+    pub host_key_policy: Option<String>,
 }
 
 /// Resolved connection settings with every field present.
@@ -94,6 +99,8 @@ pub struct Settings {
     pub root: String,
     pub identity: Option<PathBuf>,
     pub transfer: Transfer,
+    pub known_hosts: PathBuf,
+    pub host_key_policy: HostKeyPolicy,
 }
 
 /// Read the config file. A missing file is `None`, so the defaults apply.
@@ -150,12 +157,23 @@ pub fn resolve(config_path: Option<&Path>, overrides: &Overrides) -> Result<Sett
     }
     .validate()?;
 
+    let host_key_policy = hostkey::resolve_policy(
+        overrides.host_key_policy.as_deref(),
+        config.host_key_policy.as_deref(),
+    )?;
+    let known_hosts = hostkey::resolve_known_hosts(
+        overrides.known_hosts.as_deref(),
+        config.known_hosts.as_deref(),
+    )?;
+
     Ok(Settings {
         destination: check_destination(&destination)?,
         port: overrides.port.or(config.port).unwrap_or(DEFAULT_PORT),
         root: check_root(&root)?,
         identity: overrides.identity.clone().or(config.identity),
         transfer,
+        known_hosts,
+        host_key_policy,
     })
 }
 
@@ -337,5 +355,20 @@ mod tests {
             .unwrap_err();
             assert!(matches!(err, UksftaError::Input(_)), "{requests}");
         }
+    }
+
+    #[test]
+    fn resolve_reads_the_host_key_settings_from_the_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("server.toml");
+        fs::write(
+            &path,
+            "destination = \"a@b\"\nroot = \"/x\"\nknown_hosts = \"/tmp/kh\"\nhost_key_policy = \"accept-new\"\n",
+        )
+        .unwrap();
+
+        let settings = resolve(Some(&path), &Overrides::default()).unwrap();
+        assert_eq!(settings.known_hosts, PathBuf::from("/tmp/kh"));
+        assert_eq!(settings.host_key_policy, HostKeyPolicy::AcceptNew);
     }
 }

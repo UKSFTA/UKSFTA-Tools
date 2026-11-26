@@ -564,10 +564,30 @@ destination = "user@host"
 port = 2022
 root = "/"
 identity = "/home/user/.ssh/id_ed25519"
+host_key_policy = "yes"
+known_hosts = "~/.ssh/known_hosts"
 ```
 
 `destination` and `root` are required. The port defaults to 22. A flag
 overrides the file.
+
+### Host key checks
+
+The command checks the server host key on every `sftp` run. It passes
+`StrictHostKeyChecking=yes` by default, so an unknown or changed key
+stops the run. The key file is `~/.ssh/known_hosts`, unless
+`known_hosts` or `--known-hosts PATH` names another file. A leading `~/`
+is expanded. A relative path is refused.
+
+`--host-key-policy accept-new` accepts an unknown key once and keeps the
+entry. The command prints its own notice when a key is added, because the
+client's notice is not shown at `LogLevel=ERROR`. The command never
+writes the key file itself. Under the default `yes` policy, a missing or
+unreadable key file stops the run before the first connection.
+
+The command also passes `UpdateHostKeys=no`, so a known key is not
+replaced without a decision. A host key failure names the destination,
+the key file and the remedy.
 
 Run the command from the pack repo root. It reads `meta.cpp` for the pack
 id and name, and compares `.hemttout/release` with the server. Use
@@ -682,8 +702,8 @@ the percentage, the bytes, the rate and the time left. The meter is on
 by default when the output is a terminal and `--jobs` is 1. Use
 `--no-progress` to hide it. Use `--progress` to choose the meter path
 when the output is redirected. A parallel upload runs without the meter,
-because concurrent meters overwrite each other. The verify phases always
-run quiet, so their output stays parseable.
+because concurrent meters overwrite each other. The verify phases use
+`LogLevel=ERROR`, so their output stays parseable.
 
 An interrupted upload restarts the file from byte zero. The command does
 not resume part of a file. In testing, `reput` trusted the remote size

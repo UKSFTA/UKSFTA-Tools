@@ -12,6 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::config::{Settings, Transfer};
+use super::hostkey::{self, HostKeyPolicy};
 use crate::error::UksftaError;
 use crate::util::sanitize_for_terminal;
 
@@ -34,6 +35,8 @@ pub struct Sftp {
     port: u16,
     identity: Option<PathBuf>,
     transfer: Transfer,
+    known_hosts: PathBuf,
+    policy: HostKeyPolicy,
 }
 
 impl Sftp {
@@ -45,16 +48,16 @@ impl Sftp {
             port: settings.port,
             identity: settings.identity.clone(),
             transfer: settings.transfer,
+            known_hosts: settings.known_hosts.clone(),
+            policy: settings.host_key_policy,
         }
     }
 
-    /// The full argument list for one client run. `-q` suppresses the
-    /// client's own meter, so the verify phases stay parseable.
-    fn args(&self, quiet: bool) -> Vec<String> {
+    /// The full argument list for one client run. `LogLevel=ERROR` keeps
+    /// ssh warnings out of a successful run, and still shows the host key
+    /// error that a failure needs. It does not suppress the meter.
+    fn args(&self) -> Vec<String> {
         let mut args = Vec::new();
-        if quiet {
-            args.push("-q".to_string());
-        }
         args.push("-P".to_string());
         args.push(self.port.to_string());
         if let Some(path) = &self.identity {
@@ -71,14 +74,23 @@ impl Sftp {
             args.push("-o".to_string());
             args.push(option.to_string());
         }
+        args.extend(["-o".to_string(), "LogLevel=ERROR".to_string()]);
+        args.extend([
+            "-o".to_string(),
+            format!("StrictHostKeyChecking={}", self.policy.as_str()),
+            "-o".to_string(),
+            format!("UserKnownHostsFile={}", self.known_hosts.display()),
+            "-o".to_string(),
+            "UpdateHostKeys=no".to_string(),
+        ]);
         args.push(self.destination.clone());
         args
     }
 
     /// A client run with its commands on standard input.
-    fn command(&self, quiet: bool) -> Command {
+    fn command(&self) -> Command {
         let mut command = Command::new(&self.binary);
-        command.args(self.args(quiet)).stdin(Stdio::piped());
+        command.args(self.args()).stdin(Stdio::piped());
         command
     }
 
@@ -119,7 +131,7 @@ impl Sftp {
             return Ok(String::new());
         }
 
-        let mut command = self.command(true);
+        let mut command = self.command();
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = self.spawn(command)?;
         self.send(&mut child, lines)?;
@@ -130,6 +142,11 @@ impl Sftp {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if let Some(text) =
+                hostkey::describe_failure(&stderr, &self.destination, &self.known_hosts)
+            {
+                return Err(UksftaError::Input(text));
+            }
             let detail = last_line(&stderr)
                 .or_else(|| last_line(&stdout))
                 .unwrap_or_else(|| "no output".to_string());
@@ -149,7 +166,7 @@ impl Sftp {
             return Ok(());
         }
 
-        let mut command = self.command(false);
+        let mut command = self.command();
         command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
         let mut child = self.spawn(command)?;
         self.send(&mut child, lines)?;
@@ -230,6 +247,8 @@ mod tests {
             port: 2022,
             identity: Some(PathBuf::from("/home/user/.ssh/id_ed25519")),
             transfer,
+            known_hosts: PathBuf::from("/home/user/.ssh/known_hosts"),
+            policy: HostKeyPolicy::Yes,
         }
     }
 
@@ -237,7 +256,7 @@ mod tests {
     fn the_client_arguments_stay_inside_the_buffer_limit() {
         let client = client(Transfer::default());
 
-        let args = client.args(true);
+        let args = client.args();
         assert!(
             !args.iter().any(|arg| arg == "262144"),
             "the buffer must stay inside the server-safe limit: {args:?}"
@@ -263,26 +282,40 @@ mod tests {
     }
 
     #[test]
-    fn quiet_adds_the_flag_and_the_meter_path_leaves_it_out() {
-        let client = client(Transfer::default());
+    fn the_error_log_level_replaces_quiet_on_every_run() {
+        let args = client(Transfer::default()).args();
 
-        let quiet = client.args(true);
-        assert!(quiet.iter().any(|arg| arg == "-q"), "{quiet:?}");
-
-        let meter = client.args(false);
-        assert!(!meter.iter().any(|arg| arg == "-q"), "{meter:?}");
-        assert!(meter.windows(2).any(|pair| pair == ["-B", "32768"]));
+        assert!(
+            !args.iter().any(|arg| arg == "-q"),
+            "no run may pass -q: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["-o", "LogLevel=ERROR"]),
+            "{args:?}"
+        );
+        let level = args.iter().position(|arg| arg == "LogLevel=ERROR");
+        let strict = args
+            .iter()
+            .position(|arg| arg == "StrictHostKeyChecking=yes");
+        assert!(
+            level < strict,
+            "the log level comes before the host key options: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["-B", "32768"]),
+            "{args:?}"
+        );
         for option in LIVENESS {
             assert!(
-                meter.windows(2).any(|pair| pair == ["-o", option]),
-                "{meter:?}"
+                args.windows(2).any(|pair| pair == ["-o", option]),
+                "{args:?}"
             );
         }
     }
 
     #[test]
     fn the_default_transfer_values_are_the_baseline() {
-        let args = client(Transfer::default()).args(true);
+        let args = client(Transfer::default()).args();
 
         assert!(args.windows(2).any(|pair| pair == ["-R", "64"]), "{args:?}");
         assert!(
@@ -297,7 +330,7 @@ mod tests {
             buffer: 261_120,
             requests: 128,
         })
-        .args(true);
+        .args();
 
         assert!(
             args.windows(2).any(|pair| pair == ["-B", "261120"]),
@@ -310,6 +343,44 @@ mod tests {
         let requests = args.iter().position(|arg| arg == "-R");
         let buffer = args.iter().position(|arg| arg == "-B");
         assert!(requests < buffer, "-R must come before -B: {args:?}");
+    }
+
+    #[test]
+    fn the_host_key_options_are_pinned_for_both_policies() {
+        for (policy, expected) in [
+            (HostKeyPolicy::Yes, "StrictHostKeyChecking=yes"),
+            (HostKeyPolicy::AcceptNew, "StrictHostKeyChecking=accept-new"),
+        ] {
+            let mut pinned = client(Transfer::default());
+            pinned.policy = policy;
+            let args = pinned.args();
+
+            assert!(
+                args.windows(2).any(|pair| pair == ["-o", expected]),
+                "{args:?}"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["-o", "UserKnownHostsFile=/home/user/.ssh/known_hosts"]),
+                "{args:?}"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["-o", "UpdateHostKeys=no"]),
+                "{args:?}"
+            );
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some("tester@example.invalid"),
+                "the destination stays last: {args:?}"
+            );
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg.contains("BatchMode") || arg == "StrictHostKeyChecking=no"),
+                "{args:?}"
+            );
+        }
     }
 
     #[test]

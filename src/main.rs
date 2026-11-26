@@ -225,6 +225,12 @@ enum Commands {
         /// Outstanding sftp requests (1 to 256)
         #[arg(long, value_name = "N")]
         requests: Option<u16>,
+        /// known_hosts file (default: ~/.ssh/known_hosts)
+        #[arg(long, value_name = "PATH")]
+        known_hosts: Option<PathBuf>,
+        /// Host key policy: yes or accept-new (default: yes)
+        #[arg(long, value_name = "POLICY")]
+        host_key_policy: Option<String>,
         /// Show the sftp transfer meter (default: a terminal, single job)
         #[arg(long, group = "progress_mode")]
         progress: bool,
@@ -373,6 +379,8 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             jobs,
             buffer,
             requests,
+            known_hosts,
+            host_key_policy,
             progress,
             no_progress,
         } => {
@@ -401,6 +409,8 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
                 jobs,
                 buffer,
                 requests,
+                known_hosts,
+                host_key_policy,
                 progress: mode,
             })?
         }

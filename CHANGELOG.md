@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+
+- Pin the sftp host key on every run: `StrictHostKeyChecking=yes` by
+  default, `UpdateHostKeys=no`, and an explicit key file from
+  `--known-hosts` or `known_hosts`. A failure names the destination, the
+  key file and the remedy. `--host-key-policy accept-new` prints its own
+  acceptance notice because the error log level hides the client's.
+
 ## [0.10.1] - 2026-11-26
 
 ### Fixed

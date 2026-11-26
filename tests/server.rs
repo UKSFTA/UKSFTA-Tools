@@ -143,6 +143,13 @@ printf 'ARGV %s\n' "$*" >> "$log"
 cat > "$commands"
 printf 'CMDS\n' >> "$log"
 cat "$commands" >> "$log"
+if [ -n "${UKSFTA_TEST_HOST_KEY_FAIL:-}" ]; then
+  echo 'Host key verification failed.' >&2
+  exit 1
+fi
+if [ -n "${UKSFTA_TEST_KNOWN_HOSTS:-}" ]; then
+  printf '%s\n' "host key appended by the stub" >> "$UKSFTA_TEST_KNOWN_HOSTS"
+fi
 if grep -q 'ls -l' "$commands"; then
   cat "$UKSFTA_TEST_LISTING"
   exit 0
@@ -201,9 +208,14 @@ impl Fixture {
         fs::write(release.join("mod.cpp"), b"mod-cpp-111").expect("write mod.cpp");
 
         fs::create_dir_all(base.join(".uksfta")).expect("create the state dir");
+        let known_hosts = base.join("known_hosts");
+        fs::write(&known_hosts, b"fixture key\n").expect("write known_hosts");
         fs::write(
             base.join(".uksfta/server.toml"),
-            format!("destination = \"tester@example.invalid\"\nport = 2022\nroot = \"{ROOT}\"\n"),
+            format!(
+                "destination = \"tester@example.invalid\"\nport = 2022\nroot = \"{ROOT}\"\nknown_hosts = \"{}\"\n",
+                known_hosts.display()
+            ),
         )
         .expect("write the config");
 
@@ -543,55 +555,35 @@ fn parallel_upload_puts_each_file_exactly_once() {
     assert!(!log.contains("reput"), "{log}");
 }
 
-/// The upload phase is the only run that may omit `-q`.
-fn argv_without_quiet(log: &str) -> Vec<String> {
-    log.lines()
+/// Every client run uses the error log level, and none passes `-q`.
+fn assert_error_log_level(log: &str) {
+    let argv: Vec<&str> = log
+        .lines()
         .filter(|line| line.starts_with("ARGV "))
-        .filter(|line| !line.split_whitespace().any(|arg| arg == "-q"))
-        .map(str::to_string)
-        .collect()
+        .collect();
+    assert!(!argv.is_empty(), "{log}");
+    for line in argv {
+        assert!(
+            !line.split_whitespace().any(|arg| arg == "-q"),
+            "no run may pass -q: {line}"
+        );
+        assert!(line.contains("-o LogLevel=ERROR"), "{line}");
+    }
 }
 
 #[test]
-fn the_meter_path_leaves_out_quiet_on_the_upload() {
-    let fixture = Fixture::new(LISTING_MISSING);
+fn every_client_run_uses_the_error_log_level() {
+    for extra in [Vec::new(), vec!["--progress"]] {
+        let fixture = Fixture::new(LISTING_MISSING);
+        let mut args = vec!["server", "--upload", "--retries", "0"];
+        args.extend(extra);
 
-    fixture
-        .command()
-        .args(["server", "--upload", "--progress", "--retries", "0"])
-        .assert()
-        .code(1);
+        fixture.command().args(args).assert().code(1);
 
-    let log = fixture.log();
-    assert!(log.contains("put -p "), "the upload must run: {log}");
-    let quietless = argv_without_quiet(&log);
-    assert_eq!(
-        quietless.len(),
-        1,
-        "only the upload phase drops -q: {quietless:?}"
-    );
-    assert!(
-        quietless[0].contains("-B 32768"),
-        "the buffer stays: {quietless:?}"
-    );
-}
-
-#[test]
-fn a_default_upload_is_quiet_without_a_terminal() {
-    let fixture = Fixture::new(LISTING_MISSING);
-
-    fixture
-        .command()
-        .args(["server", "--upload", "--retries", "0"])
-        .assert()
-        .code(1);
-
-    let log = fixture.log();
-    assert!(log.contains("put -p "), "the upload must run: {log}");
-    assert!(
-        argv_without_quiet(&log).is_empty(),
-        "a piped upload keeps -q: {log}"
-    );
+        let log = fixture.log();
+        assert!(log.contains("put -p "), "the upload must run: {log}");
+        assert_error_log_level(&log);
+    }
 }
 
 #[test]
@@ -648,4 +640,78 @@ fn an_out_of_range_transfer_value_fails_before_any_connection() {
             "no client may start for {args:?}"
         );
     }
+}
+
+#[test]
+fn accept_new_adds_the_key_and_prints_a_notice() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    let known_hosts = fixture.dir.path().join("accepted_known_hosts");
+
+    fixture
+        .command()
+        .args(["server", "--host-key-policy", "accept-new", "--known-hosts"])
+        .arg(&known_hosts)
+        .env("UKSFTA_TEST_KNOWN_HOSTS", &known_hosts)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "host key for tester@example.invalid added to",
+        ));
+
+    assert!(known_hosts.exists(), "the stub must add the key");
+}
+
+#[test]
+fn a_failed_host_key_check_names_the_host_and_the_file() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    let known_hosts = fixture.dir.path().join("empty_known_hosts");
+    fs::write(&known_hosts, b"").expect("write an empty known_hosts");
+
+    fixture
+        .command()
+        .args(["server", "--known-hosts"])
+        .arg(&known_hosts)
+        .env("UKSFTA_TEST_HOST_KEY_FAIL", "1")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("host key check failed"))
+        .stderr(predicate::str::contains("tester@example.invalid"))
+        .stderr(predicate::str::contains(known_hosts.display().to_string()))
+        .stderr(predicate::str::contains("--host-key-policy accept-new"));
+}
+
+#[test]
+fn a_missing_known_hosts_stops_strict_mode_before_any_client() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    let known_hosts = fixture.dir.path().join("absent_known_hosts");
+
+    fixture
+        .command()
+        .args(["server", "--known-hosts"])
+        .arg(&known_hosts)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(known_hosts.display().to_string()))
+        .stderr(predicate::str::contains("--host-key-policy accept-new"));
+
+    assert!(
+        !fixture.log().contains("ARGV "),
+        "no client may start without a readable known_hosts"
+    );
+}
+
+#[test]
+fn an_unknown_host_key_policy_is_refused() {
+    let fixture = Fixture::new(LISTING_MATCH);
+
+    fixture
+        .command()
+        .args(["server", "--host-key-policy", "maybe"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "host key policy must be yes or accept-new",
+        ));
+
+    assert!(!fixture.log().contains("ARGV "));
 }
