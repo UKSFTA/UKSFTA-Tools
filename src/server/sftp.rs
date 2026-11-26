@@ -11,17 +11,13 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::config::Settings;
+use super::config::{Settings, Transfer};
 use crate::error::UksftaError;
 use crate::util::sanitize_for_terminal;
 
 /// Environment override for the client binary. A test points this at a stub.
 const BINARY_ENV: &str = "UKSFTA_SFTP_BIN";
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-
-/// The transfer buffer. A 256 KiB buffer is a local fatal ("Outbound
-/// message too long"), and throughput is flat from 32 KiB to 261 KiB.
-const BUFFER_SIZE: &str = "32768";
 
 /// Keep the connection alive, and fail a dead link in seconds.
 const LIVENESS: [&str; 3] = [
@@ -37,6 +33,7 @@ pub struct Sftp {
     destination: String,
     port: u16,
     identity: Option<PathBuf>,
+    transfer: Transfer,
 }
 
 impl Sftp {
@@ -47,6 +44,7 @@ impl Sftp {
             destination: settings.destination.clone(),
             port: settings.port,
             identity: settings.identity.clone(),
+            transfer: settings.transfer,
         }
     }
 
@@ -65,9 +63,9 @@ impl Sftp {
         }
         args.extend([
             "-R".to_string(),
-            "64".to_string(),
+            self.transfer.requests.to_string(),
             "-B".to_string(),
-            BUFFER_SIZE.to_string(),
+            self.transfer.buffer.to_string(),
         ]);
         for option in LIVENESS {
             args.push("-o".to_string());
@@ -225,14 +223,19 @@ fn unique_path(prefix: &str) -> PathBuf {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_client_arguments_stay_inside_the_buffer_limit() {
-        let client = Sftp {
+    fn client(transfer: Transfer) -> Sftp {
+        Sftp {
             binary: "sftp".to_string(),
             destination: "tester@example.invalid".to_string(),
             port: 2022,
             identity: Some(PathBuf::from("/home/user/.ssh/id_ed25519")),
-        };
+            transfer,
+        }
+    }
+
+    #[test]
+    fn the_client_arguments_stay_inside_the_buffer_limit() {
+        let client = client(Transfer::default());
 
         let args = client.args(true);
         assert!(
@@ -261,12 +264,7 @@ mod tests {
 
     #[test]
     fn quiet_adds_the_flag_and_the_meter_path_leaves_it_out() {
-        let client = Sftp {
-            binary: "sftp".to_string(),
-            destination: "tester@example.invalid".to_string(),
-            port: 2022,
-            identity: None,
-        };
+        let client = client(Transfer::default());
 
         let quiet = client.args(true);
         assert!(quiet.iter().any(|arg| arg == "-q"), "{quiet:?}");
@@ -280,6 +278,38 @@ mod tests {
                 "{meter:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_default_transfer_values_are_the_baseline() {
+        let args = client(Transfer::default()).args(true);
+
+        assert!(args.windows(2).any(|pair| pair == ["-R", "64"]), "{args:?}");
+        assert!(
+            args.windows(2).any(|pair| pair == ["-B", "32768"]),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn the_configured_transfer_values_reach_the_arguments() {
+        let args = client(Transfer {
+            buffer: 261_120,
+            requests: 128,
+        })
+        .args(true);
+
+        assert!(
+            args.windows(2).any(|pair| pair == ["-B", "261120"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["-R", "128"]),
+            "{args:?}"
+        );
+        let requests = args.iter().position(|arg| arg == "-R");
+        let buffer = args.iter().position(|arg| arg == "-B");
+        assert!(requests < buffer, "-R must come before -B: {args:?}");
     }
 
     #[test]

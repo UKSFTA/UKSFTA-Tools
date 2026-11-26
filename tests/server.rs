@@ -593,3 +593,59 @@ fn a_default_upload_is_quiet_without_a_terminal() {
         "a piped upload keeps -q: {log}"
     );
 }
+
+#[test]
+fn transfer_flags_reach_every_client_run() {
+    let fixture = Fixture::new(LISTING_MISSING);
+
+    fixture
+        .command()
+        .args([
+            "server",
+            "--upload",
+            "--retries",
+            "0",
+            "--buffer",
+            "261120",
+            "--requests",
+            "8",
+        ])
+        .assert()
+        .code(1);
+
+    let log = fixture.log();
+    let argv: Vec<&str> = log
+        .lines()
+        .filter(|line| line.starts_with("ARGV "))
+        .collect();
+    assert!(!argv.is_empty(), "{log}");
+    assert!(
+        argv.iter()
+            .all(|line| line.contains("-B 261120") && line.contains("-R 8")),
+        "every phase must use the configured transfer values: {argv:?}"
+    );
+}
+
+#[test]
+fn an_out_of_range_transfer_value_fails_before_any_connection() {
+    for args in [
+        ["server", "--buffer", "262144"],
+        ["server", "--buffer", "0"],
+        ["server", "--requests", "257"],
+        ["server", "--requests", "0"],
+    ] {
+        let fixture = Fixture::new(LISTING_MATCH);
+
+        fixture
+            .command()
+            .args(args)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("must be"));
+
+        assert!(
+            !fixture.log().contains("ARGV "),
+            "no client may start for {args:?}"
+        );
+    }
+}

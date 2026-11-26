@@ -61,6 +61,10 @@ pub struct ServerOptions {
     pub retries: u8,
     /// Uploads to run at the same time. One is a single batch.
     pub jobs: u8,
+    /// sftp transfer buffer in bytes. The default is 32768.
+    pub buffer: Option<u32>,
+    /// sftp outstanding requests. The default is 64.
+    pub requests: Option<u16>,
     /// When to show the client's transfer meter.
     pub progress: Progress,
 }
@@ -78,6 +82,8 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
             port: opts.port,
             root: opts.root.clone(),
             identity: opts.identity.clone(),
+            buffer: opts.buffer,
+            requests: opts.requests,
         },
     )?;
 

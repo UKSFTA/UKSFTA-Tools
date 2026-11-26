@@ -219,6 +219,12 @@ enum Commands {
         /// Upload this many files in parallel (1 to 8)
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=8))]
         jobs: u8,
+        /// sftp transfer buffer in bytes (4096 to 261120)
+        #[arg(long, value_name = "BYTES")]
+        buffer: Option<u32>,
+        /// Outstanding sftp requests (1 to 256)
+        #[arg(long, value_name = "N")]
+        requests: Option<u16>,
         /// Show the sftp transfer meter (default: a terminal, single job)
         #[arg(long, group = "progress_mode")]
         progress: bool,
@@ -365,6 +371,8 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             require_signatures,
             retries,
             jobs,
+            buffer,
+            requests,
             progress,
             no_progress,
         } => {
@@ -391,6 +399,8 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
                 require_signatures,
                 retries,
                 jobs,
+                buffer,
+                requests,
                 progress: mode,
             })?
         }
