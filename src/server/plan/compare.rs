@@ -63,7 +63,12 @@ pub fn build_plan(input: &PlanInput<'_>) -> Plan {
             remote: remote.meta_id.clone(),
         });
         match input.meta_upload {
-            Some(path) => queue.upload("meta.cpp", path, join_remote(input.remote_dir, "meta.cpp")),
+            Some(path) => queue.upload(
+                "meta.cpp",
+                path,
+                join_remote(input.remote_dir, "meta.cpp"),
+                0,
+            ),
             None => warnings.push("meta.cpp: no local copy to upload".to_string()),
         }
     }
@@ -76,6 +81,7 @@ pub fn build_plan(input: &PlanInput<'_>) -> Plan {
                 "mod.cpp",
                 &local_mod.path,
                 join_remote(input.remote_dir, "mod.cpp"),
+                local_mod.size,
             );
         }
         (Some(local_mod), Some(size)) if size != local_mod.size => {
@@ -87,6 +93,7 @@ pub fn build_plan(input: &PlanInput<'_>) -> Plan {
                 "mod.cpp",
                 &local_mod.path,
                 join_remote(input.remote_dir, "mod.cpp"),
+                local_mod.size,
             );
         }
         (Some(_), Some(_)) => {}
@@ -144,7 +151,12 @@ pub fn build_plan(input: &PlanInput<'_>) -> Plan {
             continue;
         }
         if stale {
-            queue.upload(&pbo.name, &pbo.path, join_remote(&addons_dir, &target));
+            queue.upload(
+                &pbo.name,
+                &pbo.path,
+                join_remote(&addons_dir, &target),
+                pbo.size,
+            );
         }
         for signature in paired {
             let sig_key = lower(&signature.name);
@@ -157,6 +169,7 @@ pub fn build_plan(input: &PlanInput<'_>) -> Plan {
                     &signature.name,
                     &signature.path,
                     join_remote(&addons_dir, &sig_target),
+                    signature.size,
                 );
             }
         }
@@ -188,7 +201,12 @@ pub fn build_plan(input: &PlanInput<'_>) -> Plan {
                     name: key.name.clone(),
                 });
                 if !keys_links.contains(&name) {
-                    queue.upload(&key.name, &key.path, join_remote(&keys_dir, &key.name));
+                    queue.upload(
+                        &key.name,
+                        &key.path,
+                        join_remote(&keys_dir, &key.name),
+                        key.size,
+                    );
                 }
             }
             Some(file) => {
@@ -199,7 +217,12 @@ pub fn build_plan(input: &PlanInput<'_>) -> Plan {
                         remote: file.size,
                     });
                     if !keys_links.contains(&name) {
-                        queue.upload(&key.name, &key.path, join_remote(&keys_dir, &file.name));
+                        queue.upload(
+                            &key.name,
+                            &key.path,
+                            join_remote(&keys_dir, &file.name),
+                            key.size,
+                        );
                     }
                 }
             }
@@ -246,12 +269,13 @@ struct Queue {
 }
 
 impl Queue {
-    fn upload(&mut self, name: &str, local: &Path, remote: String) {
+    fn upload(&mut self, name: &str, local: &Path, remote: String, size: u64) {
         if self.queued.insert(remote.clone()) {
             self.actions.push(Action::Upload {
                 name: name.to_string(),
                 local: local.to_path_buf(),
                 remote,
+                size,
             });
         }
     }

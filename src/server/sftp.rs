@@ -8,7 +8,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::config::Settings;
@@ -18,6 +18,17 @@ use crate::util::sanitize_for_terminal;
 /// Environment override for the client binary. A test points this at a stub.
 const BINARY_ENV: &str = "UKSFTA_SFTP_BIN";
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+/// The transfer buffer. A 256 KiB buffer is a local fatal ("Outbound
+/// message too long"), and throughput is flat from 32 KiB to 261 KiB.
+const BUFFER_SIZE: &str = "32768";
+
+/// Keep the connection alive, and fail a dead link in seconds.
+const LIVENESS: [&str; 3] = [
+    "ServerAliveInterval=15",
+    "ServerAliveCountMax=3",
+    "ConnectTimeout=15",
+];
 
 /// The client. It holds no credentials: `sftp` reads the key, the agent or
 /// the terminal prompt itself.
@@ -39,39 +50,54 @@ impl Sftp {
         }
     }
 
-    /// Send one phase of commands and return the client's standard output.
-    ///
-    /// # Errors
-    /// Returns `Input` when the client cannot start, cannot take the
-    /// commands, or exits non-zero.
-    pub fn batch(&self, lines: &[String]) -> Result<String, UksftaError> {
-        if lines.is_empty() {
-            return Ok(String::new());
+    /// The full argument list for one client run. `-q` suppresses the
+    /// client's own meter, so the verify phases stay parseable.
+    fn args(&self, quiet: bool) -> Vec<String> {
+        let mut args = Vec::new();
+        if quiet {
+            args.push("-q".to_string());
         }
+        args.push("-P".to_string());
+        args.push(self.port.to_string());
+        if let Some(path) = &self.identity {
+            args.push("-i".to_string());
+            args.push(path.display().to_string());
+        }
+        args.extend([
+            "-R".to_string(),
+            "64".to_string(),
+            "-B".to_string(),
+            BUFFER_SIZE.to_string(),
+        ]);
+        for option in LIVENESS {
+            args.push("-o".to_string());
+            args.push(option.to_string());
+        }
+        args.push(self.destination.clone());
+        args
+    }
+
+    /// A client run with its commands on standard input.
+    fn command(&self, quiet: bool) -> Command {
+        let mut command = Command::new(&self.binary);
+        command.args(self.args(quiet)).stdin(Stdio::piped());
+        command
+    }
+
+    fn spawn(&self, mut command: Command) -> Result<Child, UksftaError> {
+        command
+            .spawn()
+            .map_err(|e| UksftaError::Input(format!("cannot run {}: {e}", self.binary)))
+    }
+
+    /// Write the commands, then close standard input so the client sees the
+    /// end of the batch.
+    fn send(&self, child: &mut Child, lines: &[String]) -> Result<(), UksftaError> {
         let mut body = String::new();
         for line in lines {
             body.push_str(line);
             body.push('\n');
         }
-
-        let mut command = Command::new(&self.binary);
-        command.arg("-q").arg("-P").arg(self.port.to_string());
-        if let Some(path) = &self.identity {
-            command.arg("-i").arg(path);
-        }
-        command
-            .arg("-R")
-            .arg("64")
-            .arg("-B")
-            .arg("262144")
-            .arg(&self.destination)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = command
-            .spawn()
-            .map_err(|e| UksftaError::Input(format!("cannot run {}: {e}", self.binary)))?;
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(e) = stdin.write_all(body.as_bytes()) {
                 let _ = child.kill();
@@ -81,8 +107,24 @@ impl Sftp {
                     self.binary
                 )));
             }
-            // The handle drops here, so the client sees end of input.
         }
+        Ok(())
+    }
+
+    /// Send one phase of commands and return the client's standard output.
+    ///
+    /// # Errors
+    /// Returns `Input` when the client cannot start, cannot take the
+    /// commands, or exits non-zero.
+    pub fn batch(&self, lines: &[String]) -> Result<String, UksftaError> {
+        if lines.is_empty() {
+            return Ok(String::new());
+        }
+
+        let mut command = self.command(true);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = self.spawn(command)?;
+        self.send(&mut child, lines)?;
         let output = child.wait_with_output().map_err(|e| {
             UksftaError::Input(format!("cannot read the output of {}: {e}", self.binary))
         })?;
@@ -96,6 +138,34 @@ impl Sftp {
             return Err(UksftaError::Input(format!("sftp failed: {detail}")));
         }
         Ok(stdout)
+    }
+
+    /// Send one phase with the client's meter attached to this terminal.
+    /// The output is not captured, so the meter needs a real terminal.
+    ///
+    /// # Errors
+    /// Returns `Input` when the client cannot start, cannot take the
+    /// commands, or exits non-zero.
+    pub fn batch_progress(&self, lines: &[String]) -> Result<(), UksftaError> {
+        if lines.is_empty() {
+            return Ok(());
+        }
+
+        let mut command = self.command(false);
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        let mut child = self.spawn(command)?;
+        self.send(&mut child, lines)?;
+        let status = child
+            .wait()
+            .map_err(|e| UksftaError::Input(format!("cannot wait for {}: {e}", self.binary)))?;
+        if !status.success() {
+            let detail = status.code().map_or_else(
+                || "terminated by a signal".to_string(),
+                |code| format!("exit {code}"),
+            );
+            return Err(UksftaError::Input(format!("sftp failed: {detail}")));
+        }
+        Ok(())
     }
 }
 
@@ -154,6 +224,63 @@ fn unique_path(prefix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_client_arguments_stay_inside_the_buffer_limit() {
+        let client = Sftp {
+            binary: "sftp".to_string(),
+            destination: "tester@example.invalid".to_string(),
+            port: 2022,
+            identity: Some(PathBuf::from("/home/user/.ssh/id_ed25519")),
+        };
+
+        let args = client.args(true);
+        assert!(
+            !args.iter().any(|arg| arg == "262144"),
+            "the buffer must stay inside the server-safe limit: {args:?}"
+        );
+        let buffer = args
+            .iter()
+            .position(|arg| arg == "-B")
+            .map(|i| args[i + 1].clone());
+        assert_eq!(buffer.as_deref(), Some("32768"));
+        for option in LIVENESS {
+            assert!(
+                args.windows(2).any(|pair| pair == ["-o", option]),
+                "{args:?}"
+            );
+        }
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("tester@example.invalid")
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-i", "/home/user/.ssh/id_ed25519"]));
+    }
+
+    #[test]
+    fn quiet_adds_the_flag_and_the_meter_path_leaves_it_out() {
+        let client = Sftp {
+            binary: "sftp".to_string(),
+            destination: "tester@example.invalid".to_string(),
+            port: 2022,
+            identity: None,
+        };
+
+        let quiet = client.args(true);
+        assert!(quiet.iter().any(|arg| arg == "-q"), "{quiet:?}");
+
+        let meter = client.args(false);
+        assert!(!meter.iter().any(|arg| arg == "-q"), "{meter:?}");
+        assert!(meter.windows(2).any(|pair| pair == ["-B", "32768"]));
+        for option in LIVENESS {
+            assert!(
+                meter.windows(2).any(|pair| pair == ["-o", option]),
+                "{meter:?}"
+            );
+        }
+    }
 
     #[test]
     fn quote_wraps_a_plain_path() {
