@@ -8,6 +8,7 @@ mod config;
 mod doctor;
 mod hostkey;
 mod launch;
+mod native;
 mod output;
 mod parse;
 mod plan;
@@ -88,6 +89,18 @@ pub struct ServerOptions {
     pub server_cfg: Option<String>,
     /// Fail when an opt-in config check fails.
     pub strict_config: bool,
+    /// Use the native segmented transport.
+    pub segmented: bool,
+    /// Files at or above this size may be segmented.
+    pub segment_min: Option<u64>,
+    /// Segmented connections.
+    pub segment_connections: Option<u8>,
+    /// Segmented chunk size.
+    pub segment_chunk: Option<u32>,
+    /// Resume policy: auto or off.
+    pub segment_resume: Option<String>,
+    /// Reconnects per segmented run.
+    pub segment_reconnects: Option<u8>,
     /// Write one JSON object to standard output.
     pub json: bool,
     /// Run the read-only preflight instead of the checks.
@@ -155,6 +168,12 @@ fn millis(elapsed: Duration) -> u64 {
 fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaError> {
     let settings = config::resolve(opts.config.as_deref(), &overrides(opts))?;
     outcome.settings = Some(settings.clone());
+
+    if settings.segment.enabled {
+        return Err(UksftaError::Input(
+            "segmented upload is not available in this build; omit --segmented".to_string(),
+        ));
+    }
 
     hostkey::preflight(&settings)?;
     let launch = settings
@@ -314,6 +333,12 @@ fn overrides(opts: &ServerOptions) -> Overrides {
         host_key_policy: opts.host_key_policy.clone(),
         launch_line: opts.launch_line.clone(),
         server_cfg: opts.server_cfg.clone(),
+        segment: Some(opts.segmented),
+        segment_min: opts.segment_min,
+        segment_connections: opts.segment_connections,
+        segment_chunk: opts.segment_chunk,
+        segment_resume: opts.segment_resume.clone(),
+        segment_reconnects: opts.segment_reconnects,
     }
 }
 

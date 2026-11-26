@@ -6,7 +6,13 @@
 # reports as missing, and remove any entry the tree does not use.
 
 [advisories]
-ignore = []
+ignore = [
+  # russh 0.65.4 is the latest release and its russh-util 0.52 depends on
+  # chrono, which RUSTSEC-2026-0543 marks unmaintained. No safe upgrade
+  # exists. chrono is used for timestamps, not to parse network input.
+  # Re-check when russh updates russh-util.
+  { id = "RUSTSEC-2026-0543", reason = "no safe upgrade in the latest russh; timestamps only" },
+]
 
 [bans]
 multiple-versions = "warn"

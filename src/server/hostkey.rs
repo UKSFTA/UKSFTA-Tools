@@ -187,6 +187,7 @@ mod tests {
             host_key_policy: policy,
             launch_line: None,
             server_cfg: None,
+            segment: crate::server::config::Segment::default(),
         }
     }
 

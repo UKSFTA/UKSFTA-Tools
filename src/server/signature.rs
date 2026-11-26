@@ -137,7 +137,7 @@ fn parse_header(header: &[u8]) -> Result<Header, KeyNameError> {
     if !(512..=16_384).contains(&bits) {
         return Err(KeyNameError::BadHeader);
     }
-    if exponent <= 1 || exponent % 2 == 0 {
+    if exponent <= 1 || exponent.is_multiple_of(2) {
         return Err(KeyNameError::BadHeader);
     }
     if blob_size < BLOB_OVERHEAD {
