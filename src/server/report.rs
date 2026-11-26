@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use super::plan::{Action, Finding, Plan};
+use super::plan::{inside, Action, Finding, Plan};
 use super::sftp::quote;
 use crate::error::UksftaError;
 use crate::util::human_size;
@@ -144,23 +144,53 @@ fn sort_ascending(units: &mut [UploadUnit]) {
     units.sort_by(|a, b| a.size.cmp(&b.size).then_with(|| a.remote.cmp(&b.remote)));
 }
 
-/// The `-mkdir` lines for the directories the uploads need, sorted.
+/// The `-mkdir` lines for the directories the uploads need, starting with
+/// the pack folder, then ordered by depth and name.
 ///
 /// # Errors
-/// Returns `Input` when a remote path cannot be quoted.
+/// Returns `Input` when a remote path cannot be quoted or escapes the
+/// pack folder.
 pub fn upload_dirs(plan: &Plan) -> Result<Vec<String>, UksftaError> {
-    let addons = format!("{}/addons", plan.remote_dir);
-    let keys = format!("{}/keys", plan.remote_dir);
-    let mut dirs: Vec<String> = Vec::new();
+    let prefix = format!("{}/", plan.remote_dir);
+    let mut rels: Vec<String> = Vec::new();
+    let mut any = false;
     for unit in upload_units(plan) {
-        if unit.remote.starts_with(&format!("{addons}/")) && !dirs.contains(&addons) {
-            dirs.push(addons.clone());
-        }
-        if unit.remote.starts_with(&format!("{keys}/")) && !dirs.contains(&keys) {
-            dirs.push(keys.clone());
+        any = true;
+        let rel = unit.remote.strip_prefix(&prefix).ok_or_else(|| {
+            UksftaError::Input(format!(
+                "upload target outside the pack folder: {}",
+                unit.remote
+            ))
+        })?;
+        let mut parts: Vec<&str> = rel.split('/').collect();
+        parts.pop();
+        let mut acc = String::new();
+        for part in parts {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(part);
+            if !rels.contains(&acc) {
+                rels.push(acc.clone());
+            }
         }
     }
-    dirs.sort();
+
+    let mut dirs = Vec::new();
+    if any {
+        dirs.push(plan.remote_dir.clone());
+        for rel in rels {
+            dirs.push(inside(&plan.remote_dir, &rel)?);
+        }
+    }
+    dirs.sort_by(|a, b| {
+        a.matches('/')
+            .count()
+            .cmp(&b.matches('/').count())
+            .then_with(|| a.cmp(b))
+    });
+    dirs.dedup();
+
     let mut lines = Vec::new();
     for dir in &dirs {
         lines.push(format!("-mkdir {}", quote(dir)?));
@@ -271,9 +301,41 @@ mod tests {
         assert!(puts[0].contains("key.bikey"), "{batch:?}");
         assert!(puts[1].contains("small.pbo"), "{batch:?}");
         assert!(puts[2].contains("big.pbo"), "{batch:?}");
-        assert!(batch[0].starts_with("-mkdir"), "{batch:?}");
+        assert_eq!(
+            batch[0], "-mkdir \"/srv/arma/@1\"",
+            "the pack folder comes first: {batch:?}"
+        );
         assert!(batch[1].starts_with("-mkdir"), "{batch:?}");
-        assert!(batch[2].starts_with("put "), "{batch:?}");
+        assert!(batch[2].starts_with("-mkdir"), "{batch:?}");
+        assert!(batch[3].starts_with("put "), "{batch:?}");
+    }
+
+    #[test]
+    fn a_nested_upload_creates_its_directory_once_before_the_put() {
+        let plan = plan_with(vec![
+            upload("x.py", "/srv/arma/@1/python_code/x.py", 10),
+            upload("y.py", "/srv/arma/@1/python_code/y.py", 20),
+        ]);
+
+        let batch = upload_batch(&plan).unwrap();
+        let mkdir = batch
+            .iter()
+            .position(|line| line == "-mkdir \"/srv/arma/@1/python_code\"")
+            .expect("the nested directory is created");
+        let put = batch
+            .iter()
+            .position(|line| line.starts_with("put "))
+            .expect("the files are sent");
+        assert!(mkdir < put, "{batch:?}");
+        assert_eq!(
+            batch
+                .iter()
+                .filter(|line| line.contains("python_code"))
+                .filter(|line| line.starts_with("-mkdir"))
+                .count(),
+            1,
+            "{batch:?}"
+        );
     }
 
     #[test]

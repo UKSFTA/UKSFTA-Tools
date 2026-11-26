@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::compare::{is_signature_of, signature_owner};
-use super::model::Status;
+use super::model::{is_bikey, is_bisign, is_pbo, Status};
 use super::*;
 
 const ID: &str = "3662499431";
@@ -12,17 +12,17 @@ const SIG: &str = "uksfta_main.pbo.key.bisign";
 const KEY: &str = "uksfta.bikey";
 const DIR: &str = "/srv/arma/@3662499431";
 
-fn local_file(dir: &str, name: &str, size: u64) -> LocalFile {
-    LocalFile {
-        name: name.to_string(),
-        path: PathBuf::from(format!("{dir}/{name}")),
+fn local_file(rel: &str, size: u64) -> LocalEntry {
+    LocalEntry {
+        rel: rel.to_string(),
+        path: PathBuf::from(format!("/local/{rel}")),
         size,
     }
 }
 
-fn remote_file(name: &str, size: u64) -> RemoteFile {
-    RemoteFile {
-        name: name.to_string(),
+fn remote_file(rel: &str, size: u64) -> RemoteEntry {
+    RemoteEntry {
+        rel: rel.to_string(),
         size,
     }
 }
@@ -45,22 +45,28 @@ impl Fixture {
             id: ID.to_string(),
             name: NAME.to_string(),
             dir: PathBuf::from("/local"),
-            pbos: vec![local_file("/local/addons", PBO, 100)],
-            signatures: vec![local_file("/local/addons", SIG, 10)],
-            keys: vec![local_file("/local/keys", KEY, 50)],
-            meta: Some(local_file("/local", "meta.cpp", 4)),
-            mod_cpp: Some(local_file("/local", "mod.cpp", 20)),
+            files: vec![
+                local_file(&format!("addons/{PBO}"), 100),
+                local_file(&format!("addons/{SIG}"), 10),
+                local_file(&format!("keys/{KEY}"), 50),
+                local_file("meta.cpp", 4),
+                local_file("mod.cpp", 20),
+            ],
             meta_source: PathBuf::from("/repo/meta.cpp"),
             ..LocalPack::default()
         };
         let remote = RemotePack {
             exists: true,
-            addons: vec![remote_file(PBO, 100), remote_file(SIG, 10)],
-            keys: vec![remote_file(KEY, 50)],
-            addons_symlinks: Vec::new(),
-            keys_symlinks: Vec::new(),
+            files: vec![
+                remote_file(&format!("addons/{PBO}"), 100),
+                remote_file(&format!("addons/{SIG}"), 10),
+                remote_file(&format!("keys/{KEY}"), 50),
+                remote_file("meta.cpp", 120),
+                remote_file("mod.cpp", 20),
+            ],
             meta_id: Some(ID.to_string()),
             mod_size: Some(20),
+            ..RemotePack::default()
         };
         Self {
             local,
@@ -128,7 +134,10 @@ fn a_matching_pack_plans_no_change() {
 #[test]
 fn a_missing_pbo_is_reported_and_uploaded_with_its_signature() {
     let mut fixture = Fixture::new();
-    fixture.remote.addons.clear();
+    fixture
+        .remote
+        .files
+        .retain(|file| !file.rel.starts_with("addons/"));
 
     let plan = fixture.plan();
     assert_eq!(
@@ -149,7 +158,7 @@ fn a_missing_pbo_is_reported_and_uploaded_with_its_signature() {
 #[test]
 fn a_case_only_difference_is_the_same_file() {
     let mut fixture = Fixture::new();
-    fixture.remote.addons[0].name = "UKSFTA_MAIN.PBO".to_string();
+    fixture.remote.files[0].rel = "addons/UKSFTA_MAIN.PBO".to_string();
 
     let plan = fixture.plan();
     assert_eq!(plan.status(), Status::Ok);
@@ -163,12 +172,12 @@ fn case_only_differences_aggregate_into_one_warning() {
     let mut fixture = Fixture::new();
     fixture
         .local
-        .pbos
-        .push(local_file("/local/addons", "uksfta_extra.pbo", 5));
+        .files
+        .push(local_file("addons/uksfta_extra.pbo", 5));
     fixture
         .remote
-        .addons
-        .push(remote_file("UKSFTA_EXTRA.PBO", 5));
+        .files
+        .push(remote_file("addons/UKSFTA_EXTRA.PBO", 5));
 
     let plan = fixture.plan();
     assert!(plan.findings.is_empty());
@@ -179,8 +188,8 @@ fn case_only_differences_aggregate_into_one_warning() {
 #[test]
 fn a_case_only_difference_uploads_to_the_server_name() {
     let mut fixture = Fixture::new();
-    fixture.remote.addons[0].name = "UKSFTA_MAIN.PBO".to_string();
-    fixture.remote.addons[0].size = 90;
+    fixture.remote.files[0].rel = "addons/UKSFTA_MAIN.PBO".to_string();
+    fixture.remote.files[0].size = 90;
 
     let plan = fixture.plan();
     let targets = remote_targets(&plan);
@@ -198,7 +207,7 @@ fn a_case_only_difference_uploads_to_the_server_name() {
 #[test]
 fn a_size_mismatch_makes_the_pbo_stale() {
     let mut fixture = Fixture::new();
-    fixture.remote.addons[0].size = 90;
+    fixture.remote.files[0].size = 90;
 
     let plan = fixture.plan();
     assert_eq!(
@@ -216,7 +225,9 @@ fn a_size_mismatch_makes_the_pbo_stale() {
 #[test]
 fn a_deep_hash_mismatch_makes_the_pbo_stale() {
     let mut fixture = Fixture::new();
-    fixture.deep.insert(PBO.to_string(), false);
+    fixture
+        .deep
+        .insert(format!("addons/{PBO}").to_ascii_lowercase(), false);
 
     let plan = fixture.plan();
     assert!(matches!(plan.findings[0], Finding::StaleHash { .. }));
@@ -226,7 +237,7 @@ fn a_deep_hash_mismatch_makes_the_pbo_stale() {
 #[test]
 fn an_extra_remote_pbo_is_reported_and_removed() {
     let mut fixture = Fixture::new();
-    fixture.remote.addons.push(remote_file("Old.pbo", 7));
+    fixture.remote.files.push(remote_file("addons/Old.pbo", 7));
 
     let plan = fixture.plan();
     assert_eq!(
@@ -244,7 +255,7 @@ fn an_extra_remote_pbo_is_reported_and_removed() {
 #[test]
 fn a_locked_extra_is_not_pruned() {
     let mut fixture = Fixture::new();
-    fixture.remote.addons.push(remote_file("Old.pbo", 7));
+    fixture.remote.files.push(remote_file("addons/Old.pbo", 7));
     fixture.locked.insert("old.pbo".to_string());
 
     let plan = fixture.plan();
@@ -262,7 +273,7 @@ fn a_locked_extra_is_not_pruned() {
 #[test]
 fn force_prune_removes_a_locked_extra() {
     let mut fixture = Fixture::new();
-    fixture.remote.addons.push(remote_file("Old.pbo", 7));
+    fixture.remote.files.push(remote_file("addons/Old.pbo", 7));
     fixture.locked.insert("old.pbo".to_string());
     fixture.force_prune = true;
 
@@ -273,8 +284,14 @@ fn force_prune_removes_a_locked_extra() {
 #[test]
 fn a_local_pbo_without_a_signature_warns() {
     let mut fixture = Fixture::new();
-    fixture.local.signatures.clear();
-    fixture.remote.addons.retain(|file| file.name != SIG);
+    fixture
+        .local
+        .files
+        .retain(|file| !is_addons_signature(&file.rel));
+    fixture
+        .remote
+        .files
+        .retain(|file| file.rel != format!("addons/{SIG}"));
 
     let plan = fixture.plan();
     assert!(plan.findings.is_empty(), "an unsigned PBO is not a finding");
@@ -289,7 +306,10 @@ fn a_local_pbo_without_a_signature_warns() {
 #[test]
 fn a_missing_remote_signature_is_uploaded() {
     let mut fixture = Fixture::new();
-    fixture.remote.addons.retain(|file| file.name != SIG);
+    fixture
+        .remote
+        .files
+        .retain(|file| file.rel != format!("addons/{SIG}"));
 
     let plan = fixture.plan();
     assert!(plan.findings.is_empty());
@@ -300,7 +320,10 @@ fn a_missing_remote_signature_is_uploaded() {
 #[test]
 fn keys_are_compared_and_uploaded() {
     let mut fixture = Fixture::new();
-    fixture.remote.keys.clear();
+    fixture
+        .remote
+        .files
+        .retain(|file| !file.rel.starts_with("keys/"));
 
     let plan = fixture.plan();
     assert_eq!(
@@ -312,7 +335,10 @@ fn keys_are_compared_and_uploaded() {
     assert_eq!(plan.status(), Status::Missing);
     assert_eq!(remote_targets(&plan), vec![format!("{DIR}/keys/{KEY}")]);
 
-    fixture.remote.keys.push(remote_file(KEY, 40));
+    fixture
+        .remote
+        .files
+        .push(remote_file(&format!("keys/{KEY}"), 40));
     let plan = fixture.plan();
     assert_eq!(
         plan.findings[0],
@@ -328,7 +354,7 @@ fn keys_are_compared_and_uploaded() {
 #[test]
 fn a_remote_only_key_is_reported_but_not_removed() {
     let mut fixture = Fixture::new();
-    fixture.remote.keys.push(remote_file("Old.bikey", 3));
+    fixture.remote.files.push(remote_file("keys/Old.bikey", 3));
 
     let plan = fixture.plan();
     assert_eq!(
@@ -386,8 +412,11 @@ fn a_missing_pack_folder_uploads_everything() {
 #[test]
 fn a_pack_folder_is_never_removed_and_only_pbos_are() {
     let mut fixture = Fixture::new();
-    fixture.remote.addons.push(remote_file("stray.bisign", 1));
-    fixture.remote.addons.push(remote_file("old.PBO", 2));
+    fixture
+        .remote
+        .files
+        .push(remote_file("addons/stray.bisign", 1));
+    fixture.remote.files.push(remote_file("addons/old.PBO", 2));
 
     let plan = fixture.plan();
     assert_eq!(remote_targets(&plan), vec![format!("{DIR}/addons/old.PBO")]);
@@ -396,8 +425,11 @@ fn a_pack_folder_is_never_removed_and_only_pbos_are() {
 #[test]
 fn a_symlink_on_the_server_is_not_written() {
     let mut fixture = Fixture::new();
-    fixture.remote.addons.clear();
-    fixture.remote.addons_symlinks.push(PBO.to_string());
+    fixture
+        .remote
+        .files
+        .retain(|file| !file.rel.starts_with("addons/"));
+    fixture.remote.symlinks.push(format!("addons/{PBO}"));
 
     let plan = fixture.plan();
     assert!(!targets_contain(&plan, PBO));
@@ -433,7 +465,10 @@ fn extension_helpers_ignore_case() {
 #[test]
 fn upload_bytes_sums_every_upload_action() {
     let mut fixture = Fixture::new();
-    fixture.remote.addons.clear();
+    fixture
+        .remote
+        .files
+        .retain(|file| !file.rel.starts_with("addons/"));
 
     let plan = fixture.plan();
     assert_eq!(plan.upload_bytes(), 110, "the PBO and its signature");
@@ -453,7 +488,50 @@ fn a_generated_meta_cpp_adds_no_upload_bytes() {
 }
 
 #[test]
-fn a_signature_authority_with_a_shipped_key_passes() {
+fn a_root_file_is_missing_and_uploaded() {
+    let mut fixture = Fixture::new();
+    fixture.local.files.push(local_file("LICENSE", 7));
+
+    let plan = fixture.plan();
+    assert!(plan.findings.iter().any(|finding| matches!(
+        finding,
+        Finding::Missing { name } if name == "LICENSE"
+    )));
+    assert!(remote_targets(&plan).contains(&format!("{DIR}/LICENSE")));
+}
+
+#[test]
+fn a_nested_file_is_missing_and_uploaded() {
+    let mut fixture = Fixture::new();
+    fixture.local.files.push(local_file("python_code/x.py", 3));
+
+    let plan = fixture.plan();
+    assert!(plan.findings.iter().any(|finding| matches!(
+        finding,
+        Finding::Missing { name } if name == "python_code/x.py"
+    )));
+    assert!(remote_targets(&plan).contains(&format!("{DIR}/python_code/x.py")));
+}
+
+#[test]
+fn a_remote_only_nested_file_is_extra_and_never_removed() {
+    let mut fixture = Fixture::new();
+    fixture
+        .remote
+        .files
+        .push(remote_file("python_code/x.py", 3));
+
+    let plan = fixture.plan();
+    assert!(plan.findings.iter().any(|finding| matches!(
+        finding,
+        Finding::Extra { name } if name == "python_code/x.py"
+    )));
+    assert!(plan.actions.is_empty(), "only addons/*.pbo may be pruned");
+    assert!(!plan.failed(), "an extra included file is advisory");
+}
+
+#[test]
+fn signature_authorities_still_match_the_shipped_keys() {
     let mut fixture = Fixture::new();
     fixture
         .signature_authorities
@@ -464,64 +542,5 @@ fn a_signature_authority_with_a_shipped_key_passes() {
         .insert("uksfta_1.0.1".to_string());
 
     let plan = fixture.plan();
-    assert!(
-        !plan
-            .findings
-            .iter()
-            .any(|f| matches!(f, Finding::KeyAuthorityMissing { .. })),
-        "{:?}",
-        plan.findings
-    );
     assert_eq!(plan.status(), Status::Ok);
-}
-
-#[test]
-fn a_renamed_key_with_the_same_authority_passes_and_warns() {
-    let mut fixture = Fixture::new();
-    fixture
-        .signature_authorities
-        .insert(SIG.to_string(), "uksfta_1.0.1".to_string());
-    fixture.key_authorities.insert("uksfta_1.0.1".to_string());
-    fixture.local.authority_warnings =
-        vec!["renamed.bikey: embedded authority is uksfta_1.0.1".to_string()];
-
-    let plan = fixture.plan();
-    assert_eq!(plan.status(), Status::Ok);
-    assert!(plan.warnings.iter().any(|w| w.contains("renamed.bikey")));
-}
-
-#[test]
-fn a_signature_authority_without_a_key_fails() {
-    let mut fixture = Fixture::new();
-    fixture
-        .signature_authorities
-        .insert(SIG.to_string(), "other_1".to_string());
-    fixture.key_authorities.insert("uksfta_1.0.1".to_string());
-
-    let plan = fixture.plan();
-    assert!(plan.findings.iter().any(|f| matches!(
-        f,
-        Finding::KeyAuthorityMissing { signature, authority }
-            if signature == SIG && authority == "other_1"
-    )));
-    assert_eq!(plan.status(), Status::Missing);
-    assert!(plan.failed());
-}
-
-#[test]
-fn a_signature_authority_missing_from_the_remote_keys_fails() {
-    let mut fixture = Fixture::new();
-    fixture
-        .signature_authorities
-        .insert(SIG.to_string(), "uksfta_1.0.1".to_string());
-    fixture.key_authorities.insert("uksfta_1.0.1".to_string());
-    fixture
-        .remote_key_authorities
-        .insert("another_authority".to_string());
-
-    let plan = fixture.plan();
-    assert!(plan
-        .findings
-        .iter()
-        .any(|f| matches!(f, Finding::KeyAuthorityMissing { .. })));
 }

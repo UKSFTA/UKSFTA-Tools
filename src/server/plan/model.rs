@@ -3,10 +3,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-/// One file in the remote pack folder.
+use super::tree::LocalEntry;
+
+/// One file in the remote pack folder, as a pack-relative path.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteFile {
-    pub name: String,
+pub struct RemoteEntry {
+    pub rel: String,
     pub size: u64,
 }
 
@@ -14,24 +16,30 @@ pub struct RemoteFile {
 #[derive(Debug, Clone, Default)]
 pub struct RemotePack {
     pub exists: bool,
-    pub addons: Vec<RemoteFile>,
-    pub keys: Vec<RemoteFile>,
-    /// Names in `addons/` that are symbolic links.
-    pub addons_symlinks: Vec<String>,
-    /// Names in `keys/` that are symbolic links.
-    pub keys_symlinks: Vec<String>,
+    pub files: Vec<RemoteEntry>,
+    pub dirs: Vec<String>,
+    /// Pack-relative paths that are symbolic links.
+    pub symlinks: Vec<String>,
     /// The `publishedid` in the remote `meta.cpp`.
     pub meta_id: Option<String>,
     /// Size of the remote `mod.cpp`, when present.
     pub mod_size: Option<u64>,
 }
 
-/// One file in the local build output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalFile {
-    pub name: String,
-    pub path: PathBuf,
-    pub size: u64,
+impl RemotePack {
+    pub fn addons(&self) -> impl Iterator<Item = &RemoteEntry> {
+        self.files.iter().filter(|entry| is_addons_pbo(&entry.rel))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &RemoteEntry> {
+        self.files.iter().filter(|entry| is_key_file(&entry.rel))
+    }
+
+    pub fn signatures(&self) -> impl Iterator<Item = &RemoteEntry> {
+        self.files
+            .iter()
+            .filter(|entry| is_addons_signature(&entry.rel))
+    }
 }
 
 /// The local pack: the build output plus the `meta.cpp` that names it.
@@ -40,11 +48,10 @@ pub struct LocalPack {
     pub id: String,
     pub name: String,
     pub dir: PathBuf,
-    pub pbos: Vec<LocalFile>,
-    pub signatures: Vec<LocalFile>,
-    pub keys: Vec<LocalFile>,
-    pub meta: Option<LocalFile>,
-    pub mod_cpp: Option<LocalFile>,
+    pub files: Vec<LocalEntry>,
+    pub dirs: Vec<String>,
+    /// Entries left out by the walk.
+    pub skipped: usize,
     /// The `meta.cpp` that named the pack, used when the build has none.
     pub meta_source: PathBuf,
     /// `.bisign` file name to the embedded authority name.
@@ -53,6 +60,58 @@ pub struct LocalPack {
     pub key_authorities: HashSet<String>,
     /// Notes about key or signature names that differ from the authority.
     pub authority_warnings: Vec<String>,
+}
+
+impl LocalPack {
+    pub fn pbos(&self) -> impl Iterator<Item = &LocalEntry> {
+        self.files.iter().filter(|entry| is_addons_pbo(&entry.rel))
+    }
+
+    pub fn signatures(&self) -> impl Iterator<Item = &LocalEntry> {
+        self.files
+            .iter()
+            .filter(|entry| is_addons_signature(&entry.rel))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &LocalEntry> {
+        self.files.iter().filter(|entry| is_key_file(&entry.rel))
+    }
+
+    pub fn meta(&self) -> Option<&LocalEntry> {
+        self.files.iter().find(|entry| entry.rel == "meta.cpp")
+    }
+
+    pub fn mod_cpp(&self) -> Option<&LocalEntry> {
+        self.files.iter().find(|entry| entry.rel == "mod.cpp")
+    }
+}
+
+/// The direct child name when `rel` sits directly in `dir`.
+pub fn child_of<'a>(rel: &'a str, dir: &str) -> Option<&'a str> {
+    let rest = rel.strip_prefix(dir)?.strip_prefix('/')?;
+    (!rest.is_empty() && !rest.contains('/')).then_some(rest)
+}
+
+pub fn is_addons_pbo(rel: &str) -> bool {
+    child_of(rel, "addons").is_some_and(is_pbo)
+}
+
+pub fn is_addons_signature(rel: &str) -> bool {
+    child_of(rel, "addons").is_some_and(is_bisign)
+}
+
+pub fn is_key_file(rel: &str) -> bool {
+    child_of(rel, "keys").is_some_and(is_bikey)
+}
+
+/// The basename for `addons/` and `keys/`, the relative path otherwise.
+pub fn display_name(rel: &str) -> String {
+    if rel.starts_with("addons/") || rel.starts_with("keys/") {
+        if let Some((_, name)) = rel.rsplit_once('/') {
+            return name.to_string();
+        }
+    }
+    rel.to_string()
 }
 
 /// The state of the pack. `rank` orders the statuses so the worst is shown.
@@ -284,7 +343,7 @@ pub struct PlanInput<'a> {
     pub remote: &'a RemotePack,
     /// The file to upload when the remote `meta.cpp` is wrong.
     pub meta_upload: Option<&'a std::path::Path>,
-    /// Lowercase PBO name to true when the deep hashes match.
+    /// Lowercase PBO relative path to true when the deep hashes match.
     pub deep: &'a HashMap<String, bool>,
     /// Lowercase basenames of every PBO in `mods.lock`.
     pub locked: &'a HashSet<String>,
