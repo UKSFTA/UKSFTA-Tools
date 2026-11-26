@@ -598,10 +598,11 @@ Run this in a terminal:
 curl -fsSL https://github.com/UKSFTA/UKSFTA-Tools/releases/latest/download/install.sh | sh
 ```
 
-This downloads `uksfta`, verifies its SHA256 checksum against the release's
-`SHA256SUMS`, and installs it to `~/.local/bin` (or `/usr/local/bin` for a
-root install on macOS). Open a new terminal and run `uksfta --help` to
-verify.
+This downloads the matching binary, verifies its SHA256 checksum against
+the release's `SHA256SUMS`, and installs it to `~/.local/bin` (or
+`/usr/local/bin` for a root install on macOS). The installer selects the
+asset for Linux x86_64, Linux arm64 or macOS arm64. Open a new terminal and
+run `uksfta --help` to verify.
 
 ### Manual download
 
@@ -609,13 +610,19 @@ Download the binary for your platform from the [Releases
 page](https://github.com/UKSFTA/UKSFTA-Tools/releases) and put it on your
 `PATH`:
 
-```bash
-# Linux
-chmod +x uksfta
-sudo mv uksfta /usr/local/bin/uksfta
+| Platform | Asset |
+| --- | --- |
+| Linux x86_64 | `uksfta` |
+| Linux arm64 | `uksfta-linux-arm64` |
+| macOS arm64 | `uksfta-macos-arm64` |
+| Windows x86_64 | `uksfta.exe` |
 
-# Windows
-# uksfta.exe from the release, rename to uksfta.exe if needed and add to PATH
+```bash
+# Linux and macOS: rename the asset to uksfta when it has a suffix
+chmod +x uksfta-linux-arm64
+sudo mv uksfta-linux-arm64 /usr/local/bin/uksfta
+
+# Windows: put uksfta.exe on PATH
 ```
 
 Each release also includes a `SHA256SUMS` file so you can verify the
