@@ -149,7 +149,21 @@ enum Commands {
     },
 }
 
+/// Restore the default `SIGPIPE` handler so a closed pipe ends the process
+/// quietly, as a command-line reader expects.
+#[cfg(unix)]
+fn reset_sigpipe() {
+    // SAFETY: runs before any thread is spawned and only restores the default
+    // handler, so no Rust code observes the signal state change.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 fn main() {
+    #[cfg(unix)]
+    reset_sigpipe();
+
     let cli = Cli::parse();
 
     // Daily update notice on every command (skips network if checked

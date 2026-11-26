@@ -2,8 +2,7 @@
 # `cargo deny check` against this file.
 #
 # The licence allowlist below covers the permissive licences the dependency
-# tree is expected to use. Confirm it with one `cargo deny check` run
-# (cargo-deny is not installed in this workspace): add any licence the run
+# tree uses. Confirm it with `cargo deny check`: add any licence the run
 # reports as missing, and remove any entry the tree does not use.
 
 [advisories]
