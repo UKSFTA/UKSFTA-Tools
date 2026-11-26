@@ -169,12 +169,6 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
     let settings = config::resolve(opts.config.as_deref(), &overrides(opts))?;
     outcome.settings = Some(settings.clone());
 
-    if settings.segment.enabled {
-        return Err(UksftaError::Input(
-            "segmented upload is not available in this build; omit --segmented".to_string(),
-        ));
-    }
-
     hostkey::preflight(&settings)?;
     let launch = settings
         .launch_line
@@ -268,6 +262,24 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
     write_report(&plan, opts.json);
     write_plan(&plan, opts.json);
 
+    let segment = if settings.segment.enabled {
+        segment_target(&plan, &settings)
+    } else {
+        None
+    };
+    if let Some(choice) = &segment {
+        say(
+            opts.json,
+            &format!(
+                "segment: {} {}, {} connections, {} chunks",
+                remote_name(&choice.unit.remote),
+                human_size(choice.unit.size),
+                settings.segment.connections,
+                choice.chunks
+            ),
+        );
+    }
+
     if opts.dry_run {
         say(opts.json, "dry run: no changes made");
     } else if opts.upload {
@@ -279,6 +291,7 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
             opts.jobs,
             show_progress,
             opts.json,
+            segment.as_ref(),
         )?;
         outcome.upload_ms = Some(millis(upload_started.elapsed()));
     }
@@ -568,6 +581,39 @@ enum NextAttempt {
     Retry { wait: Duration },
 }
 
+/// The one file the segmented path sends, and the number of ranges.
+struct SegmentChoice {
+    unit: UploadUnit,
+    chunks: usize,
+}
+
+/// The largest file at or above the minimum, if one can be segmented.
+fn segment_target(plan: &Plan, settings: &Settings) -> Option<SegmentChoice> {
+    let unit = upload_units(plan)
+        .into_iter()
+        .filter(|unit| unit.size >= settings.segment.min_bytes)
+        .max_by(|a, b| a.size.cmp(&b.size).then_with(|| b.remote.cmp(&a.remote)))?;
+    match native::segment::SegmentPlan::new(
+        unit.size,
+        settings.segment.connections,
+        settings.segment.chunk,
+    ) {
+        Ok(plan) => Some(SegmentChoice {
+            unit,
+            chunks: plan.chunks.len(),
+        }),
+        Err(error) => {
+            eprintln!("Warning: segment {}: {error}", remote_name(&unit.remote));
+            None
+        }
+    }
+}
+
+/// The last path segment of a remote path.
+fn remote_name(remote: &str) -> &str {
+    remote.rsplit('/').next().unwrap_or(remote)
+}
+
 /// Send the upload batch, re-verify, and send again only what is still
 /// missing or stale. The wait grows with the attempt number.
 fn upload_with_retries(
@@ -577,17 +623,52 @@ fn upload_with_retries(
     jobs: u8,
     progress: bool,
     json: bool,
+    segment: Option<&SegmentChoice>,
 ) -> Result<Plan, UksftaError> {
+    let mut skip: HashSet<String> = HashSet::new();
+    if let Some(choice) = segment {
+        let name = remote_name(&choice.unit.remote);
+        let started = Instant::now();
+        match native::run(
+            verifier.settings,
+            Path::new("."),
+            &verifier.local.id,
+            &choice.unit,
+            progress,
+        ) {
+            Ok(hash) => {
+                let elapsed = started.elapsed();
+                say(
+                    json,
+                    &format!(
+                        "segment: {name} published in {:.1} s, {:.2} MB/s, sha256 {}",
+                        elapsed.as_secs_f64(),
+                        transfer_rate(choice.unit.size, elapsed),
+                        hash.get(..12).unwrap_or(&hash)
+                    ),
+                );
+                skip.insert(choice.unit.remote.clone());
+            }
+            Err(error) => {
+                eprintln!("Warning: segment {name}: {error}");
+            }
+        }
+    }
+
     let limit = u16::from(retries) + 1;
     let mut attempted = false;
     for attempt in 1..=limit {
-        let batch = upload_batch(&plan)?;
+        let batch = upload_batch(&plan, &skip)?;
         if batch.is_empty() {
             break;
         }
         attempted = true;
-        let files = plan.uploads().count();
-        let bytes = plan.upload_bytes();
+        let units: Vec<UploadUnit> = upload_units(&plan)
+            .into_iter()
+            .filter(|unit| !skip.contains(&unit.remote))
+            .collect();
+        let files = units.len();
+        let bytes: u64 = units.iter().map(|unit| unit.size).sum();
         let started = Instant::now();
         if jobs <= 1 {
             let sent = if progress {
@@ -599,7 +680,7 @@ fn upload_with_retries(
                 eprintln!("Warning: upload attempt {attempt}: {e}");
             }
         } else {
-            send_parallel(verifier, &plan, jobs, attempt)?;
+            send_parallel(verifier, &plan, jobs, attempt, &skip)?;
         }
         plan = verifier.verify()?;
         let elapsed = started.elapsed();
@@ -631,6 +712,7 @@ fn send_parallel(
     plan: &Plan,
     jobs: u8,
     attempt: u16,
+    skip: &HashSet<String>,
 ) -> Result<(), UksftaError> {
     let dirs = upload_dirs(plan)?;
     if !dirs.is_empty() {
@@ -639,7 +721,11 @@ fn send_parallel(
         }
     }
 
-    let workers = plan_workers(upload_units(plan), jobs);
+    let units: Vec<UploadUnit> = upload_units(plan)
+        .into_iter()
+        .filter(|unit| !skip.contains(&unit.remote))
+        .collect();
+    let workers = plan_workers(units, jobs);
     let results: Vec<Result<(), UksftaError>> = std::thread::scope(|scope| {
         let handles: Vec<_> = workers
             .iter()
@@ -1208,5 +1294,72 @@ mod tests {
         fs::create_dir_all(dir.join("addons")).unwrap();
         let err = load_local(&meta, Some(&dir)).unwrap_err();
         assert!(matches!(err, UksftaError::Input(_)));
+    }
+
+    fn segmented(min_bytes: u64, chunk: Option<u32>) -> Settings {
+        let overrides = Overrides {
+            destination: Some("user@host".to_string()),
+            root: Some("/srv".to_string()),
+            ..Overrides::default()
+        };
+        let mut settings = config::resolve(None, &overrides).unwrap();
+        settings.segment = config::Segment {
+            enabled: true,
+            min_bytes,
+            connections: 4,
+            chunk,
+            ..config::Segment::default()
+        };
+        settings
+    }
+
+    fn upload(name: &str, size: u64) -> Action {
+        Action::Upload {
+            name: name.to_string(),
+            local: PathBuf::from(format!("/local/{name}")),
+            remote: format!("/srv/@1/addons/{name}"),
+            size,
+        }
+    }
+
+    fn plan_with(actions: Vec<Action>) -> Plan {
+        Plan {
+            remote_dir: "/srv/@1".to_string(),
+            actions,
+            ..Plan::default()
+        }
+    }
+
+    #[test]
+    fn the_segment_target_is_the_largest_file_above_the_minimum() {
+        let plan = plan_with(vec![
+            upload("small.pbo", 1024 * 1024),
+            upload("big.pbo", 16 * 1024 * 1024),
+            upload("mid.pbo", 8 * 1024 * 1024),
+        ]);
+        let settings = segmented(8 * 1024 * 1024, Some(4 * 1024 * 1024));
+
+        let choice = segment_target(&plan, &settings).expect("a target");
+        assert_eq!(remote_name(&choice.unit.remote), "big.pbo");
+        assert_eq!(choice.chunks, 4);
+    }
+
+    #[test]
+    fn no_file_below_the_minimum_is_segmented() {
+        let plan = plan_with(vec![upload("small.pbo", 1024 * 1024)]);
+        let settings = segmented(8 * 1024 * 1024, None);
+        assert!(segment_target(&plan, &settings).is_none());
+    }
+
+    #[test]
+    fn a_tie_picks_the_first_remote_name() {
+        let plan = plan_with(vec![
+            upload("b.pbo", 8 * 1024 * 1024),
+            upload("a.pbo", 8 * 1024 * 1024),
+        ]);
+        let settings = segmented(1, Some(4 * 1024 * 1024));
+
+        let choice = segment_target(&plan, &settings).expect("a target");
+        assert_eq!(remote_name(&choice.unit.remote), "a.pbo");
     }
 }

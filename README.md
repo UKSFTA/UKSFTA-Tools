@@ -812,6 +812,19 @@ not resume part of a file. In testing, `reput` trusted the remote size
 and produced a corrupt file of the correct length. Only a complete `put`
 gives a file that matches the local copy.
 
+#### Segmented upload
+
+`--segmented` sends one large file over several connections. It picks the
+largest planned upload at or above `--segment-min` (default 64 MiB) and
+splits it into 1 to 16 MiB ranges across `--segment-connections` (default
+4). The file is written to `<name>.uksfta-part`, read back and hashed,
+then published with an atomic rename. A failed run removes the temporary
+file. The other files use the normal upload path.
+
+This mode needs a key file or an agent. It does not prompt for a password.
+Use it on a link that is faster than one connection. Resume is not active
+yet, so an interrupted segmented file starts again.
+
 The client also sends `ServerAliveInterval=15`, `ServerAliveCountMax=3`
 and `ConnectTimeout=15`, so a dead link fails in seconds.
 
