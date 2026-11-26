@@ -161,6 +161,50 @@ fn synthetic_signature(authority: &str) -> Vec<u8> {
     bytes
 }
 
+/// A listing for a tree with a nested directory and the usual pack files.
+fn parity_listing(python_code: bool) -> String {
+    let python_dir = if python_code {
+        "drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 python_code\n".to_string()
+    } else {
+        String::new()
+    };
+    let python_block = if python_code {
+        format!(
+            "sftp> -cd \"{ROOT}/@{ID}/python_code\"
+sftp> pwd
+Remote working directory: {ROOT}/@{ID}/python_code
+sftp> ls -l
+-rw-r--r--    1 1000     1000            4 Nov 20 10:00 old.py
+"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "sftp> cd \"{ROOT}\"
+sftp> -cd \"{ROOT}/@{ID}\"
+sftp> pwd
+Remote working directory: {ROOT}/@{ID}
+sftp> ls -l
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 addons
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 keys
+{python_dir}-rw-r--r--    1 1000     1000          120 Nov 20 10:00 meta.cpp
+-rw-r--r--    1 1000     1000           11 Nov 20 10:00 mod.cpp
+sftp> -cd \"{ROOT}/@{ID}/addons\"
+sftp> pwd
+Remote working directory: {ROOT}/@{ID}/addons
+sftp> ls -l
+-rw-r--r--    1 1000     1000            5 Nov 20 10:00 {PBO}
+-rw-r--r--    1 1000     1000            9 Nov 20 10:00 {SIG}
+sftp> -cd \"{ROOT}/@{ID}/keys\"
+sftp> pwd
+Remote working directory: {ROOT}/@{ID}/keys
+sftp> ls -l
+-rw-r--r--    1 1000     1000            7 Nov 20 10:00 {KEY}
+{python_block}"
+    )
+}
+
 /// A listing for the signing fixtures. Only sizes and names are used.
 fn signing_listing(sig_size: usize, key_name: &str, key_size: usize) -> String {
     format!(
@@ -378,8 +422,8 @@ fn a_matching_pack_plans_no_change() {
     let log = fixture.log();
     assert_eq!(
         log.matches("ARGV ").count(),
-        3,
-        "the listing, the meta phase and the remote key phase"
+        4,
+        "the root listing, the directory listing, the meta phase and the remote key phase"
     );
     let argv: Vec<&str> = log
         .lines()
@@ -443,7 +487,7 @@ fn upload_dry_run_prints_the_plan_and_writes_nothing() {
     );
     assert_eq!(
         log.matches("ARGV ").count(),
-        3,
+        4,
         "a dry run must not start an upload phase"
     );
 }
@@ -825,4 +869,123 @@ fn a_signature_authority_without_a_key_exits_one() {
         .stdout(predicate::str::contains(format!(
             "signature {SIG} needs key other_auth_1, which keys/ does not ship"
         )));
+}
+
+/// A release tree with a root file, a nested file and three exclusions.
+fn parity_fixture(listing: &str) -> Fixture {
+    let fixture = Fixture::new(listing);
+    let release = fixture.dir.path().join(".hemttout/release");
+    fs::write(release.join("LICENSE"), b"licence").expect("write LICENSE");
+    fs::create_dir_all(release.join("python_code")).expect("create python_code");
+    fs::write(release.join("python_code/x.py"), b"py!").expect("write x.py");
+    fs::write(release.join("sign.biprivatekey"), b"priv").expect("write the private key");
+    fs::write(release.join(".DS_Store"), b"ds").expect("write the dotfile");
+    fs::write(release.join("x.tmp"), b"tmp").expect("write the temp file");
+
+    let pack = fixture.remote.join(format!("@{ID}"));
+    fs::create_dir_all(pack.join("python_code")).expect("create the remote nested dir");
+    fs::write(pack.join("python_code/old.py"), b"old!").expect("write the remote extra");
+    fixture
+}
+
+#[test]
+fn the_whole_release_root_is_compared() {
+    let fixture = parity_fixture(&parity_listing(true));
+
+    let assert = fixture
+        .command()
+        .args(["server", "--upload", "--prune", "--dry-run"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("missing LICENSE"))
+        .stdout(predicate::str::contains("missing python_code/x.py"))
+        .stdout(predicate::str::contains("extra python_code/old.py"))
+        .stderr(predicate::str::contains("release file(s) are excluded"));
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8 output");
+    assert!(
+        stdout.contains(&format!("plan: put {ROOT}/@{ID}/LICENSE")),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("plan: put {ROOT}/@{ID}/python_code/x.py")),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("plan: rm"), "no nested file is pruned");
+    for excluded in ["biprivatekey", ".DS_Store", "x.tmp"] {
+        assert!(!stdout.contains(excluded), "{excluded} must be excluded");
+    }
+}
+
+#[test]
+fn a_nested_upload_creates_the_directory_first() {
+    let fixture = parity_fixture(&parity_listing(true));
+
+    fixture
+        .command()
+        .args(["server", "--upload", "--prune", "--retries", "0"])
+        .assert()
+        .code(1);
+
+    let log = fixture.log();
+    let release = std::path::Path::new(".hemttout/release");
+    let mkdir = log
+        .find(&format!("-mkdir \"{ROOT}/@{ID}/python_code\""))
+        .unwrap_or_else(|| panic!("mkdir missing: {log}"));
+    let put = log
+        .find(&format!(
+            "put -p \"{}\"",
+            release.join("python_code/x.py").display()
+        ))
+        .expect("the nested file is sent");
+    assert!(mkdir < put, "the directory comes before its file: {log}");
+    assert!(
+        log.contains(&format!("put -p \"{}\"", release.join("LICENSE").display())),
+        "{log}"
+    );
+    for excluded in ["biprivatekey", ".DS_Store", "x.tmp"] {
+        assert!(!log.contains(excluded), "{excluded} must be excluded");
+    }
+    assert!(
+        !log.lines().any(|line| line.starts_with("rm ")),
+        "a nested extra is never removed: {log}"
+    );
+}
+
+#[test]
+fn an_unlisted_remote_directory_is_empty_not_an_error() {
+    let fixture = parity_fixture(&parity_listing(false));
+
+    fixture
+        .command()
+        .args(["server", "--dry-run"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("missing LICENSE"))
+        .stdout(predicate::str::contains("missing python_code/x.py"));
+}
+
+#[test]
+fn a_symlinked_remote_directory_is_refused() {
+    let listing = format!(
+        "sftp> cd \"{ROOT}\"
+sftp> -cd \"{ROOT}/@{ID}\"
+sftp> pwd
+Remote working directory: {ROOT}/@{ID}
+sftp> ls -l
+lrwxrwxrwx    1 1000     1000            9 Nov 20 10:00 addons -> /elsewhere
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 keys
+-rw-r--r--    1 1000     1000          120 Nov 20 10:00 meta.cpp
+"
+    );
+    let fixture = Fixture::new(&listing);
+
+    fixture
+        .command()
+        .arg("server")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "addons is a symlink; refusing to follow it",
+        ));
 }
