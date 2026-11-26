@@ -12,6 +12,7 @@ mod modlist;
 mod origin;
 mod pbo;
 mod prefix;
+mod server;
 mod steam;
 mod sync;
 mod util;
@@ -26,6 +27,7 @@ pub use crate::lock::*;
 pub use crate::modlist::*;
 pub use crate::origin::*;
 pub use crate::pbo::*;
+pub use crate::server::ServerOptions;
 pub use crate::steam::*;
 pub use crate::sync::*;
 pub use crate::util::*;
@@ -163,6 +165,55 @@ enum Commands {
         #[arg(long)]
         report: bool,
     },
+    /// Verify the private modpack on a game server over SFTP
+    ///
+    /// Compares the local build with <root>/@<publishedid>/. The pack id
+    /// comes from meta.cpp. Authentication is handled by sftp: key, agent
+    /// or terminal prompt.
+    #[command(
+        after_help = "Examples:\n  uksfta server\n  uksfta server --deep\n  uksfta server --upload --dry-run\n  uksfta server --upload --prune"
+    )]
+    Server {
+        /// Config file (default: .uksfta/server.toml when present)
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+        /// user@host destination
+        #[arg(long)]
+        destination: Option<String>,
+        /// SFTP port
+        #[arg(long)]
+        port: Option<u16>,
+        /// Remote workshop content root
+        #[arg(long, value_name = "PATH")]
+        root: Option<String>,
+        /// Identity file for sftp
+        #[arg(long, value_name = "PATH")]
+        identity: Option<PathBuf>,
+        /// meta.cpp that names the pack
+        #[arg(long, value_name = "PATH")]
+        meta: Option<PathBuf>,
+        /// Local build output (default: .hemttout/release, else .hemttout/build)
+        #[arg(long, value_name = "PATH")]
+        local: Option<PathBuf>,
+        /// Download and hash remote PBOs (slow)
+        #[arg(long)]
+        deep: bool,
+        /// Upload missing or stale PBOs and repair meta.cpp
+        #[arg(long)]
+        upload: bool,
+        /// Remove remote PBOs the pack does not contain
+        #[arg(long)]
+        prune: bool,
+        /// Also prune an extra PBO that mods.lock lists
+        #[arg(long)]
+        force_prune: bool,
+        /// Print the plan without changing the server
+        #[arg(long)]
+        dry_run: bool,
+        /// Fail when a PBO has no companion .bisign file
+        #[arg(long)]
+        require_signatures: bool,
+    },
     /// Show the installed version and check for updates
     Version,
     /// Update the description and changelog files named in [hemtt.publish]
@@ -286,6 +337,35 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             online,
             report,
         } => investigate(all, online, report)?,
+        Commands::Server {
+            config,
+            destination,
+            port,
+            root,
+            identity,
+            meta,
+            local,
+            deep,
+            upload,
+            prune,
+            force_prune,
+            dry_run,
+            require_signatures,
+        } => server::run(ServerOptions {
+            config,
+            destination,
+            port,
+            root,
+            identity,
+            meta,
+            local,
+            deep,
+            upload,
+            prune,
+            force_prune,
+            dry_run,
+            require_signatures,
+        })?,
         Commands::Version => version(),
         Commands::Docs {
             root,

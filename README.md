@@ -55,6 +55,12 @@ uksfta investigate --report --online
 # Print the stored resolution lines with no network
 uksfta investigate --report
 
+# Verify the game server's workshop tree over SFTP
+uksfta server
+
+# Upload missing PBOs and signatures, then remove extra PBOs
+uksfta server --upload --prune
+
 # Show the installed version and force a fresh update check
 uksfta version
 
@@ -542,6 +548,135 @@ stored status, and exits 1 only when a confirmed row names the wrong id.
 
 The `identify` command uses the same byte-hash matching, so its origin
 reports are now deterministic too.
+
+## Server verification over SFTP
+
+`uksfta server` compares the private modpack in the local build output with
+the pack folder on a game server. The pack id comes from `meta.cpp`. The
+command reads and writes only `<root>/@<publishedid>/`. It does not read
+`mod_sources.txt`, `mods.lock` or the Workshop cache.
+
+Put the connection settings in `.uksfta/server.toml`. The directory is
+gitignored, so the file stays local:
+
+```toml
+destination = "user@host"
+port = 2022
+root = "/"
+identity = "/home/user/.ssh/id_ed25519"
+```
+
+`destination` and `root` are required. The port defaults to 22. A flag
+overrides the file.
+
+Run the command from the pack repo root. It reads `meta.cpp` for the pack
+id and name, and compares `.hemttout/release` with the server. Use
+`--meta PATH` and `--local PATH` to change either. When
+`.hemttout/release` is absent, the command uses `.hemttout/build`.
+
+```bash
+# Verify the pack against the server
+uksfta server
+
+# Compare SHA-256 as well as size
+uksfta server --deep
+
+# Print the plan and change nothing
+uksfta server --upload --prune --dry-run
+
+# Prune an extra PBO that mods.lock lists
+uksfta server --prune --force-prune
+```
+
+The build output must contain `addons/*.pbo`. The command expects this
+layout on the server:
+
+```text
+<root>/@<publishedid>/addons/*.pbo
+<root>/@<publishedid>/addons/*.bisign
+<root>/@<publishedid>/keys/*.bikey
+<root>/@<publishedid>/meta.cpp
+<root>/@<publishedid>/mod.cpp
+```
+
+The command checks:
+
+1. The remote `meta.cpp` `publishedid` equals the local id.
+2. Every local PBO has a case-insensitive match in `addons/`, with the
+   same size.
+3. Every local `.bisign` pairs with its PBO. Unsigned PBOs are counted,
+   not listed.
+4. Every local `keys/*.bikey` exists with the same size.
+5. `mod.cpp` exists with the same size.
+
+A name that differs only by case is the same file. One warning gives the
+number of such names, and uploads reuse the server name, so no case
+duplicate is created. A local PBO with no remote match is `missing`. A
+remote PBO with no local match is `extra`.
+
+`--deep` downloads each remote PBO into a temporary directory and compares
+its SHA-256 with the local file. It is slow, because it transfers every PBO
+in the pack. Use it when a size match is not enough.
+
+`--upload` puts missing or stale PBOs and their signatures into `addons/`,
+`keys/*.bikey` into `keys/`, and `meta.cpp` and `mod.cpp` into the pack
+folder. It creates only `addons/` and `keys/` when they are absent. After
+the upload the command lists the server again and re-runs the check.
+
+`--prune` removes remote PBOs that have no local match. It acts inside
+`addons/` only, removes `.pbo` files only, and never removes `meta.cpp`,
+`mod.cpp`, a key, a signature or a directory. A remote-only PBO that
+`mods.lock` lists is kept, because the lock says the pack should contain
+it. The command warns about it instead. Add `--force-prune` to remove it
+anyway. Without `--prune` the command reports extras and changes nothing.
+
+The command also reads `mods.lock` and `mod_sources.txt` from the repo root
+when they exist. It uses them only for warnings:
+
+- a PBO in `mods.lock` that is not in the local release warns
+- an enabled mod in `mod_sources.txt` with no `mods.lock` entry warns
+
+A missing file skips its check. Neither warning changes the exit code, and
+neither file decides which server folder is checked.
+
+One line reports unsigned PBOs, for example `unsigned: 3 of 114 PBO(s)
+have no signature (advisory)`. The line is advisory by default.
+`--require-signatures` fails the command when the count is above zero, and
+the error names the count.
+
+`--dry-run` prints the plan and stops before any upload or removal. Each
+plan line is the command that would run:
+
+```text
+plan: put /@3662499431/addons/brf_sumava.pbo from .hemttout/release/addons/brf_sumava.pbo
+plan: rm /@3662499431/addons/projeta3019.pbo
+```
+
+The command stores no credential and prints none. Authentication is
+whatever `sftp` supports: a key, an agent, or a prompt in the terminal. Use
+`identity` or `--identity` to select a key. The commands travel on standard
+input, so the prompt path stays available. The `-b` batch-file mode is not
+used, because it suppresses the prompt. No password is read or stored.
+
+One `sftp` process runs per phase. The phases are the listing, the
+`meta.cpp` and `mod.cpp` fetch, the deep download, the upload and the
+prune. A password prompt therefore appears at most once per phase. Each run
+uses `-R 64` and `-B 262144` for throughput.
+
+The output starts with the pack id and name, then the local and remote
+counts, the status and one line per stale, missing or extra PBO. A single
+line gives the unsigned count, and a single warning gives the count of
+case-only name differences. The summary counts local PBOs, local-only PBOs
+and remote-only PBOs.
+
+The exit code is 0 when the pack matches or only warnings were found. It is
+1 for a missing or stale PBO, a key or `mod.cpp` problem, a `meta.cpp` id
+mismatch, a missing pack folder, or any unsigned PBO under
+`--require-signatures`. It is 2 for a connection, usage or parse failure.
+
+The command never uploads a file outside `<root>/@<publishedid>/`. It never
+follows a symlink on the server, and it never recurses below `addons/` or
+`keys/`.
 
 ## Update checking
 
