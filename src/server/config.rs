@@ -76,6 +76,8 @@ pub struct ServerConfig {
     pub identity: Option<PathBuf>,
     pub known_hosts: Option<PathBuf>,
     pub host_key_policy: Option<String>,
+    pub launch_line_file: Option<PathBuf>,
+    pub server_cfg: Option<String>,
 }
 
 /// Connection fields a flag can override.
@@ -89,6 +91,8 @@ pub struct Overrides {
     pub requests: Option<u16>,
     pub known_hosts: Option<PathBuf>,
     pub host_key_policy: Option<String>,
+    pub launch_line: Option<PathBuf>,
+    pub server_cfg: Option<String>,
 }
 
 /// Resolved connection settings with every field present.
@@ -101,6 +105,8 @@ pub struct Settings {
     pub transfer: Transfer,
     pub known_hosts: PathBuf,
     pub host_key_policy: HostKeyPolicy,
+    pub launch_line: Option<PathBuf>,
+    pub server_cfg: Option<String>,
 }
 
 /// Read the config file. A missing file is `None`, so the defaults apply.
@@ -174,6 +180,8 @@ pub fn resolve(config_path: Option<&Path>, overrides: &Overrides) -> Result<Sett
         transfer,
         known_hosts,
         host_key_policy,
+        launch_line: overrides.launch_line.clone().or(config.launch_line_file),
+        server_cfg: overrides.server_cfg.clone().or(config.server_cfg),
     })
 }
 

@@ -46,6 +46,19 @@ fn help_exits_zero_and_lists_the_commands() {
 }
 
 #[test]
+fn server_help_lists_the_opt_in_config_checks() {
+    let dir = TempDir::new().expect("temp dir");
+
+    uksfta(dir.path())
+        .args(["server", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--launch-line"))
+        .stdout(predicate::str::contains("--server-cfg"))
+        .stdout(predicate::str::contains("--strict-config"));
+}
+
+#[test]
 fn verify_without_a_lock_exits_two_and_names_the_lock_file() {
     let dir = TempDir::new().expect("temp dir");
 

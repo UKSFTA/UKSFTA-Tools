@@ -238,6 +238,15 @@ enum Commands {
         /// Hide the sftp transfer meter
         #[arg(long, group = "progress_mode")]
         no_progress: bool,
+        /// Local copy of the launch line to check
+        #[arg(long, value_name = "FILE")]
+        launch_line: Option<PathBuf>,
+        /// server.cfg path on the server to check
+        #[arg(long, value_name = "PATH")]
+        server_cfg: Option<String>,
+        /// Fail when an opt-in config check fails
+        #[arg(long)]
+        strict_config: bool,
     },
     /// Check that every required addon is provided or listed
     ///
@@ -409,6 +418,9 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             host_key_policy,
             progress,
             no_progress,
+            launch_line,
+            server_cfg,
+            strict_config,
         } => {
             let mode = if progress {
                 server::Progress::Always
@@ -438,6 +450,9 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
                 known_hosts,
                 host_key_policy,
                 progress: mode,
+                launch_line,
+                server_cfg,
+                strict_config,
             })?
         }
         Commands::Deps {

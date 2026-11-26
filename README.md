@@ -595,6 +595,40 @@ The command also passes `UpdateHostKeys=no`, so a known key is not
 replaced without a decision. A host key failure names the destination,
 the key file and the remedy.
 
+### Launch line and server.cfg checks
+
+Both checks are opt-in. They print one line per check on standard error
+as a warning, and they do not change the exit code. `--strict-config`
+makes a failing check part of the `Check` error, so the command exits 1.
+
+The panel exposes no startup file over SFTP. Put a local copy of the
+launch line in a file and pass `--launch-line FILE`, or set
+`launch_line_file` in `server.toml`. The command does not read the line
+from the server. It takes the last path component of each `-mod` and
+`-serverMod` entry and compares it with `@<id>` byte for byte. A quoted
+token is one token, and an unescaped `;` splits the value. A `-par` token
+hides the list, so the check reports that it cannot verify the line.
+
+- `launch: @<id> is loaded`
+- `launch: @<id> is not in -mod` when only `-serverMod` names it
+- `launch: @<id> is not loaded`
+- `launch: folder case differs: @<found>`
+- `launch: -par hides the mod list`
+- `launch: loaded twice`
+
+`--server-cfg PATH`, or `server_cfg` in `server.toml`, reads that file
+once over SFTP. An absolute path is used as written. A relative path is
+joined to `--root`. A `..` component is allowed, because the file can sit
+above the workshop root. The command reads no other server file and keeps
+no copy.
+
+The check requires `verifySignatures = 2`. It requires
+`allowedFilePatching = 0` when the key is present. An absent key is the
+engine default 0 and passes. A non-empty `filePatchingExceptions[]`
+warns. `equalModRequired` is shown for information and never fails. A
+missing `verifySignatures` fails, because the engine default is 0. A
+comment and a quoted string cannot hide a setting.
+
 Run the command from the pack repo root. It reads `meta.cpp` for the pack
 id and name, and compares `.hemttout/release` with the server. Use
 `--meta PATH` and `--local PATH` to change either. When
@@ -615,6 +649,12 @@ uksfta server --upload --retries 3
 
 # Upload two files at a time
 uksfta server --upload --jobs 2
+
+# Check the launch line and the server config
+uksfta server --launch-line launch.txt --server-cfg /server.cfg
+
+# Make a failing opt-in check exit 1
+uksfta server --server-cfg /server.cfg --strict-config
 
 # Raise the transfer window for a fast link
 uksfta server --upload --buffer 261120 --requests 128
