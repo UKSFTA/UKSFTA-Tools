@@ -645,7 +645,7 @@ The transfer has two settings, and both pass to every `sftp` run,
 including the verify phases and each parallel worker.
 
 | Flag | Range | Default | Effect |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `--buffer BYTES` | 4096 to 261120 | 32768 | The size of one write. |
 | `--requests N` | 1 to 256 | 64 | The requests in flight. |
 
