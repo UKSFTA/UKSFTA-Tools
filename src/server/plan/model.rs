@@ -1,6 +1,6 @@
 //! Plan types. No filesystem access.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// One file in the remote pack folder.
@@ -259,6 +259,10 @@ pub struct PlanInput<'a> {
     pub meta_upload: Option<&'a std::path::Path>,
     /// Lowercase PBO name to true when the deep hashes match.
     pub deep: &'a HashMap<String, bool>,
+    /// Lowercase basenames of every PBO in `mods.lock`.
+    pub locked: &'a HashSet<String>,
+    /// Prune a locked remote-only PBO as well.
+    pub force_prune: bool,
     pub require_signatures: bool,
 }
 

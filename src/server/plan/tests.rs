@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::compare::{is_signature_of, signature_owner};
@@ -32,6 +32,8 @@ struct Fixture {
     local: LocalPack,
     remote: RemotePack,
     deep: HashMap<String, bool>,
+    locked: HashSet<String>,
+    force_prune: bool,
 }
 
 impl Fixture {
@@ -60,6 +62,8 @@ impl Fixture {
             local,
             remote,
             deep: HashMap::new(),
+            locked: HashSet::new(),
+            force_prune: false,
         }
     }
 
@@ -74,6 +78,8 @@ impl Fixture {
             remote: &self.remote,
             meta_upload: Some(Path::new("/local/meta.cpp")),
             deep: &self.deep,
+            locked: &self.locked,
+            force_prune: self.force_prune,
             require_signatures,
         })
     }
@@ -222,6 +228,35 @@ fn an_extra_remote_pbo_is_reported_and_removed() {
     assert_eq!(plan.status(), Status::Extra);
     assert!(!plan.failed(), "an extra PBO is reported only");
     assert_eq!(plan.remote_only(), 1);
+    assert_eq!(remote_targets(&plan), vec![format!("{DIR}/addons/Old.pbo")]);
+}
+
+#[test]
+fn a_locked_extra_is_not_pruned() {
+    let mut fixture = Fixture::new();
+    fixture.remote.addons.push(remote_file("Old.pbo", 7));
+    fixture.locked.insert("old.pbo".to_string());
+
+    let plan = fixture.plan();
+    assert!(matches!(plan.findings[0], Finding::Extra { .. }));
+    assert!(plan.actions.is_empty(), "the rm action is omitted");
+    assert!(
+        plan.warnings
+            .iter()
+            .any(|w| w.contains("listed in mods.lock; not pruned")),
+        "{:?}",
+        plan.warnings
+    );
+}
+
+#[test]
+fn force_prune_removes_a_locked_extra() {
+    let mut fixture = Fixture::new();
+    fixture.remote.addons.push(remote_file("Old.pbo", 7));
+    fixture.locked.insert("old.pbo".to_string());
+    fixture.force_prune = true;
+
+    let plan = fixture.plan();
     assert_eq!(remote_targets(&plan), vec![format!("{DIR}/addons/Old.pbo")]);
 }
 

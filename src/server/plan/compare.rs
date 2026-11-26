@@ -171,6 +171,10 @@ pub fn build_plan(input: &PlanInput<'_>) -> Plan {
         findings.push(Finding::Extra {
             name: file.name.clone(),
         });
+        if input.locked.contains(&lower(&file.name)) && !input.force_prune {
+            warnings.push(format!("{}: listed in mods.lock; not pruned", file.name));
+            continue;
+        }
         queue.remove(join_remote(&addons_dir, &file.name));
     }
 

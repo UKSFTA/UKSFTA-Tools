@@ -1,7 +1,7 @@
 //! The verification phases for the pack: one batch each for the listing,
 //! the `meta.cpp`/`mod.cpp` fetch and the deep download.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -21,7 +21,9 @@ pub struct Verifier<'a> {
     pub scratch: &'a ScratchDir,
     pub local: &'a LocalPack,
     pub meta_upload: PathBuf,
+    pub locked: &'a HashSet<String>,
     pub deep: bool,
+    pub force_prune: bool,
     pub require_signatures: bool,
 }
 
@@ -42,6 +44,8 @@ impl Verifier<'_> {
             remote: &remote,
             meta_upload: Some(&self.meta_upload),
             deep: &deep,
+            locked: self.locked,
+            force_prune: self.force_prune,
             require_signatures: self.require_signatures,
         }))
     }

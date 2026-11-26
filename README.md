@@ -583,6 +583,9 @@ uksfta server --deep
 
 # Print the plan and change nothing
 uksfta server --upload --prune --dry-run
+
+# Prune an extra PBO that mods.lock lists
+uksfta server --prune --force-prune
 ```
 
 The build output must contain `addons/*.pbo`. The command expects this
@@ -622,8 +625,19 @@ the upload the command lists the server again and re-runs the check.
 
 `--prune` removes remote PBOs that have no local match. It acts inside
 `addons/` only, removes `.pbo` files only, and never removes `meta.cpp`,
-`mod.cpp`, a key, a signature or a directory. Without `--prune` the command
-reports extras and changes nothing.
+`mod.cpp`, a key, a signature or a directory. A remote-only PBO that
+`mods.lock` lists is kept, because the lock says the pack should contain
+it. The command warns about it instead. Add `--force-prune` to remove it
+anyway. Without `--prune` the command reports extras and changes nothing.
+
+The command also reads `mods.lock` and `mod_sources.txt` from the repo root
+when they exist. It uses them only for warnings:
+
+- a PBO in `mods.lock` that is not in the local release warns
+- an enabled mod in `mod_sources.txt` with no `mods.lock` entry warns
+
+A missing file skips its check. Neither warning changes the exit code, and
+neither file decides which server folder is checked.
 
 One line reports unsigned PBOs, for example `unsigned: 3 of 114 PBO(s)
 have no signature (advisory)`. The line is advisory by default.

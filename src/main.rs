@@ -204,6 +204,9 @@ enum Commands {
         /// Remove remote PBOs the pack does not contain
         #[arg(long)]
         prune: bool,
+        /// Also prune an extra PBO that mods.lock lists
+        #[arg(long)]
+        force_prune: bool,
         /// Print the plan without changing the server
         #[arg(long)]
         dry_run: bool,
@@ -345,6 +348,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             deep,
             upload,
             prune,
+            force_prune,
             dry_run,
             require_signatures,
         } => server::run(ServerOptions {
@@ -358,6 +362,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             deep,
             upload,
             prune,
+            force_prune,
             dry_run,
             require_signatures,
         })?,

@@ -110,6 +110,31 @@ sftp> ls -l
 -rw-r--r--    1 1000     1000            7 Nov 20 10:00 uksfta_1.0.1.bikey
 ";
 
+/// A remote-only PBO that `mods.lock` also lists.
+const LISTING_EXTRA: &str = "\
+sftp> cd \"/srv/arma\"
+sftp> -cd \"/srv/arma/@3662499431\"
+sftp> pwd
+Remote working directory: /srv/arma/@3662499431
+sftp> ls -l
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 addons
+drwxr-xr-x    2 1000     1000         4096 Nov 20 10:00 keys
+-rw-r--r--    1 1000     1000          120 Nov 20 10:00 meta.cpp
+-rw-r--r--    1 1000     1000           11 Nov 20 10:00 mod.cpp
+sftp> -cd \"/srv/arma/@3662499431/addons\"
+sftp> pwd
+Remote working directory: /srv/arma/@3662499431/addons
+sftp> ls -l
+-rw-r--r--    1 1000     1000            5 Nov 20 10:00 uksfta_main.pbo
+-rw-r--r--    1 1000     1000            9 Nov 20 10:00 uksfta_main.pbo.uksfta_1.0.1.bisign
+-rw-r--r--    1 1000     1000            3 Nov 20 10:00 old.pbo
+sftp> -cd \"/srv/arma/@3662499431/keys\"
+sftp> pwd
+Remote working directory: /srv/arma/@3662499431/keys
+sftp> ls -l
+-rw-r--r--    1 1000     1000            7 Nov 20 10:00 uksfta_1.0.1.bikey
+";
+
 const STUB: &str = r#"#!/bin/sh
 set -eu
 log="$UKSFTA_TEST_LOG"
@@ -223,6 +248,23 @@ impl Fixture {
 
     fn log(&self) -> String {
         fs::read_to_string(&self.log).expect("read the stub log")
+    }
+
+    fn write_lock(&self, id: &str, files: &[&str]) {
+        let list: Vec<String> = files.iter().map(|file| format!("\"{file}\"")).collect();
+        let json = format!(
+            "{{\"version\":1,\"mods\":{{\"{id}\":{{\"name\":\"Lock\",\"files\":[{}]}}}}}}",
+            list.join(",")
+        );
+        fs::write(self.dir.path().join("mods.lock"), json).expect("write mods.lock");
+    }
+
+    fn write_sources(&self, ids: &[&str]) {
+        let mut text = String::from("version = 2\n");
+        for id in ids {
+            text.push_str(&format!("\n[[mods]]\nid = \"{id}\"\nname = \"Mod {id}\"\n"));
+        }
+        fs::write(self.dir.path().join("mod_sources.txt"), text).expect("write mod_sources.txt");
     }
 
     fn remove_local_signature(&self) {
@@ -353,4 +395,66 @@ fn a_local_dropin_without_a_meta_cpp_cannot_run() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains("no meta.cpp"));
+}
+
+#[test]
+fn a_locked_extra_is_not_pruned_without_force() {
+    let fixture = Fixture::new(LISTING_EXTRA);
+    fixture.write_lock("1", &["addons/old.pbo"]);
+
+    let assert = fixture
+        .command()
+        .args(["server", "--prune", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("extra old.pbo"))
+        .stderr(predicate::str::contains(
+            "old.pbo: listed in mods.lock; not pruned",
+        ));
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8 output");
+    assert!(
+        !stdout.contains("plan: rm"),
+        "a locked extra is not pruned: {stdout}"
+    );
+
+    fixture
+        .command()
+        .args(["server", "--prune", "--force-prune", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "plan: rm /srv/arma/@3662499431/addons/old.pbo",
+        ));
+}
+
+#[test]
+fn cross_checks_report_a_locked_pbo_and_an_unlocked_source() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    fixture.write_lock("1111111111", &["addons/absent.pbo"]);
+    fixture.write_sources(&["1111111111", "2222222222"]);
+
+    fixture
+        .command()
+        .arg("server")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "absent.pbo: locked PBO is not in the local release",
+        ))
+        .stderr(predicate::str::contains(
+            "2222222222: enabled source mod has no mods.lock entry",
+        ));
+}
+
+#[test]
+fn missing_lock_and_sources_stay_silent() {
+    let fixture = Fixture::new(LISTING_MATCH);
+
+    fixture
+        .command()
+        .arg("server")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("mods.lock").not())
+        .stderr(predicate::str::contains("source mod").not());
 }

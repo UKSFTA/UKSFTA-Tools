@@ -10,10 +10,13 @@ mod report;
 mod sftp;
 mod verify;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::UksftaError;
+use crate::lock::{load_lock, LockFile};
+use crate::modlist::{parse_mod_sources, ModEntry};
 
 use self::config::Overrides;
 use self::plan::{is_bikey, is_bisign, is_pbo, Action, LocalFile, LocalPack};
@@ -34,6 +37,7 @@ pub struct ServerOptions {
     pub deep: bool,
     pub upload: bool,
     pub prune: bool,
+    pub force_prune: bool,
     pub dry_run: bool,
     pub require_signatures: bool,
 }
@@ -64,13 +68,17 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
         .as_ref()
         .map_or_else(|| local.meta_source.clone(), |file| file.path.clone());
     let scratch = ScratchDir::new("uksfta-server-")?;
+    let locked = locked_pbos()?;
+    let cross_checks = cross_checks(&local)?;
     let verifier = Verifier {
         client: Sftp::new(&settings),
         settings: &settings,
         scratch: &scratch,
         local: &local,
         meta_upload,
+        locked: &locked,
         deep: opts.deep,
+        force_prune: opts.force_prune,
         require_signatures: opts.require_signatures,
     };
 
@@ -79,6 +87,9 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
         "server: {}:{} root {}",
         settings.destination, settings.port, settings.root
     );
+    for warning in &cross_checks {
+        eprintln!("Warning: {warning}");
+    }
 
     let mut plan = verifier.verify()?;
     print_report(&plan);
@@ -133,6 +144,98 @@ fn remove_path(action: &Action) -> String {
     match action {
         Action::Remove { remote } | Action::Upload { remote, .. } => remote.clone(),
     }
+}
+
+/// `mods.lock` from the repo root, when present. A missing file is not an
+/// error: the cross-checks are skipped.
+fn load_lock_file() -> Result<Option<LockFile>, UksftaError> {
+    let path = Path::new("mods.lock");
+    if path.exists() {
+        Ok(Some(load_lock(path)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn load_sources() -> Result<Option<Vec<ModEntry>>, UksftaError> {
+    let path = Path::new("mod_sources.txt");
+    if path.exists() {
+        Ok(Some(parse_mod_sources(path)?.0))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Lowercase basenames of every PBO in `mods.lock`.
+fn locked_pbos() -> Result<HashSet<String>, UksftaError> {
+    let Some(lock) = load_lock_file()? else {
+        return Ok(HashSet::new());
+    };
+    Ok(lock
+        .mods
+        .values()
+        .flat_map(|entry| entry.files.iter())
+        .filter_map(|path| Path::new(path).file_name().and_then(|name| name.to_str()))
+        .filter(|name| is_pbo(name))
+        .map(|name| name.to_ascii_lowercase())
+        .collect())
+}
+
+/// Read-only cross-checks against the dependency tooling. Missing files are
+/// skipped, and every message is a warning.
+fn cross_checks(local: &LocalPack) -> Result<Vec<String>, UksftaError> {
+    let lock = load_lock_file()?;
+    let sources = load_sources()?;
+    Ok(cross_check_messages(
+        lock.as_ref(),
+        sources.as_deref(),
+        local,
+    ))
+}
+
+fn cross_check_messages(
+    lock: Option<&LockFile>,
+    sources: Option<&[ModEntry]>,
+    local: &LocalPack,
+) -> Vec<String> {
+    let Some(lock) = lock else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+
+    let release: HashSet<String> = local
+        .pbos
+        .iter()
+        .map(|pbo| pbo.name.to_ascii_lowercase())
+        .collect();
+    let mut locked: Vec<(String, String)> = lock
+        .mods
+        .values()
+        .flat_map(|entry| entry.files.iter())
+        .filter_map(|path| {
+            let name = Path::new(path).file_name()?.to_str()?;
+            is_pbo(name).then(|| (name.to_ascii_lowercase(), name.to_string()))
+        })
+        .collect();
+    locked.sort();
+    locked.dedup();
+    for (key, name) in locked {
+        if !release.contains(&key) {
+            warnings.push(format!("{name}: locked PBO is not in the local release"));
+        }
+    }
+
+    if let Some(sources) = sources {
+        for entry in sources {
+            if !lock.mods.contains_key(&entry.id) {
+                warnings.push(format!(
+                    "{}: enabled source mod has no mods.lock entry",
+                    entry.id
+                ));
+            }
+        }
+    }
+    warnings
 }
 
 /// Read the pack identity and the local build output.
@@ -248,6 +351,8 @@ fn local_file(path: &Path) -> Option<LocalFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lock::ModLockEntry;
+    use std::collections::HashMap;
 
     const META: &str =
         "protocol = 1;\npublishedid = 3662499431;\nname = \"UKSF Taskforce Alpha Maps\";\n";
@@ -278,6 +383,82 @@ mod tests {
         assert_eq!(local.keys.len(), 1);
         assert!(local.meta.is_some());
         assert!(local.mod_cpp.is_some());
+    }
+
+    fn lock_with(files: &[&str]) -> LockFile {
+        let mut mods = HashMap::new();
+        mods.insert(
+            "450814997".to_string(),
+            ModLockEntry {
+                files: files.iter().map(|file| file.to_string()).collect(),
+                name: "CBA_A3".to_string(),
+                tags: Vec::new(),
+                dependencies: Vec::new(),
+                updated: "0".to_string(),
+            },
+        );
+        LockFile { version: 1, mods }
+    }
+
+    fn source(id: &str) -> ModEntry {
+        ModEntry {
+            id: id.to_string(),
+            name: "Mod".to_string(),
+            tags: Vec::new(),
+            role: "mod".to_string(),
+            enabled: true,
+            dependencies: Vec::new(),
+        }
+    }
+
+    fn local_fixture() -> (tempfile::TempDir, LocalPack) {
+        let root = tempfile::TempDir::new().unwrap();
+        let dir = pack_dir(root.path());
+        let meta = root.path().join(".hemttout/release/meta.cpp");
+        let local = load_local(&meta, Some(&dir)).unwrap();
+        (root, local)
+    }
+
+    #[test]
+    fn a_locked_pbo_missing_from_the_release_warns() {
+        let (_root, local) = local_fixture();
+        let lock = lock_with(&["addons/uksfta_main.pbo", "addons/absent.pbo"]);
+
+        let warnings = cross_check_messages(Some(&lock), None, &local);
+        assert_eq!(
+            warnings,
+            vec!["absent.pbo: locked PBO is not in the local release".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_enabled_source_without_a_lock_entry_warns() {
+        let (_root, local) = local_fixture();
+        let lock = lock_with(&["addons/uksfta_main.pbo"]);
+        let sources = vec![source("450814997"), source("1111111111")];
+
+        let warnings = cross_check_messages(Some(&lock), Some(&sources), &local);
+        assert_eq!(
+            warnings,
+            vec!["1111111111: enabled source mod has no mods.lock entry".to_string()]
+        );
+    }
+
+    #[test]
+    fn cross_checks_are_silent_without_the_lock() {
+        let (_root, local) = local_fixture();
+        let sources = vec![source("1111111111")];
+
+        assert!(cross_check_messages(None, Some(&sources), &local).is_empty());
+        assert!(cross_check_messages(None, None, &local).is_empty());
+    }
+
+    #[test]
+    fn cross_checks_are_silent_when_the_lock_matches() {
+        let (_root, local) = local_fixture();
+        let lock = lock_with(&["addons/uksfta_main.pbo"]);
+
+        assert!(cross_check_messages(Some(&lock), None, &local).is_empty());
     }
 
     #[test]
