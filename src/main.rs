@@ -205,9 +205,11 @@ fn main() {
 
     let cli = Cli::parse();
 
-    // Daily update notice on every command (skips network if checked
-    // within 24h). The explicit `version` command forces a fresh check.
-    if !matches!(cli.command, Commands::Version) {
+    // Daily update notice on every command (skips the network while the
+    // cached outcome is fresh). The explicit `version` command forces a
+    // fresh check. UKSFTA_NO_UPDATE_CHECK disables the automatic check.
+    let update_check_disabled = std::env::var_os("UKSFTA_NO_UPDATE_CHECK").is_some();
+    if !update_check_disabled && !matches!(cli.command, Commands::Version) {
         check_for_updates(false);
     }
 

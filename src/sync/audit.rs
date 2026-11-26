@@ -89,10 +89,18 @@ pub fn audit(missing_only: bool) -> Result<(), UksftaError> {
 
     // Build a set of every PBO filename currently in addons/ (recursive)
     let mut present_pbos: HashMap<String, ()> = HashMap::new();
+    let mut name_counts: HashMap<String, usize> = HashMap::new();
     for pbo in find_pbos(addons_dir) {
         if let Some(name) = pbo.file_name().map(|n| n.to_string_lossy().to_string()) {
+            *name_counts.entry(name.clone()).or_insert(0) += 1;
             present_pbos.insert(name, ());
         }
+    }
+    let duplicate_names = name_counts.values().filter(|count| **count > 1).count();
+    if duplicate_names > 0 {
+        eprintln!(
+            "Warning: {duplicate_names} PBO name(s) occur more than once in addons/; audit matches by file name"
+        );
     }
 
     // Collect every expected PBO name across all targets, for orphan detection

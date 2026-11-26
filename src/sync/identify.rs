@@ -1,10 +1,10 @@
-use std::fs;
 use std::path::Path;
 
 use crate::error::UksftaError;
 use crate::origin::{build_mod_dirs, build_pbo_index, resolve_pbo_from_index, self_workshop_id};
 use crate::pbo::pbo_prefix;
 use crate::steam::find_all_workshop_caches;
+use crate::util::find_pbos;
 
 /// Show which PBOs in addons/ came from which Workshop mod.
 pub fn identify() -> Result<(), UksftaError> {
@@ -27,27 +27,19 @@ pub fn identify() -> Result<(), UksftaError> {
 
     println!("PBO Origins:");
     let index = build_pbo_index(&mod_dirs);
-    if let Ok(entries) = fs::read_dir(addons_dir) {
-        for entry in entries.flatten() {
-            if entry
-                .path()
-                .extension()
-                .map(|e| e == "pbo")
-                .unwrap_or(false)
-            {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let target_prefix = pbo_prefix(&entry.path());
-                let candidates = index
-                    .get(name.as_str())
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-                let origin =
-                    resolve_pbo_from_index(&entry.path(), candidates, target_prefix.as_deref())
-                        .map(|r| r.id)
-                        .unwrap_or_else(|| "Unknown".to_string());
-                println!("  {} -> Workshop {}", name, origin);
-            }
-        }
+    for pbo in find_pbos(addons_dir) {
+        let Some(name) = pbo.file_name().map(|n| n.to_string_lossy().to_string()) else {
+            continue;
+        };
+        let target_prefix = pbo_prefix(&pbo);
+        let candidates = index
+            .get(name.as_str())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let origin = resolve_pbo_from_index(&pbo, candidates, target_prefix.as_deref())
+            .map(|r| r.id)
+            .unwrap_or_else(|| "Unknown".to_string());
+        println!("  {} -> Workshop {}", name, origin);
     }
     Ok(())
 }
