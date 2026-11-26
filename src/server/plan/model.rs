@@ -98,6 +98,9 @@ pub enum Action {
         name: String,
         local: PathBuf,
         remote: String,
+        /// The local file size. A generated `meta.cpp` action has no size
+        /// and carries zero.
+        size: u64,
     },
     Remove {
         remote: String,
@@ -178,7 +181,7 @@ impl Finding {
 }
 
 /// The whole comparison.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Plan {
     pub id: String,
     pub local_dir: PathBuf,
@@ -240,6 +243,17 @@ impl Plan {
         self.actions
             .iter()
             .filter(|a| matches!(a, Action::Upload { .. }))
+    }
+
+    /// The bytes the recorded upload actions send. A generated `meta.cpp`
+    /// action carries no size and counts as zero.
+    pub fn upload_bytes(&self) -> u64 {
+        self.uploads()
+            .filter_map(|action| match action {
+                Action::Upload { size, .. } => Some(*size),
+                Action::Remove { .. } => None,
+            })
+            .sum()
     }
 
     pub fn removals(&self) -> impl Iterator<Item = &Action> {

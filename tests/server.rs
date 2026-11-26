@@ -147,6 +147,14 @@ if grep -q 'ls -l' "$commands"; then
   cat "$UKSFTA_TEST_LISTING"
   exit 0
 fi
+if grep -q '^put ' "$commands"; then
+  marker="${UKSFTA_TEST_PUT_MARKER:-}"
+  if [ -n "$marker" ] && [ ! -f "$marker" ]; then
+    : > "$marker"
+    echo 'fake sftp: connection closed during write' >&2
+    exit 1
+  fi
+fi
 if grep -q 'get ' "$commands"; then
   grep 'get ' "$commands" | while read -r command remote local; do
     remote=$(printf '%s' "$remote" | tr -d '"')
@@ -457,4 +465,33 @@ fn missing_lock_and_sources_stay_silent() {
         .success()
         .stderr(predicate::str::contains("mods.lock").not())
         .stderr(predicate::str::contains("source mod").not());
+}
+
+#[test]
+fn a_failed_upload_is_retried_and_reported() {
+    let fixture = Fixture::new(LISTING_MISSING);
+    let marker = fixture.dir.path().join("first-put.marker");
+
+    fixture
+        .command()
+        .env("UKSFTA_TEST_PUT_MARKER", &marker)
+        .args(["server", "--upload", "--retries", "1"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("attempt 1: 2 file(s)"))
+        .stdout(predicate::str::contains("attempt 2: 2 file(s)"))
+        .stdout(predicate::str::contains("MB/s"))
+        .stderr(predicate::str::contains("Warning: upload attempt 1"));
+
+    let log = fixture.log();
+    assert!(marker.exists(), "the stub must fail the first attempt");
+    assert_eq!(
+        log.matches("put -p ").count(),
+        4,
+        "two files per attempt, one restart each, with no resume: {log}"
+    );
+    assert!(
+        !log.contains("reput"),
+        "an interrupted upload restarts the file: {log}"
+    );
 }

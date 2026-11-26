@@ -19,6 +19,17 @@ use crate::util::sanitize_for_terminal;
 const BINARY_ENV: &str = "UKSFTA_SFTP_BIN";
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
+/// The transfer buffer. A 256 KiB buffer is a local fatal ("Outbound
+/// message too long"), and throughput is flat from 32 KiB to 261 KiB.
+const BUFFER_SIZE: &str = "32768";
+
+/// Keep the connection alive, and fail a dead link in seconds.
+const LIVENESS: [&str; 3] = [
+    "ServerAliveInterval=15",
+    "ServerAliveCountMax=3",
+    "ConnectTimeout=15",
+];
+
 /// The client. It holds no credentials: `sftp` reads the key, the agent or
 /// the terminal prompt itself.
 pub struct Sftp {
@@ -39,6 +50,27 @@ impl Sftp {
         }
     }
 
+    /// The full argument list for one client run.
+    fn args(&self) -> Vec<String> {
+        let mut args = vec!["-q".to_string(), "-P".to_string(), self.port.to_string()];
+        if let Some(path) = &self.identity {
+            args.push("-i".to_string());
+            args.push(path.display().to_string());
+        }
+        args.extend([
+            "-R".to_string(),
+            "64".to_string(),
+            "-B".to_string(),
+            BUFFER_SIZE.to_string(),
+        ]);
+        for option in LIVENESS {
+            args.push("-o".to_string());
+            args.push(option.to_string());
+        }
+        args.push(self.destination.clone());
+        args
+    }
+
     /// Send one phase of commands and return the client's standard output.
     ///
     /// # Errors
@@ -55,16 +87,8 @@ impl Sftp {
         }
 
         let mut command = Command::new(&self.binary);
-        command.arg("-q").arg("-P").arg(self.port.to_string());
-        if let Some(path) = &self.identity {
-            command.arg("-i").arg(path);
-        }
         command
-            .arg("-R")
-            .arg("64")
-            .arg("-B")
-            .arg("262144")
-            .arg(&self.destination)
+            .args(self.args())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -154,6 +178,40 @@ fn unique_path(prefix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_client_arguments_stay_inside_the_buffer_limit() {
+        let client = Sftp {
+            binary: "sftp".to_string(),
+            destination: "tester@example.invalid".to_string(),
+            port: 2022,
+            identity: Some(PathBuf::from("/home/user/.ssh/id_ed25519")),
+        };
+
+        let args = client.args();
+        assert!(
+            !args.iter().any(|arg| arg == "262144"),
+            "the buffer must stay inside the server-safe limit: {args:?}"
+        );
+        let buffer = args
+            .iter()
+            .position(|arg| arg == "-B")
+            .map(|i| args[i + 1].clone());
+        assert_eq!(buffer.as_deref(), Some("32768"));
+        for option in LIVENESS {
+            assert!(
+                args.windows(2).any(|pair| pair == ["-o", option]),
+                "{args:?}"
+            );
+        }
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("tester@example.invalid")
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-i", "/home/user/.ssh/id_ed25519"]));
+    }
 
     #[test]
     fn quote_wraps_a_plain_path() {

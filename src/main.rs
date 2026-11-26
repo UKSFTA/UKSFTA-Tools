@@ -213,6 +213,9 @@ enum Commands {
         /// Fail when a PBO has no companion .bisign file
         #[arg(long)]
         require_signatures: bool,
+        /// Retry an upload this many times (0 means one attempt)
+        #[arg(long, default_value_t = 2)]
+        retries: u8,
     },
     /// Show the installed version and check for updates
     Version,
@@ -351,6 +354,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             force_prune,
             dry_run,
             require_signatures,
+            retries,
         } => server::run(ServerOptions {
             config,
             destination,
@@ -365,6 +369,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             force_prune,
             dry_run,
             require_signatures,
+            retries,
         })?,
         Commands::Version => version(),
         Commands::Docs {

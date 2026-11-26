@@ -1,5 +1,7 @@
 //! Print the pack report and the change plan, and build the upload batch.
 
+use std::path::Path;
+
 use super::plan::{Action, Finding, Plan};
 use super::sftp::quote;
 use crate::error::UksftaError;
@@ -104,27 +106,40 @@ pub fn print_plan(plan: &Plan) {
     }
 }
 
-/// The upload phase. Only `addons/` and `keys/` are created.
+/// The upload phase. Only `addons/` and `keys/` are created. The puts run
+/// smallest first, so a failure in the middle leaves the large files for a
+/// retry.
 pub fn upload_batch(plan: &Plan) -> Result<Vec<String>, UksftaError> {
     let addons = format!("{}/addons", plan.remote_dir);
     let keys = format!("{}/keys", plan.remote_dir);
     let mut dirs: Vec<String> = Vec::new();
-    let mut puts = Vec::new();
+    let mut uploads: Vec<(&u64, &Path, &str)> = plan
+        .uploads()
+        .filter_map(|action| match action {
+            Action::Upload {
+                local,
+                remote,
+                size,
+                ..
+            } => Some((size, local.as_path(), remote.as_str())),
+            Action::Remove { .. } => None,
+        })
+        .collect();
+    uploads.sort_by_key(|(size, _, _)| **size);
 
-    for action in plan.uploads() {
-        if let Action::Upload { local, remote, .. } = action {
-            if remote.starts_with(&format!("{addons}/")) && !dirs.contains(&addons) {
-                dirs.push(addons.clone());
-            }
-            if remote.starts_with(&format!("{keys}/")) && !dirs.contains(&keys) {
-                dirs.push(keys.clone());
-            }
-            puts.push(format!(
-                "put {} {}",
-                quote(&local.display().to_string())?,
-                quote(remote)?
-            ));
+    let mut puts = Vec::new();
+    for (_, local, remote) in uploads {
+        if remote.starts_with(&format!("{addons}/")) && !dirs.contains(&addons) {
+            dirs.push(addons.clone());
         }
+        if remote.starts_with(&format!("{keys}/")) && !dirs.contains(&keys) {
+            dirs.push(keys.clone());
+        }
+        puts.push(format!(
+            "put -p {} {}",
+            quote(&local.display().to_string())?,
+            quote(remote)?
+        ));
     }
 
     dirs.sort();
@@ -134,4 +149,62 @@ pub fn upload_batch(plan: &Plan) -> Result<Vec<String>, UksftaError> {
     }
     batch.extend(puts);
     Ok(batch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn upload(name: &str, remote: &str, size: u64) -> Action {
+        Action::Upload {
+            name: name.to_string(),
+            local: PathBuf::from(format!("/local/{name}")),
+            remote: remote.to_string(),
+            size,
+        }
+    }
+
+    fn plan_with(actions: Vec<Action>) -> Plan {
+        Plan {
+            remote_dir: "/srv/arma/@1".to_string(),
+            actions,
+            ..Plan::default()
+        }
+    }
+
+    #[test]
+    fn the_upload_batch_puts_the_smallest_file_first() {
+        let plan = plan_with(vec![
+            upload("big.pbo", "/srv/arma/@1/addons/big.pbo", 900),
+            upload("key.bikey", "/srv/arma/@1/keys/key.bikey", 50),
+            upload("small.pbo", "/srv/arma/@1/addons/small.pbo", 100),
+        ]);
+
+        let batch = upload_batch(&plan).unwrap();
+        let puts: Vec<&String> = batch
+            .iter()
+            .filter(|line| line.starts_with("put "))
+            .collect();
+        assert_eq!(puts.len(), 3);
+        assert!(puts[0].contains("key.bikey"), "{batch:?}");
+        assert!(puts[1].contains("small.pbo"), "{batch:?}");
+        assert!(puts[2].contains("big.pbo"), "{batch:?}");
+        assert!(batch[0].starts_with("-mkdir"), "{batch:?}");
+        assert!(batch[1].starts_with("-mkdir"), "{batch:?}");
+        assert!(batch[2].starts_with("put "), "{batch:?}");
+    }
+
+    #[test]
+    fn every_put_preserves_the_timestamp() {
+        let plan = plan_with(vec![upload("a.pbo", "/srv/arma/@1/addons/a.pbo", 10)]);
+
+        let batch = upload_batch(&plan).unwrap();
+        let puts: Vec<&String> = batch
+            .iter()
+            .filter(|line| line.starts_with("put "))
+            .collect();
+        assert_eq!(puts.len(), 1);
+        assert!(puts[0].starts_with("put -p \""), "{batch:?}");
+    }
 }

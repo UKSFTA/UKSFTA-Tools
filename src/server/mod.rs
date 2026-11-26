@@ -13,13 +13,15 @@ mod verify;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::error::UksftaError;
 use crate::lock::{load_lock, LockFile};
 use crate::modlist::{parse_mod_sources, ModEntry};
+use crate::util::human_size;
 
 use self::config::Overrides;
-use self::plan::{is_bikey, is_bisign, is_pbo, Action, LocalFile, LocalPack};
+use self::plan::{is_bikey, is_bisign, is_pbo, Action, LocalFile, LocalPack, Plan};
 use self::report::{print_plan, print_report, upload_batch};
 use self::sftp::ScratchDir;
 use self::sftp::Sftp;
@@ -40,6 +42,8 @@ pub struct ServerOptions {
     pub force_prune: bool,
     pub dry_run: bool,
     pub require_signatures: bool,
+    /// Upload attempts after the first. Zero means one attempt.
+    pub retries: u8,
 }
 
 /// Verify the pack, then upload or prune when asked.
@@ -98,15 +102,7 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
     if opts.dry_run {
         println!("dry run: no changes made");
     } else if opts.upload {
-        let batch = upload_batch(&plan)?;
-        if !batch.is_empty() {
-            verifier.client.batch(&batch)?;
-            let puts = batch.iter().filter(|line| line.starts_with("put ")).count();
-            println!("upload: {puts} file(s) written");
-            plan = verifier.verify()?;
-            println!("after upload:");
-            print_report(&plan);
-        }
+        plan = upload_with_retries(&verifier, plan, opts.retries)?;
     }
 
     if opts.prune && !opts.dry_run {
@@ -143,6 +139,75 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
 fn remove_path(action: &Action) -> String {
     match action {
         Action::Remove { remote } | Action::Upload { remote, .. } => remote.clone(),
+    }
+}
+
+/// What the upload loop does after one attempt.
+#[derive(Debug, PartialEq, Eq)]
+enum NextAttempt {
+    Stop,
+    Retry { wait: Duration },
+}
+
+/// Send the upload batch, re-verify, and send again only what is still
+/// missing or stale. The wait grows with the attempt number.
+fn upload_with_retries(
+    verifier: &Verifier<'_>,
+    mut plan: Plan,
+    retries: u8,
+) -> Result<Plan, UksftaError> {
+    let limit = u16::from(retries) + 1;
+    let mut attempted = false;
+    for attempt in 1..=limit {
+        let batch = upload_batch(&plan)?;
+        if batch.is_empty() {
+            break;
+        }
+        attempted = true;
+        let files = plan.uploads().count();
+        let bytes = plan.upload_bytes();
+        let started = Instant::now();
+        if let Err(e) = verifier.client.batch(&batch) {
+            eprintln!("Warning: upload attempt {attempt}: {e}");
+        }
+        plan = verifier.verify()?;
+        let elapsed = started.elapsed();
+        println!(
+            "attempt {attempt}: {files} file(s), {} attempted, {:.1} s, {:.2} MB/s",
+            human_size(bytes),
+            elapsed.as_secs_f64(),
+            transfer_rate(bytes, elapsed)
+        );
+        match next_attempt(&plan, attempt, limit) {
+            NextAttempt::Stop => break,
+            NextAttempt::Retry { wait } => std::thread::sleep(wait),
+        }
+    }
+    if attempted {
+        println!("after upload:");
+        print_report(&plan);
+    }
+    Ok(plan)
+}
+
+/// Stop when every file is in place, or when no attempt remains.
+fn next_attempt(plan: &Plan, attempt: u16, limit: u16) -> NextAttempt {
+    if plan.uploads().next().is_none() || attempt >= limit {
+        NextAttempt::Stop
+    } else {
+        NextAttempt::Retry {
+            wait: Duration::from_secs(u64::from(attempt) * 2),
+        }
+    }
+}
+
+/// Transfer rate in MB/s. An instant attempt reports zero.
+fn transfer_rate(bytes: u64, elapsed: Duration) -> f64 {
+    let seconds = elapsed.as_secs_f64();
+    if seconds <= f64::EPSILON {
+        0.0
+    } else {
+        bytes as f64 / seconds / 1_000_000.0
     }
 }
 
@@ -417,6 +482,56 @@ mod tests {
         let meta = root.path().join(".hemttout/release/meta.cpp");
         let local = load_local(&meta, Some(&dir)).unwrap();
         (root, local)
+    }
+
+    fn plan_with_uploads(sizes: &[u64]) -> Plan {
+        let mut plan = Plan::default();
+        for size in sizes {
+            plan.actions.push(Action::Upload {
+                name: "file".to_string(),
+                local: PathBuf::from("/local/file"),
+                remote: "/remote/file".to_string(),
+                size: *size,
+            });
+        }
+        plan
+    }
+
+    #[test]
+    fn an_attempt_waits_twice_its_number_before_the_next() {
+        let plan = plan_with_uploads(&[10]);
+
+        assert_eq!(
+            next_attempt(&plan, 1, 3),
+            NextAttempt::Retry {
+                wait: Duration::from_secs(2)
+            }
+        );
+        assert_eq!(
+            next_attempt(&plan, 2, 3),
+            NextAttempt::Retry {
+                wait: Duration::from_secs(4)
+            }
+        );
+    }
+
+    #[test]
+    fn the_last_attempt_does_not_retry() {
+        let plan = plan_with_uploads(&[10]);
+        assert_eq!(next_attempt(&plan, 3, 3), NextAttempt::Stop);
+    }
+
+    #[test]
+    fn a_plan_with_no_uploads_stops_at_once() {
+        let plan = plan_with_uploads(&[]);
+        assert_eq!(next_attempt(&plan, 1, 3), NextAttempt::Stop);
+    }
+
+    #[test]
+    fn the_transfer_rate_handles_an_instant_attempt() {
+        assert_eq!(transfer_rate(1_000_000, Duration::ZERO), 0.0);
+        let rate = transfer_rate(2_000_000, Duration::from_secs(2));
+        assert!((rate - 1.0).abs() < f64::EPSILON, "{rate}");
     }
 
     #[test]

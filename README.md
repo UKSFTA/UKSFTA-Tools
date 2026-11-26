@@ -584,6 +584,9 @@ uksfta server --deep
 # Print the plan and change nothing
 uksfta server --upload --prune --dry-run
 
+# Retry a failed upload up to three times
+uksfta server --upload --retries 3
+
 # Prune an extra PBO that mods.lock lists
 uksfta server --prune --force-prune
 ```
@@ -623,6 +626,32 @@ in the pack. Use it when a size match is not enough.
 folder. It creates only `addons/` and `keys/` when they are absent. After
 the upload the command lists the server again and re-runs the check.
 
+### Upload performance
+
+An upload sends the smallest file first. A failure in the middle of a
+batch therefore leaves the large files for the next attempt. Each file
+uses `put -p`, so the server keeps the local modification time.
+
+The client uses a 32 KB transfer buffer (`-B 32768`). A 256 KB buffer
+fails at once on the local client with `Outbound message too long`.
+Throughput is flat from 32 KB to 261 KB, about 1.7 to 1.8 MB/s on the
+current line. Parallel streams did not help, so the command uses one.
+
+An upload attempt re-verifies the pack and retries only the files that
+are still missing or stale. The default is 2 retries, which makes three
+attempts. Use `--retries N` to change the count. A value of 0 makes one
+attempt. The wait is 2 seconds after the first attempt, then 4 seconds.
+Each attempt prints the attempt number, the file count, the attempted
+bytes, the elapsed time and the rate in MB/s.
+
+An interrupted upload restarts the file from byte zero. The command does
+not resume part of a file. In testing, `reput` trusted the remote size
+and produced a corrupt file of the correct length. Only a complete `put`
+gives a file that matches the local copy.
+
+The client also sends `ServerAliveInterval=15`, `ServerAliveCountMax=3`
+and `ConnectTimeout=15`, so a dead link fails in seconds.
+
 `--prune` removes remote PBOs that have no local match. It acts inside
 `addons/` only, removes `.pbo` files only, and never removes `meta.cpp`,
 `mod.cpp`, a key, a signature or a directory. A remote-only PBO that
@@ -661,7 +690,8 @@ used, because it suppresses the prompt. No password is read or stored.
 One `sftp` process runs per phase. The phases are the listing, the
 `meta.cpp` and `mod.cpp` fetch, the deep download, the upload and the
 prune. A password prompt therefore appears at most once per phase. Each run
-uses `-R 64` and `-B 262144` for throughput.
+uses `-R 64` and a 32 KB buffer. See Upload performance for the reasons
+and the retry behaviour.
 
 The output starts with the pack id and name, then the local and remote
 counts, the status and one line per stale, missing or extra PBO. A single

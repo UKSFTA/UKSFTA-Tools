@@ -419,3 +419,25 @@ fn extension_helpers_ignore_case() {
     assert!(is_bikey("A.BIKEY"));
     assert!(!is_pbo("A.bisign"));
 }
+
+#[test]
+fn upload_bytes_sums_every_upload_action() {
+    let mut fixture = Fixture::new();
+    fixture.remote.addons.clear();
+
+    let plan = fixture.plan();
+    assert_eq!(plan.upload_bytes(), 110, "the PBO and its signature");
+}
+
+#[test]
+fn a_generated_meta_cpp_adds_no_upload_bytes() {
+    let mut fixture = Fixture::new();
+    fixture.remote.meta_id = Some("1".to_string());
+
+    let plan = fixture.plan();
+    assert!(plan.uploads().any(|action| matches!(
+        action,
+        Action::Upload { name, size, .. } if name == "meta.cpp" && *size == 0
+    )));
+    assert_eq!(plan.upload_bytes(), 0);
+}
