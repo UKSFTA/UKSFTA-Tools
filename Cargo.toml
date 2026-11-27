@@ -46,3 +46,6 @@ divan = "0.1.21"
 [[bench]]
 name = "hot_paths"
 harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
