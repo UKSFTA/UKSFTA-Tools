@@ -37,6 +37,8 @@ pub struct Sftp {
     transfer: Transfer,
     known_hosts: PathBuf,
     policy: HostKeyPolicy,
+    /// Refuse to prompt. The probe must never ask for a second password.
+    batch_mode: bool,
 }
 
 impl Sftp {
@@ -50,7 +52,15 @@ impl Sftp {
             transfer: settings.transfer,
             known_hosts: settings.known_hosts.clone(),
             policy: settings.host_key_policy,
+            batch_mode: false,
         }
+    }
+
+    /// A client that never prompts, for the link probe.
+    pub fn probe(settings: &Settings) -> Self {
+        let mut client = Self::new(settings);
+        client.batch_mode = true;
+        client
     }
 
     /// The full argument list for one client run. `LogLevel=ERROR` keeps
@@ -79,6 +89,9 @@ impl Sftp {
             args.push(option.to_string());
         }
         args.extend(["-o".to_string(), "LogLevel=ERROR".to_string()]);
+        if self.batch_mode {
+            args.extend(["-o".to_string(), "BatchMode=yes".to_string()]);
+        }
         args.extend([
             "-o".to_string(),
             format!("StrictHostKeyChecking={}", self.policy.as_str()),
@@ -232,6 +245,7 @@ mod tests {
             transfer,
             known_hosts: PathBuf::from("/home/user/.ssh/known_hosts"),
             policy: HostKeyPolicy::Yes,
+            batch_mode: false,
         }
     }
 

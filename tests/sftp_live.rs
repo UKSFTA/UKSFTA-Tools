@@ -750,7 +750,7 @@ fn a_probe_chooses_the_whole_file_path_on_a_fast_link() {
     let setup = Setup::with_size("probe", 300 * 1024 * 1024);
     prepare_remote(&setup);
 
-    let output = setup.run(&["--segment-probe"]);
+    let output = setup.run(&["--segment-probe", "--jobs", "4"]);
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(
         output.status.success(),
@@ -766,6 +766,9 @@ fn a_probe_chooses_the_whole_file_path_on_a_fast_link() {
         "the whole-file path must carry it: {stdout}"
     );
     assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
+    for line in stdout.lines().filter(|line| line.starts_with("probe: ")) {
+        println!("{line}");
+    }
 }
 
 #[test]
