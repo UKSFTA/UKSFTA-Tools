@@ -91,18 +91,34 @@ async fn transfer(
     writer::assert_not_loadable(&aside_probe)?;
 
     let _lock = writer::take_run_lock(state_root, pack_id)?;
+    if let Some(trace) = trace.as_ref() {
+        trace.progress.hide();
+    }
     let password = if password_prompt {
         let (user, host) = connect::split_destination(&settings.destination)?;
         // An explicit prompt owns the credential: a failure to read it is
         // fatal, so the run cannot fall back to another credential.
         match secret::prompt(&host, &user) {
             Ok(secret) => Some(Arc::new(secret)),
-            Err(UksftaError::Input(message)) => return Err(UksftaError::Auth(message)),
-            Err(error) => return Err(error),
+            Err(UksftaError::Input(message)) => {
+                if let Some(trace) = trace.as_ref() {
+                    trace.progress.show();
+                }
+                return Err(UksftaError::Auth(message));
+            }
+            Err(error) => {
+                if let Some(trace) = trace.as_ref() {
+                    trace.progress.show();
+                }
+                return Err(error);
+            }
         }
     } else {
         None
     };
+    if let Some(trace) = trace.as_ref() {
+        trace.progress.show();
+    }
     let coordinator = connect::connect_with(settings, password.as_deref()).await?;
     let client = coordinator.sftp;
     let buffer = settings.transfer.buffer;
