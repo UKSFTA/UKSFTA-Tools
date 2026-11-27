@@ -43,29 +43,82 @@ pub struct LocalIdentity {
     pub sha256: String,
 }
 
-impl LocalIdentity {
-    /// Read the size, modification time and hash of the local file.
+/// The local file's identity. The size and time are read at once, and the
+/// content hash runs on a blocking thread until someone needs it, so a run
+/// does not wait for the hash before its first range.
+pub struct IdentityJob {
+    size: u64,
+    mtime: i64,
+    result: tokio::sync::OnceCell<LocalIdentity>,
+    hash: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<String, UksftaError>>>>,
+}
+
+impl IdentityJob {
+    /// Read the size and time, and start the hash beside the caller.
     ///
     /// # Errors
-    /// Returns `Input` when the file cannot be read or hashed.
-    pub fn read(path: &Path) -> Result<Self, UksftaError> {
-        let metadata = fs::metadata(path).map_err(|error| {
-            UksftaError::Input(format!("cannot read {}: {error}", path.display()))
-        })?;
-        let mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX))
-            .unwrap_or_default();
-        let sha256 = crate::util::file_sha256(path)
-            .ok_or_else(|| UksftaError::Input(format!("cannot hash {}", path.display())))?;
+    /// Returns `Input` when the file cannot be read.
+    pub fn start(path: &Path) -> Result<Self, UksftaError> {
+        let (size, mtime) = metadata_of(path)?;
+        let owned = path.to_path_buf();
+        let hash = tokio::task::spawn_blocking(move || {
+            crate::util::file_sha256_with_buffer(&owned, crate::util::HASH_BUFFER_LARGE)
+                .ok_or_else(|| UksftaError::Input(format!("cannot hash {}", owned.display())))
+        });
         Ok(Self {
-            size: metadata.len(),
+            size,
             mtime,
-            sha256,
+            result: tokio::sync::OnceCell::new(),
+            hash: tokio::sync::Mutex::new(Some(hash)),
         })
     }
+
+    /// The size read at the start.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// The modification time read at the start.
+    pub fn mtime(&self) -> i64 {
+        self.mtime
+    }
+
+    /// Join the hash. The first caller waits for the blocking task, later
+    /// callers reuse the result.
+    ///
+    /// # Errors
+    /// Returns `Input` when the file cannot be hashed.
+    pub async fn finish(&self) -> Result<LocalIdentity, UksftaError> {
+        self.result
+            .get_or_try_init(|| async {
+                let handle = self.hash.lock().await.take().ok_or_else(|| {
+                    UksftaError::Input("the local hash was already taken".to_string())
+                })?;
+                let sha256 = handle.await.map_err(|error| {
+                    UksftaError::Input(format!("the local hash task stopped: {error}"))
+                })??;
+                Ok(LocalIdentity {
+                    size: self.size,
+                    mtime: self.mtime,
+                    sha256,
+                })
+            })
+            .await
+            .cloned()
+    }
+}
+
+/// The size and modification time of the local file.
+fn metadata_of(path: &Path) -> Result<(u64, i64), UksftaError> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| UksftaError::Input(format!("cannot read {}: {error}", path.display())))?;
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or_default();
+    Ok((metadata.len(), mtime))
 }
 
 /// Where the checkpoint for one remote file lives.
@@ -150,6 +203,32 @@ pub enum Start {
     Resume { from: u64 },
 }
 
+/// Why a checkpoint cannot be trusted, judged from the file's size and time
+/// only. A run that fails here never hashes the local file.
+fn staged_mismatch(
+    checkpoint: &Checkpoint,
+    unit: &UploadUnit,
+    size: u64,
+    mtime: i64,
+) -> Option<&'static str> {
+    if checkpoint.version != VERSION {
+        return Some("the checkpoint version changed");
+    }
+    if checkpoint.remote != unit.remote {
+        return Some("the checkpoint names another file");
+    }
+    if checkpoint.temp != plan_temp_name(&unit.remote) {
+        return Some("the checkpoint names another temp file");
+    }
+    if checkpoint.local_size != size {
+        return Some("the local size changed");
+    }
+    if checkpoint.local_mtime != mtime {
+        return Some("the local modification time changed");
+    }
+    None
+}
+
 /// Why a checkpoint cannot be trusted.
 fn mismatch(
     checkpoint: &Checkpoint,
@@ -198,6 +277,7 @@ pub async fn decide(
     pack_id: &str,
     unit: &UploadUnit,
     settings: &Settings,
+    identity: &IdentityJob,
 ) -> Result<(Start, String), UksftaError> {
     let temp = plan_temp_name(&unit.remote);
     let path = path_for(state_root, pack_id, &unit.remote);
@@ -215,7 +295,15 @@ pub async fn decide(
         return Ok((Start::Fresh, temp));
     };
 
-    let identity = LocalIdentity::read(&unit.local)?;
+    let staged = staged_mismatch(&checkpoint, unit, identity.size(), identity.mtime());
+    let identity = match staged {
+        Some(reason) => {
+            eprintln!("Warning: restarting {name}: {reason}");
+            discard(sftp, &path, &temp).await;
+            return Ok((Start::Fresh, temp));
+        }
+        None => identity.finish().await?,
+    };
     if let Some(reason) = mismatch(&checkpoint, unit, &identity) {
         eprintln!("Warning: restarting {name}: {reason}");
         discard(sftp, &path, &temp).await;

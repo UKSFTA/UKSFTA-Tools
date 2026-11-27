@@ -136,7 +136,10 @@ fn create_lock(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Create and truncate the temp file once, then sync it when supported.
+/// Create and truncate the temp file once.
+///
+/// The file is empty and carries no data to lose, so it is not synced. The
+/// first checkpoint write and the final sync before publish cover durability.
 ///
 /// # Errors
 /// Returns `Input` when the server rejects the open or the truncate.
@@ -151,9 +154,6 @@ pub async fn create_temp(sftp: &Sftp, path: &str) -> Result<(), UksftaError> {
         .await
         .map_err(sftp_error)?;
     file.set_len(0).await.map_err(sftp_error)?;
-    if sftp.support_fsync() {
-        file.sync_all().await.map_err(sftp_error)?;
-    }
     file.close().await.map_err(sftp_error)?;
     Ok(())
 }
@@ -212,20 +212,136 @@ pub async fn open_range_writer(sftp: &Sftp, path: &str) -> Result<File, UksftaEr
     Ok(file)
 }
 
-/// Write one range from its own handle at the explicit offset.
+/// The most write handles one connection keeps in flight.
+pub const PIPELINE_MAX: usize = 8;
+
+/// The write handles to keep in flight on one connection, bounded by the
+/// `-R` request count.
+pub fn pipeline_depth(requests: u16) -> usize {
+    usize::from(requests.max(1)).min(PIPELINE_MAX)
+}
+
+/// Split one range into at most `count` disjoint pieces, one per handle.
+/// Each piece stays at least one request long, so a small range is sent as
+/// one piece rather than as several short requests.
+pub fn pieces(chunk: &Chunk, count: usize, buffer: u32) -> Vec<Chunk> {
+    let total = u64::from(chunk.len);
+    let request = u64::from(buffer.max(4096));
+    let most = usize::try_from(total.div_ceil(request).max(1)).unwrap_or(1);
+    let count = count.clamp(1, most);
+    let per = total.div_ceil(u64::try_from(count).unwrap_or(1));
+
+    let mut out = Vec::with_capacity(count);
+    let mut start = 0u64;
+    while start < total {
+        let len = per.min(total - start);
+        out.push(Chunk {
+            index: u32::try_from(out.len()).unwrap_or(0),
+            start: chunk.start + start,
+            len: u32::try_from(len).unwrap_or(u32::MAX),
+        });
+        start += len;
+    }
+    out
+}
+
+/// The write handles of one connection.
 ///
-/// # Errors
-/// Returns `Input` when the local file ends early, the server accepts no
-/// bytes, or either side reports an error.
-pub async fn write_range(
+/// The handles share one server file handle and keep a separate offset each,
+/// so a range splits across them and several writes are in flight at once.
+pub struct RangeWriter {
+    handles: Vec<File>,
+}
+
+impl RangeWriter {
+    /// Open `handles` write handles on one connection.
+    ///
+    /// # Errors
+    /// Returns `Input` when the server rejects the open.
+    pub async fn open(sftp: &Sftp, path: &str, handles: usize) -> Result<Self, UksftaError> {
+        let base = open_range_writer(sftp, path).await?;
+        let owned = (0..handles.max(1)).map(|_| base.clone()).collect();
+        drop(base);
+        Ok(Self { handles: owned })
+    }
+
+    /// Wrap one handle that is already open.
+    pub fn from_handle(file: File) -> Self {
+        Self {
+            handles: vec![file],
+        }
+    }
+
+    /// The number of writes this writer can keep in flight.
+    #[cfg(test)]
+    pub fn depth(&self) -> usize {
+        self.handles.len()
+    }
+
+    /// Write one range at its own offset, one piece per handle.
+    ///
+    /// # Errors
+    /// Returns `Input` when the local file ends early, the server accepts no
+    /// bytes, or either side reports an error. A failed range is sent again
+    /// whole, so a partly written range is safe to retry.
+    pub async fn write(
+        &mut self,
+        chunk: &Chunk,
+        local: &Path,
+        buffer: u32,
+        limiter: Option<&super::super::limit::RateLimiter>,
+        progress: &mut (dyn FnMut(u64) + Send),
+    ) -> Result<(), UksftaError> {
+        let split = pieces(chunk, self.handles.len(), buffer);
+        let progress = std::sync::Mutex::new(progress);
+
+        let futures = self
+            .handles
+            .iter_mut()
+            .zip(&split)
+            .map(|(file, piece)| write_piece(file, piece, local, buffer, limiter, &progress))
+            .collect::<Vec<_>>();
+
+        for result in super::fanout::all(futures).await {
+            result?;
+        }
+        Ok(())
+    }
+
+    /// Flush the file to the server's disk. Every write has been answered, so
+    /// one handle is enough.
+    ///
+    /// # Errors
+    /// Returns `Input` when the server refuses the sync.
+    pub async fn sync_all(&mut self) -> Result<(), UksftaError> {
+        match self.handles.first_mut() {
+            Some(file) => file.sync_all().await.map_err(sftp_error),
+            None => Ok(()),
+        }
+    }
+
+    /// Close the handles. The last reference sends the close request.
+    ///
+    /// # Errors
+    /// Returns `Input` when the server refuses the close.
+    pub async fn close(self) -> Result<(), UksftaError> {
+        match self.handles.into_iter().last() {
+            Some(file) => file.close().await.map_err(sftp_error),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Write one piece from its own handle at the explicit offset.
+async fn write_piece(
     file: &mut File,
-    chunk: &Chunk,
+    piece: &Chunk,
     local: &Path,
     buffer: u32,
     limiter: Option<&super::super::limit::RateLimiter>,
-    progress: &mut (dyn FnMut(u64) + Send),
+    progress: &std::sync::Mutex<&mut (dyn FnMut(u64) + Send)>,
 ) -> Result<(), UksftaError> {
-    file.seek(SeekFrom::Start(chunk.start))
+    file.seek(SeekFrom::Start(piece.start))
         .await
         .map_err(UksftaError::Io)?;
 
@@ -233,11 +349,11 @@ pub async fn write_range(
         .await
         .map_err(|error| UksftaError::Input(format!("cannot read {}: {error}", local.display())))?;
     source
-        .seek(SeekFrom::Start(chunk.start))
+        .seek(SeekFrom::Start(piece.start))
         .await
         .map_err(|error| UksftaError::Input(format!("cannot seek {}: {error}", local.display())))?;
 
-    let mut remaining = u64::from(chunk.len);
+    let mut remaining = u64::from(piece.len);
     let mut buffer = vec![0u8; usize::try_from(buffer.max(4096)).unwrap_or(4096)];
     while remaining > 0 {
         let want = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
@@ -267,7 +383,13 @@ pub async fn write_range(
             written += count;
         }
         remaining -= read as u64;
-        progress(read as u64);
+        {
+            // The lock is held only for the callback, never across an await.
+            let mut report = progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            report(read as u64);
+        }
     }
     Ok(())
 }
@@ -473,5 +595,62 @@ mod tests {
     fn an_orphan_path_joins_the_directory_once() {
         assert_eq!(join_name("/srv/a", "x.part"), "/srv/a/x.part");
         assert_eq!(join_name("/srv/a/", "x.part"), "/srv/a/x.part");
+    }
+
+    #[test]
+    fn the_pieces_cover_the_range_once_at_pinned_offsets() {
+        let chunk = Chunk {
+            index: 9,
+            start: 4 * 1024 * 1024,
+            len: 16 * 1024 * 1024,
+        };
+        for count in [1usize, 2, 3, 4, 8] {
+            let split = pieces(&chunk, count, 261_120);
+            assert!(split.len() <= count, "{count} handles");
+            assert_eq!(
+                split.iter().map(|p| u64::from(p.len)).sum::<u64>(),
+                u64::from(chunk.len),
+                "{count} handles cover the range"
+            );
+            let mut next = chunk.start;
+            for piece in &split {
+                assert_eq!(piece.start, next, "no gap and no overlap");
+                assert!(u64::from(piece.len) <= u64::from(chunk.len));
+                next += u64::from(piece.len);
+            }
+            assert_eq!(next, chunk.start + u64::from(chunk.len));
+        }
+    }
+
+    #[test]
+    fn a_range_no_longer_than_one_request_stays_whole() {
+        let chunk = Chunk {
+            index: 0,
+            start: 0,
+            len: 32_768,
+        };
+        let split = pieces(&chunk, 8, 261_120);
+        assert_eq!(split.len(), 1, "one short request, not eight tiny ones");
+        assert_eq!(split[0], chunk);
+
+        let small = Chunk {
+            index: 0,
+            start: 0,
+            len: 4096,
+        };
+        assert_eq!(
+            pieces(&small, 8, 0),
+            vec![small],
+            "an empty buffer still works"
+        );
+    }
+
+    #[test]
+    fn the_pipeline_depth_is_bounded_by_the_request_count() {
+        assert_eq!(pipeline_depth(0), 1);
+        assert_eq!(pipeline_depth(1), 1);
+        assert_eq!(pipeline_depth(4), 4);
+        assert_eq!(pipeline_depth(64), PIPELINE_MAX);
+        assert_eq!(pipeline_depth(256), PIPELINE_MAX);
     }
 }

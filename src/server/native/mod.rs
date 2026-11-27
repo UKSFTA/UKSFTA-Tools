@@ -5,6 +5,7 @@
 pub mod adaptive;
 pub mod checkpoint;
 pub mod connect;
+mod fanout;
 pub mod known_hosts;
 pub mod probe;
 pub mod publish;
@@ -24,11 +25,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use indicatif::ProgressBar;
-use openssh_sftp_client::file::File;
 use openssh_sftp_client::Sftp;
 use tokio::task::JoinSet;
 
-use self::checkpoint::{Checkpoint, LocalIdentity, Start};
+use self::checkpoint::{Checkpoint, IdentityJob, Start};
 use self::connect::NativeSession;
 use self::schedule::Scheduler;
 use self::secret::Secret;
@@ -145,6 +145,9 @@ async fn transfer(
     writer::assert_not_loadable(&aside_probe)?;
 
     let _lock = writer::take_run_lock(state_root, pack_id)?;
+    // The local hash runs on a blocking thread from here on. A run with no
+    // checkpoint to check never waits for it before its first range.
+    let identity = IdentityJob::start(&unit.local)?;
     if let Some(trace) = trace.as_ref() {
         trace.progress.hide();
     }
@@ -155,14 +158,14 @@ async fn transfer(
     let client = coordinator.sftp;
     let buffer = settings.transfer.buffer.max(NATIVE_BUFFER);
 
-    let (start, temp) = checkpoint::decide(&client, state_root, pack_id, unit, settings).await?;
+    let (start, temp) =
+        checkpoint::decide(&client, state_root, pack_id, unit, settings, &identity).await?;
     writer::assert_not_loadable(&temp)?;
 
     let directory = remote_dir(&unit.remote);
     writer::clean_orphans(&client, directory, Some(&temp)).await?;
     writer::check_space(&client, directory, unit.size.saturating_mul(2)).await?;
 
-    let identity = LocalIdentity::read(&unit.local)?;
     let from = match start {
         Start::Fresh => 0,
         Start::Resume { from } => from,
@@ -212,7 +215,7 @@ struct Job<'a> {
     trace: Option<SegmentedTrace>,
     state_root: &'a Path,
     pack_id: &'a str,
-    identity: &'a LocalIdentity,
+    identity: &'a IdentityJob,
     password: Option<&'a Arc<Secret>>,
 }
 
@@ -232,7 +235,9 @@ async fn finish_job(job: &Job<'_>) -> Result<(String, u8), UksftaError> {
     writer::finish(client, job.temp, size).await?;
 
     let hash = verify::hash_remote(client, job.temp, size, verify::READBACK_BUFFER).await?;
-    if hash != job.identity.sha256 {
+    // The local hash has run beside the send. Join it before the comparison.
+    let local = job.identity.finish().await?;
+    if hash != local.sha256 {
         return Err(UksftaError::Input(
             "the server received different bytes; nothing was published".to_string(),
         ));
@@ -254,33 +259,84 @@ async fn finish_job(job: &Job<'_>) -> Result<(String, u8), UksftaError> {
 
 /// The acknowledged ranges of one run, and the file that records them.
 struct Acks {
-    checkpoint: Checkpoint,
+    /// The checkpoint, once the local identity is known. Acks before then are
+    /// kept in `done`, and the first save carries them.
+    checkpoint: Option<Checkpoint>,
     path: std::path::PathBuf,
     done: BTreeSet<u32>,
     last_saved: Instant,
+    /// Ranges completed since the last save. The temp file is synced only
+    /// when a save follows, so `--segment-fsync-every` gates the save.
+    since_save: u32,
+    fsync_every: u32,
 }
 
 impl Acks {
-    /// Record one acknowledged range. The first ack is saved at once, so an
-    /// early interruption still leaves a usable checkpoint; after that the
-    /// file is written at most once a second.
-    fn ack(&mut self, index: u32, size: u64) {
-        self.done.insert(index);
-        checkpoint::recompute_prefix(&mut self.checkpoint, &self.done, size);
-        if self.done.len() > 1 && self.last_saved.elapsed() < CHECKPOINT_INTERVAL {
-            return;
+    /// The prefix this ack would produce, counted from range zero.
+    fn prefix_with(&self, index: u32, chunk: u32, size: u64) -> u64 {
+        let mut count = 0u64;
+        loop {
+            let next = u32::try_from(count).unwrap_or(u32::MAX);
+            if next != index && !self.done.contains(&next) {
+                break;
+            }
+            count += 1;
         }
-        self.last_saved = Instant::now();
-        if let Err(error) = checkpoint::save(&self.path, &self.checkpoint) {
-            eprintln!("Warning: cannot save the checkpoint: {error}");
+        count.saturating_mul(u64::from(chunk)).min(size)
+    }
+
+    /// True when recording `index` moves the prefix on disk. A range that
+    /// completes out of order does not count: only the prefix matters, and a
+    /// run that is killed can resume from a prefix alone.
+    ///
+    /// The first usable prefix is saved at once, so an early interruption
+    /// still leaves a checkpoint. After that the file is written at most
+    /// once a second.
+    fn due(&self, index: u32, size: u64) -> bool {
+        let Some(checkpoint) = self.checkpoint.as_ref() else {
+            return false;
+        };
+        let next = self.prefix_with(index, checkpoint.chunk, size);
+        let due_ranges = self.since_save >= self.fsync_every.max(1);
+        next > checkpoint.acked_prefix
+            && (checkpoint.acked_prefix == 0
+                || (due_ranges && self.last_saved.elapsed() >= CHECKPOINT_INTERVAL))
+    }
+
+    /// Record one acknowledged range and write the checkpoint when it pays.
+    fn ack(&mut self, index: u32, size: u64) {
+        let due = self.due(index, size);
+        self.done.insert(index);
+        self.since_save = self.since_save.saturating_add(1);
+        if due {
+            self.save(size);
         }
     }
 
-    fn save_now(&mut self) {
+    /// Write the checkpoint from the acknowledged ranges.
+    fn save(&mut self, size: u64) -> bool {
+        let Some(checkpoint) = self.checkpoint.as_mut() else {
+            return false;
+        };
+        checkpoint::recompute_prefix(checkpoint, &self.done, size);
         self.last_saved = Instant::now();
-        if let Err(error) = checkpoint::save(&self.path, &self.checkpoint) {
+        self.since_save = 0;
+        if let Err(error) = checkpoint::save(&self.path, checkpoint) {
             eprintln!("Warning: cannot save the checkpoint: {error}");
         }
+        true
+    }
+
+    /// Attach the local identity and save at once.
+    fn attach(&mut self, checkpoint: Checkpoint, size: u64) {
+        self.checkpoint = Some(checkpoint);
+        self.save(size);
+    }
+
+    /// Replace the acknowledged ranges with the scheduler's set and save.
+    fn finish(&mut self, done: BTreeSet<u32>, size: u64) {
+        self.done = done;
+        self.save(size);
     }
 }
 
@@ -303,7 +359,7 @@ async fn send_ranges(job: &Job<'_>) -> Result<u8, UksftaError> {
         .filter(|chunk| chunk.start >= job.from)
         .collect();
     let acks = Arc::new(Mutex::new(Acks {
-        checkpoint: checkpoint::fresh(&job.unit.remote, job.temp, job.plan.chunk, job.identity),
+        checkpoint: None,
         path: checkpoint::path_for(job.state_root, job.pack_id, &job.unit.remote),
         done: BTreeSet::from_iter(
             job.plan
@@ -313,14 +369,9 @@ async fn send_ranges(job: &Job<'_>) -> Result<u8, UksftaError> {
                 .map(|chunk| chunk.index),
         ),
         last_saved: Instant::now(),
+        since_save: 0,
+        fsync_every: u32::from(job.settings.segment.fsync_every),
     }));
-    {
-        let mut guard = acks
-            .lock()
-            .map_err(|_| UksftaError::Input("the checkpoint lock is poisoned".to_string()))?;
-        guard.checkpoint.acked_prefix = job.from;
-        guard.save_now();
-    }
 
     let max_connections = job.settings.segment.connections.max(1);
     let scheduler = Arc::new(Mutex::new(Scheduler::new(&pending)));
@@ -389,6 +440,24 @@ async fn send_ranges(job: &Job<'_>) -> Result<u8, UksftaError> {
         });
     }
 
+    // The first checkpoint needs the local hash. The ranges are already
+    // moving, so the wait overlaps the send instead of blocking it.
+    let identity = match job.identity.finish().await {
+        Ok(identity) => identity,
+        Err(error) => {
+            tasks.abort_all();
+            if let Some(handle) = monitor {
+                handle.abort();
+            }
+            clear_bars(&bars);
+            return Err(error);
+        }
+    };
+    let fresh = checkpoint::fresh(&job.unit.remote, job.temp, job.plan.chunk, &identity);
+    acks.lock()
+        .map_err(|_| UksftaError::Input("the checkpoint lock is poisoned".to_string()))?
+        .attach(fresh, job.unit.size);
+
     let mut failure: Option<UksftaError> = None;
     while let Some(joined) = tasks.join_next().await {
         match joined {
@@ -436,8 +505,7 @@ async fn send_ranges(job: &Job<'_>) -> Result<u8, UksftaError> {
     let mut guard = acks
         .lock()
         .map_err(|_| UksftaError::Input("the checkpoint lock is poisoned".to_string()))?;
-    checkpoint::recompute_prefix(&mut guard.checkpoint, &done, job.unit.size);
-    guard.save_now();
+    guard.finish(done, job.unit.size);
     Ok(signals
         .peak
         .load(Ordering::Relaxed)
@@ -571,10 +639,9 @@ async fn run_worker(
     trace: Option<&SegmentedTrace>,
 ) -> Result<(), UksftaError> {
     let reconnects = settings.segment.reconnects;
-    let fsync_every = u32::from(settings.segment.fsync_every);
-    let mut completed: u32 = 0;
+    let handles = writer::pipeline_depth(settings.transfer.requests);
     let mut attempts: u8 = 0;
-    let mut session: Option<(NativeSession, File)> = None;
+    let mut session: Option<(NativeSession, writer::RangeWriter)> = None;
 
     loop {
         connection_active(bars, worker, false);
@@ -584,7 +651,7 @@ async fn run_worker(
         connection_active(bars, worker, true);
 
         if session.is_none() {
-            match open_session(settings, temp, password.as_deref()).await {
+            match open_session(settings, temp, password.as_deref(), handles).await {
                 Ok(pair) => {
                     signals.opened.fetch_add(1, Ordering::Relaxed);
                     session = Some(pair);
@@ -628,18 +695,23 @@ async fn run_worker(
             }
         };
         range_started(bars, worker, chunk.index, chunk.len);
-        let written = writer::write_range(file, &chunk, local, buffer, limiter, &mut advance).await;
+        let written = file
+            .write(&chunk, local, buffer, limiter, &mut advance)
+            .await;
+        // The sync follows the checkpoint, not every range: the server flushes
+        // the file just before the checkpoint claims the bytes.
+        let due = match &written {
+            Ok(()) => acks
+                .lock()
+                .map_err(|_| UksftaError::Input("the checkpoint lock is poisoned".to_string()))?
+                .due(chunk.index, size),
+            Err(_) => false,
+        };
         let synced = match written {
-            Ok(()) if current.sftp.support_fsync() => {
-                completed = completed.saturating_add(1);
-                if completed.is_multiple_of(fsync_every) {
-                    file.sync_all()
-                        .await
-                        .map_err(|error| UksftaError::Input(format!("sftp: {error}")))
-                } else {
-                    Ok(())
-                }
-            }
+            Ok(()) if due && current.sftp.support_fsync() => file
+                .sync_all()
+                .await
+                .map_err(|error| UksftaError::Input(format!("sftp: {error}"))),
             Ok(()) => Ok(()),
             Err(error) => Err(error),
         };
@@ -687,9 +759,10 @@ async fn open_session(
     settings: &Settings,
     temp: &str,
     password: Option<&Secret>,
-) -> Result<(NativeSession, File), UksftaError> {
+    handles: usize,
+) -> Result<(NativeSession, writer::RangeWriter), UksftaError> {
     let session = connect::connect_with(settings, password).await?;
-    let file = writer::open_range_writer(&session.sftp, temp).await?;
+    let file = writer::RangeWriter::open(&session.sftp, temp, handles).await?;
     Ok((session, file))
 }
 
@@ -828,6 +901,66 @@ mod backoff_tests {
             );
         }
         assert!(!is_fatal(&UksftaError::Io(std::io::Error::other("pipe"))));
+    }
+
+    #[test]
+    fn the_checkpoint_follows_the_prefix_not_the_ack_count() {
+        const CHUNK: u32 = 1024 * 1024;
+        const SIZE: u64 = 4 * 1024 * 1024;
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("cp.json");
+        let mut acks = Acks {
+            checkpoint: None,
+            path: path.clone(),
+            done: BTreeSet::new(),
+            last_saved: Instant::now(),
+            since_save: 0,
+            fsync_every: 1,
+        };
+
+        // An ack before the local identity lands writes nothing.
+        acks.ack(0, SIZE);
+        assert!(!path.exists(), "no checkpoint without the local identity");
+
+        let identity = checkpoint::LocalIdentity {
+            size: SIZE,
+            mtime: 0,
+            sha256: "a".repeat(64),
+        };
+        acks.attach(
+            checkpoint::fresh("/r/a.pbo", "/r/a.pbo.uksfta-part", CHUNK, &identity),
+            SIZE,
+        );
+        let saved = checkpoint::load(&path).expect("a checkpoint");
+        assert_eq!(saved.acked_prefix, u64::from(CHUNK), "range 0 is recorded");
+
+        // An ack that leaves a gap does not move the prefix, so nothing is
+        // written however many of them arrive.
+        acks.ack(3, SIZE);
+        acks.ack(2, SIZE);
+        assert_eq!(
+            checkpoint::load(&path).expect("a checkpoint").acked_prefix,
+            u64::from(CHUNK),
+            "a gap holds the prefix"
+        );
+
+        // The ack that closes the gap would advance the prefix, but the last
+        // save is under a second old, so it waits.
+        acks.ack(1, SIZE);
+        assert_eq!(
+            checkpoint::load(&path).expect("a checkpoint").acked_prefix,
+            u64::from(CHUNK),
+            "the save rate limits the checkpoint, not the ack rate"
+        );
+
+        // Once a second has passed the advance is written, and only then is
+        // the whole file claimed.
+        acks.last_saved = Instant::now() - Duration::from_secs(2);
+        acks.finish(BTreeSet::from([0, 1, 2, 3]), SIZE);
+        assert_eq!(
+            checkpoint::load(&path).expect("a checkpoint").acked_prefix,
+            SIZE
+        );
     }
 
     #[test]
