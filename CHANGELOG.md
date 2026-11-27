@@ -136,6 +136,10 @@ This project uses [Semantic Versioning](https://semver.org/).
   median on the local fixture, and the full 15.46 GB pack takes 184.8 s
   at 83.77 MB/s, from 210.7 s at 75.03 MB/s. The completion read-back
   reaches 114.83 MB/s on one stream, so it stays single-stream.
+- A whole-file upload hashes the local files on four threads while the
+  batch sends, so the summary digest no longer costs a second read of
+  the pack after the transfer. The digest column and the JSON `sha256`
+  field are unchanged.
 - The minimum supported Rust version is 1.89, for the native transport
   dependencies.
 

@@ -21,12 +21,13 @@ mod signature;
 mod summary;
 mod verify;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::error::UksftaError;
@@ -757,6 +758,63 @@ fn remote_name(remote: &str) -> &str {
     remote.rsplit('/').next().unwrap_or(remote)
 }
 
+/// The digest the summary shows for a file that cannot be read.
+const MISSING_HASH: &str = "-";
+
+/// The hashing threads: four at most, and never more than the machine has.
+fn hash_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |count| count.get())
+        .min(4)
+}
+
+/// A pool that hashes local files on several threads. The caller may join
+/// it whenever it wants the digests, so the hash can run beside the send.
+struct LocalHashes {
+    results: Arc<Mutex<HashMap<PathBuf, String>>>,
+    workers: Vec<JoinHandle<()>>,
+}
+
+impl LocalHashes {
+    /// Start `threads` workers over `paths`. A repeated path is hashed once
+    /// per queue entry, which is cheaper than a de-duplication pass.
+    fn start(paths: Vec<PathBuf>, threads: usize) -> Self {
+        let queue: Arc<Mutex<VecDeque<PathBuf>>> = Arc::new(Mutex::new(paths.into()));
+        let results: Arc<Mutex<HashMap<PathBuf, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let mut workers = Vec::new();
+        for _ in 0..threads.max(1) {
+            let queue = Arc::clone(&queue);
+            let results = Arc::clone(&results);
+            workers.push(std::thread::spawn(move || loop {
+                let next = {
+                    let mut queue = queue.lock().unwrap_or_else(|error| error.into_inner());
+                    queue.pop_front()
+                };
+                let Some(path) = next else { break };
+                let digest =
+                    crate::util::file_sha256_with_buffer(&path, crate::util::HASH_BUFFER_LARGE)
+                        .unwrap_or_else(|| MISSING_HASH.to_string());
+                let mut results = results.lock().unwrap_or_else(|error| error.into_inner());
+                results.insert(path, digest);
+            }));
+        }
+        Self { results, workers }
+    }
+
+    /// Wait for every worker and return the digests. A worker that panicked
+    /// leaves its paths out, so they fall back to `-`.
+    fn join(self) -> HashMap<PathBuf, String> {
+        for worker in self.workers {
+            let _ = worker.join();
+        }
+        let mut guard = self
+            .results
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::mem::take(&mut *guard)
+    }
+}
+
 /// Send the upload batch, re-verify, and send again only what is still
 /// missing or stale. The wait grows with the attempt number.
 fn upload_with_retries(
@@ -929,6 +987,14 @@ fn upload_loop(
 
     let limit = u16::from(retries) + 1;
     let mut attempted = false;
+    let mut sent_files: Vec<(UploadUnit, f64)> = Vec::new();
+    // The pool runs beside the batch. The send waits on the peer, so the
+    // local reads and hashes use time the transfer leaves idle.
+    let paths: Vec<PathBuf> = remaining_units(plan, &skip)
+        .into_iter()
+        .map(|unit| unit.local)
+        .collect();
+    let hashes = LocalHashes::start(paths, hash_threads());
     for attempt in 1..=limit {
         let batch = upload_batch(plan, &skip)?;
         if batch.is_empty() {
@@ -984,16 +1050,12 @@ fn upload_loop(
         } else {
             elapsed.as_secs_f64() / bytes as f64
         };
-        for unit in &units {
+        for unit in units {
             if left.contains(&unit.remote) {
                 continue;
             }
-            report.sent.push(summary::SentFile::whole(
-                &unit.local,
-                &unit.remote,
-                unit.size,
-                unit.size as f64 * share,
-            ));
+            let seconds = unit.size as f64 * share;
+            sent_files.push((unit, seconds));
         }
         say(
             report.json,
@@ -1012,6 +1074,24 @@ fn upload_loop(
     if attempted {
         say(report.json, "after upload:");
         write_report(plan, report.json);
+    }
+    // The rows are built once the batch has finished. The order is the
+    // order the attempts sent the files, so the table does not move.
+    let hashes = hashes.join();
+    for (unit, seconds) in sent_files {
+        // A path the pool did not reach, because a worker panicked or the
+        // file arrived on a later attempt, is hashed here instead.
+        let row = match hashes.get(&unit.local) {
+            Some(sha256) => summary::SentFile::whole_with_hash(
+                &unit.local,
+                &unit.remote,
+                unit.size,
+                seconds,
+                sha256.clone(),
+            ),
+            None => summary::SentFile::whole(&unit.local, &unit.remote, unit.size, seconds),
+        };
+        report.sent.push(row);
     }
     if !report.sent.is_empty() {
         let seconds = upload_started.elapsed().as_secs_f64();
@@ -1697,5 +1777,73 @@ mod tests {
 
         let choice = segment_target(&plan, &settings).expect("a target");
         assert_eq!(remote_name(&choice.unit.remote), "a.pbo");
+    }
+
+    #[test]
+    fn the_hash_pool_matches_a_direct_digest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths: Vec<PathBuf> = (0..3)
+            .map(|index| {
+                let path = dir.path().join(format!("{index}.pbo"));
+                fs::write(&path, vec![b'a' + index; 4096 + index as usize]).unwrap();
+                path
+            })
+            .collect();
+
+        let hashes = LocalHashes::start(paths.clone(), 3).join();
+
+        for path in &paths {
+            assert_eq!(
+                hashes.get(path),
+                crate::util::file_sha256(path).as_ref(),
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn the_hash_pool_marks_a_missing_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("gone.pbo");
+
+        let hashes = LocalHashes::start(vec![missing.clone()], 1).join();
+
+        assert_eq!(hashes.get(&missing).map(String::as_str), Some(MISSING_HASH));
+    }
+
+    #[test]
+    fn a_pooled_digest_reaches_the_table_and_the_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("pooled.pbo");
+        fs::write(&path, b"pooled digest").unwrap();
+        let remote = "/srv/@1/addons/pooled.pbo".to_string();
+        let digest = LocalHashes::start(vec![path.clone()], 1)
+            .join()
+            .remove(&path)
+            .expect("a digest");
+        assert_eq!(digest.len(), 64);
+
+        let row = summary::SentFile::whole_with_hash(&path, &remote, 13, 1.0, digest.clone());
+        let lines = summary::render(std::slice::from_ref(&row), 1.0);
+        assert!(lines[2].contains(&digest), "{}", lines[2]);
+
+        let settings = segmented(1, Some(4 * 1024 * 1024));
+        let report = JsonReport::new(
+            Some(&settings),
+            Some(("3662499431".to_string(), "Pack".to_string())),
+            Some(&plan_with(Vec::new())),
+            TimingsJson::default(),
+            None,
+            None,
+            None,
+            None,
+            &[row],
+            &Ok(()),
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        let uploads = json["uploads"].as_array().expect("the uploads array");
+        let sha256 = uploads[0]["sha256"].as_str().expect("the sha256 field");
+        assert_eq!(sha256, digest, "{json}");
     }
 }

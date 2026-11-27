@@ -37,12 +37,25 @@ impl SentFile {
     /// The row for a whole file. A generated file can be planned with a size
     /// of 0, so the local file's real size wins when the plan has none.
     pub fn whole(local: &Path, remote: &str, planned: u64, seconds: f64) -> Self {
+        let sha256 = crate::util::file_sha256_with_buffer(local, crate::util::HASH_BUFFER_LARGE)
+            .unwrap_or_else(|| "-".to_string());
+        Self::whole_with_hash(local, remote, planned, seconds, sha256)
+    }
+
+    /// The row for a whole file whose local digest another thread already
+    /// computed. `sha256` is `-` when the file could not be read.
+    pub fn whole_with_hash(
+        local: &Path,
+        remote: &str,
+        planned: u64,
+        seconds: f64,
+        sha256: String,
+    ) -> Self {
         let bytes = if planned == 0 {
             std::fs::metadata(local).map_or(planned, |meta| meta.len())
         } else {
             planned
         };
-        let sha256 = crate::util::file_sha256(local).unwrap_or_else(|| "-".to_string());
         Self::new(
             remote.rsplit('/').next().unwrap_or(remote).to_string(),
             remote.to_string(),
