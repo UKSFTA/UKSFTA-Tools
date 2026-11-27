@@ -36,5 +36,6 @@ sftp-live = []
 
 [dev-dependencies]
 assert_cmd = "2"
+static_assertions = "1"
 predicates = "3"
 tempfile = "3"

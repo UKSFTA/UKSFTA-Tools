@@ -7,12 +7,8 @@ use crate::error::UksftaError;
 /// A password read from the controlling terminal.
 ///
 /// It implements no `Debug`, `Display`, `Clone` or `Serialize`, so a log
-/// line, a format string or a JSON report cannot carry it.
-///
-/// ```compile_fail
-/// let secret = uksfta::server::native::secret::Secret(String::new());
-/// println!("{secret}");
-/// ```
+/// line, a format string or a JSON report cannot carry it. The test module
+/// proves that with a static assertion.
 pub struct Secret(String);
 
 impl Secret {
@@ -96,73 +92,11 @@ mod tests {
         }
     }
 
-    /// Compile one snippet against a copy of this file, so the proof uses
-    /// the real type and the real crate dependency.
-    fn compile(body: &str) -> std::process::Output {
-        let dir = tempfile::TempDir::new().expect("a temp dir");
-        let original = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/server/native/secret.rs"
-        ))
-        .expect("read secret.rs");
-        let stripped: String = original
-            .lines()
-            .filter(|line| !line.starts_with("//!"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let module = dir.path().join("secret_copy.rs");
-        std::fs::write(&module, stripped).expect("write the module copy");
-
-        let exe = std::env::current_exe().expect("the test binary");
-        let deps = exe.parent().expect("the deps directory").to_path_buf();
-        let rpassword = std::fs::read_dir(&deps)
-            .expect("list the deps directory")
-            .flatten()
-            .map(|entry| entry.path())
-            .find(|path| {
-                path.extension().is_some_and(|ext| ext == "rlib")
-                    && path
-                        .file_name()
-                        .is_some_and(|name| name.to_string_lossy().starts_with("librpassword-"))
-            })
-            .expect("the rpassword rlib");
-
-        let source = dir.path().join("check.rs");
-        let text = format!(
-            "include!({:?});\nmod error {{ pub enum UksftaError {{ Input(String) }} }}\nfn main() {{\n{body}\n}}\n",
-            module
-        );
-        std::fs::write(&source, text).expect("write the snippet");
-
-        std::process::Command::new("rustc")
-            .args(["--edition", "2021", "--crate-type", "bin", "-L"])
-            .arg(format!("dependency={}", deps.display()))
-            .arg("--extern")
-            .arg(format!("rpassword={}", rpassword.display()))
-            .arg("-o")
-            .arg(dir.path().join("check"))
-            .arg(&source)
-            .output()
-            .expect("rustc")
-    }
-
-    #[test]
-    fn the_snippet_compiles_without_a_format_call() {
-        let output = compile("let secret = Secret(String::new());\nlet _ = secret.expose();");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[test]
-    fn a_secret_cannot_be_formatted() {
-        let output = compile("let secret = Secret(String::new());\nlet _ = format!(\"{secret}\");");
-        assert!(!output.status.success(), "the format call must not compile");
-        let text = String::from_utf8_lossy(&output.stderr);
-        assert!(text.contains("Display"), "{text}");
-    }
+    // The proof: the type cannot leave through a formatter, a clone or a
+    // serialised report.
+    static_assertions::assert_not_impl_any!(
+        Secret: std::fmt::Display, std::fmt::Debug, Clone, serde::Serialize
+    );
 
     #[test]
     fn a_short_or_missing_reader_is_reported() {

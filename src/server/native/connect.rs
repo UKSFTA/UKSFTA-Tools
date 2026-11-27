@@ -459,6 +459,7 @@ async fn authenticate(
     )))
 }
 
+#[cfg(unix)]
 async fn agent_authenticate(
     handle: &mut Handle<Handler>,
     user: &str,
