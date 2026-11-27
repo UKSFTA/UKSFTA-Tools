@@ -39,15 +39,21 @@ pub struct SyncPlan {
 }
 
 /// Classify a mod against the lock: added, updated, or unchanged.
+///
+/// The timestamp is tested first: a mod the Workshop has updated is
+/// "updated" whatever the locked files hold, so a stale lock never pays
+/// for a stat of every file in the pack.
 pub(crate) fn classify_status(lock: &LockFile, id: &str, updated: &str) -> &'static str {
     match lock.mods.get(id) {
         None => "added",
         Some(locked) => {
-            let files_exist = locked.files.iter().all(|f| Path::new(f).exists());
-            if locked.updated != updated || !files_exist {
-                "updated"
-            } else {
+            if locked.updated != updated {
+                return "updated";
+            }
+            if locked.files.iter().all(|f| Path::new(f).exists()) {
                 "unchanged"
+            } else {
+                "updated"
             }
         }
     }

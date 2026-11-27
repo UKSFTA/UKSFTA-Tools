@@ -11,7 +11,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::plan::is_placeholder;
-use crate::pbo::{pbo_config_facts, pbo_fingerprint, pbo_prefix, PboConfigFacts};
+use crate::pbo::{pbo_fingerprint, pbo_prefix, PboConfigFacts, PboContent};
 
 /// Evidence strength, strongest first. The declaration order is the
 /// sort key, so no weight table can drift from the documented order.
@@ -55,12 +55,16 @@ pub(crate) struct IdentityEvidence {
 
 /// Read one PBO and derive its ordered phrases.
 pub(crate) fn extract_identity(path: &Path) -> IdentityEvidence {
-    let pbo = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    extract_identity_from(&PboContent::read(path))
+}
+
+/// Derive the ordered phrases from a PBO already read. The online path
+/// passes the same read to the evidence harvester.
+pub(crate) fn extract_identity_from(content: &PboContent) -> IdentityEvidence {
+    let path = content.path.as_path();
+    let pbo = content.name.clone();
     let prefix = pbo_prefix(path);
-    let facts = pbo_config_facts(path);
+    let facts = content.config_facts();
     let phrases = identity_phrases(&pbo, prefix.as_deref(), &facts);
     let stem = Path::new(&pbo)
         .file_stem()

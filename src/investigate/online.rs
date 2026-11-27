@@ -8,15 +8,15 @@
 //! Every resolution is written to the identity store, so `--report`
 //! prints the same lines offline from the same decisions.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::bikey::scan_bikey_names;
-use super::evidence::build_evidence_pool;
+use super::evidence::{pool_files, PoolBuilder};
 use super::http::{LiveHttp, RateLimiter};
-use super::identity::extract_identity;
+use super::identity::{extract_identity, extract_identity_from, IdentityEvidence};
 use super::plan::build_corpus_stats_many;
 use super::render::{render_all, render_progress, render_summary, summary_of};
 use super::resolve::{resolve_all, split_fresh, PboResolution, Progress, ResolveContext, SeenItem};
@@ -30,7 +30,7 @@ use crate::origin::{
     build_mod_dirs, build_pbo_index, resolve_pbo_from_index, self_workshop_id, ModDir,
     ResolvedOrigin,
 };
-use crate::pbo::{get_mod_metadata, pbo_fingerprint, pbo_prefix};
+use crate::pbo::{get_mod_metadata, pbo_fingerprint, pbo_prefix, PboContent};
 use crate::steam::find_all_workshop_caches;
 use crate::util::{find_pbos, paint, stdout_is_tty, workshop_url, C_GREEN, C_RED};
 
@@ -251,10 +251,27 @@ fn resolve_identities(
         }
     }
     let corpus = build_corpus_stats_many(&corpus_dirs.into_iter().collect::<Vec<_>>());
-    let pool = build_evidence_pool(addons_dir);
+
+    // One read per PBO serves both the evidence pool and the identity
+    // extractor. The read is released before the next PBO, so a large
+    // pack is never held in memory at once.
+    let examined: HashSet<&Path> = pbos.iter().map(|(_, path)| path.as_path()).collect();
+    let mut evidence_by_path: HashMap<PathBuf, IdentityEvidence> = HashMap::new();
+    let mut builder = PoolBuilder::new();
+    for path in pool_files(addons_dir) {
+        let content = PboContent::read(&path);
+        builder.add(&content);
+        if examined.contains(path.as_path()) {
+            evidence_by_path.insert(path.clone(), extract_identity_from(&content));
+        }
+    }
+    let pool = builder.finish();
     let evidence: Vec<_> = pbos
         .iter()
-        .map(|(_, path)| extract_identity(path))
+        .map(|(_, path)| match evidence_by_path.remove(path) {
+            Some(evidence) => evidence,
+            None => extract_identity(path),
+        })
         .collect();
 
     let store = load_store(&store_path());

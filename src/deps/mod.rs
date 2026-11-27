@@ -12,7 +12,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::error::UksftaError;
-use crate::pbo::{config_list, pbo_config_facts, pbo_entries, PBO_CPRS_MIME};
+use crate::pbo::{config_list, pbo_closure_facts, pbo_entries, PBO_CPRS_MIME};
 
 /// The hand-maintained list of addon classes the pack needs but does
 /// not provide, usually base-game and DLC addons.
@@ -138,7 +138,7 @@ pub fn analyse(
 
     for path in pbo_paths(&addons) {
         let from = file_name(&path);
-        let facts = pbo_config_facts(&path);
+        let facts = pbo_closure_facts(&path);
         for class in facts.cfgpatches_classes {
             provided.insert(class.to_ascii_lowercase());
         }
