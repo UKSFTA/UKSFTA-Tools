@@ -411,6 +411,20 @@ impl UploadProgress {
             .position(|row| row.remote == remote)
     }
 
+    /// Hide the view while a password prompt owns the terminal.
+    pub fn hide(&self) {
+        if let Some(multi) = &self.multi {
+            multi.set_draw_target(ProgressDrawTarget::hidden());
+        }
+    }
+
+    /// Show the view again after the prompt.
+    pub fn show(&self) {
+        if let Some(multi) = &self.multi {
+            multi.set_draw_target(ProgressDrawTarget::stderr());
+        }
+    }
+
     /// Mark one file as sending.
     pub fn file_started(&self, remote: &str) {
         let Some(index) = self.index(remote) else {
