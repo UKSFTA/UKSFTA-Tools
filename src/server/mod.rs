@@ -1006,6 +1006,10 @@ fn upload_loop(
                         peak: run.peak,
                     });
                     skip.insert(choice.unit.remote.clone());
+                    // The file is on the server. Record it now, because the
+                    // batch below may have nothing else to send and would
+                    // otherwise leave its finding and its count behind.
+                    plan.mark_uploaded(&HashSet::from([choice.unit.remote.clone()]));
                 }
                 Err(UksftaError::Locked(message)) => {
                     return Err(UksftaError::Locked(message));
@@ -1024,7 +1028,8 @@ fn upload_loop(
     }
 
     let limit = u16::from(retries) + 1;
-    let mut attempted = false;
+    // A published segment is a completed attempt even when the batch is empty.
+    let mut attempted = !skip.is_empty();
     let mut sent_files: Vec<(UploadUnit, f64)> = Vec::new();
     // The pool hashes beside the batch. It starts when the first file
     // completes, so a fast link is not waiting on four threads of disk.
