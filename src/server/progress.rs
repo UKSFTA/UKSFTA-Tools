@@ -680,12 +680,16 @@ fn emit(event: &impl Serialize) {
     }
 }
 
-/// Add bytes to a counter and stop at the maximum.
+/// Add bytes to a counter and stop at the maximum. A compare-exchange loop
+/// keeps the MSRV, because `fetch_update` is deprecated in newer compilers.
 fn add(counter: &AtomicU64, bytes: u64) -> u64 {
-    match counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_add(bytes))
-    }) {
-        Ok(previous) | Err(previous) => previous.saturating_add(bytes),
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let next = current.saturating_add(bytes);
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(previous) => return previous.saturating_add(bytes),
+            Err(actual) => current = actual,
+        }
     }
 }
 
