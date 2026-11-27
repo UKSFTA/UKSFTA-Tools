@@ -245,6 +245,100 @@ pub fn pieces(chunk: &Chunk, count: usize, buffer: u32) -> Vec<Chunk> {
     out
 }
 
+/// The local file one piece reads from, with a buffer it reuses for every
+/// piece it sends. A reader lives as long as a worker, so a range costs a
+/// seek and reads, not an open and an allocation.
+pub struct LocalReader {
+    path: PathBuf,
+    file: tokio::fs::File,
+    buffer: Vec<u8>,
+}
+
+impl LocalReader {
+    /// Open the local file once and size its read buffer.
+    ///
+    /// # Errors
+    /// Returns `Input` when the file cannot be opened.
+    pub async fn open(path: &Path, buffer: u32) -> Result<Self, UksftaError> {
+        let file = tokio::fs::File::open(path).await.map_err(|error| {
+            UksftaError::Input(format!("cannot read {}: {error}", path.display()))
+        })?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            file,
+            buffer: vec![0u8; usize::try_from(buffer.max(4096)).unwrap_or(4096)],
+        })
+    }
+
+    /// Move to the start of a range.
+    ///
+    /// # Errors
+    /// Returns `Input` when the seek fails.
+    pub async fn seek_to(&mut self, offset: u64) -> Result<(), UksftaError> {
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .await
+            .map(drop)
+            .map_err(|error| {
+                UksftaError::Input(format!("cannot seek {}: {error}", self.path.display()))
+            })
+    }
+
+    /// Read the next block into the buffer and count the bytes.
+    ///
+    /// # Errors
+    /// Returns `Input` when the read fails or the file ended early.
+    pub async fn fill(&mut self, remaining: u64) -> Result<usize, UksftaError> {
+        let want =
+            usize::try_from(remaining.min(self.buffer.len() as u64)).unwrap_or(self.buffer.len());
+        let read = self
+            .file
+            .read(&mut self.buffer[..want])
+            .await
+            .map_err(|error| {
+                UksftaError::Input(format!("cannot read {}: {error}", self.path.display()))
+            })?;
+        if read == 0 {
+            return Err(UksftaError::Input(format!(
+                "the local file ended early: {}",
+                self.path.display()
+            )));
+        }
+        Ok(read)
+    }
+
+    /// The bytes the last [`LocalReader::fill`] read.
+    pub fn bytes(&self) -> &[u8] {
+        &self.buffer
+    }
+}
+
+/// The readers of one writer: one for each pipelined handle, because the
+/// pieces of a range are read from different offsets at the same time.
+pub struct LocalReaders {
+    slots: Vec<LocalReader>,
+}
+
+impl LocalReaders {
+    /// Open one reader for each handle.
+    ///
+    /// # Errors
+    /// Returns `Input` when the local file cannot be opened.
+    pub async fn open(path: &Path, buffer: u32, slots: usize) -> Result<Self, UksftaError> {
+        let mut readers = Vec::with_capacity(slots.max(1));
+        for _ in 0..slots.max(1) {
+            readers.push(LocalReader::open(path, buffer).await?);
+        }
+        Ok(Self { slots: readers })
+    }
+
+    /// The number of readers.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+}
+
 /// The write handles of one connection.
 ///
 /// The handles share one server file handle and keep a separate offset each,
@@ -266,6 +360,7 @@ impl RangeWriter {
     }
 
     /// Wrap one handle that is already open.
+    #[cfg(test)]
     pub fn from_handle(file: File) -> Self {
         Self {
             handles: vec![file],
@@ -282,24 +377,33 @@ impl RangeWriter {
     ///
     /// # Errors
     /// Returns `Input` when the local file ends early, the server accepts no
-    /// bytes, or either side reports an error. A failed range is sent again
-    /// whole, so a partly written range is safe to retry.
+    /// bytes, a handle has no reader, or either side reports an error. A
+    /// failed range is sent again whole, so a partly written range is safe to
+    /// retry.
     pub async fn write(
         &mut self,
         chunk: &Chunk,
-        local: &Path,
+        readers: &mut LocalReaders,
         buffer: u32,
         limiter: Option<&super::super::limit::RateLimiter>,
         progress: &mut (dyn FnMut(u64) + Send),
     ) -> Result<(), UksftaError> {
         let split = pieces(chunk, self.handles.len(), buffer);
+        if readers.slots.len() < split.len() {
+            return Err(UksftaError::Input(format!(
+                "the writer holds {} piece(s) but its readers number {}",
+                split.len(),
+                readers.slots.len()
+            )));
+        }
         let progress = std::sync::Mutex::new(progress);
 
         let futures = self
             .handles
             .iter_mut()
+            .zip(readers.slots.iter_mut())
             .zip(&split)
-            .map(|(file, piece)| write_piece(file, piece, local, buffer, limiter, &progress))
+            .map(|((file, reader), piece)| write_piece(file, piece, reader, limiter, &progress))
             .collect::<Vec<_>>();
 
         for result in super::fanout::all(futures).await {
@@ -336,43 +440,25 @@ impl RangeWriter {
 async fn write_piece(
     file: &mut File,
     piece: &Chunk,
-    local: &Path,
-    buffer: u32,
+    reader: &mut LocalReader,
     limiter: Option<&super::super::limit::RateLimiter>,
     progress: &std::sync::Mutex<&mut (dyn FnMut(u64) + Send)>,
 ) -> Result<(), UksftaError> {
     file.seek(SeekFrom::Start(piece.start))
         .await
         .map_err(UksftaError::Io)?;
-
-    let mut source = tokio::fs::File::open(local)
-        .await
-        .map_err(|error| UksftaError::Input(format!("cannot read {}: {error}", local.display())))?;
-    source
-        .seek(SeekFrom::Start(piece.start))
-        .await
-        .map_err(|error| UksftaError::Input(format!("cannot seek {}: {error}", local.display())))?;
+    reader.seek_to(piece.start).await?;
 
     let mut remaining = u64::from(piece.len);
-    let mut buffer = vec![0u8; usize::try_from(buffer.max(4096)).unwrap_or(4096)];
     while remaining > 0 {
-        let want = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
-        let read = source.read(&mut buffer[..want]).await.map_err(|error| {
-            UksftaError::Input(format!("cannot read {}: {error}", local.display()))
-        })?;
-        if read == 0 {
-            return Err(UksftaError::Input(format!(
-                "the local file ended early: {}",
-                local.display()
-            )));
-        }
+        let read = reader.fill(remaining).await?;
         if let Some(limiter) = limiter {
             limiter.wait(read as u64).await;
         }
         let mut written = 0;
         while written < read {
             let count = file
-                .write(&buffer[written..read])
+                .write(&reader.bytes()[written..read])
                 .await
                 .map_err(sftp_error)?;
             if count == 0 {
@@ -652,5 +738,50 @@ mod tests {
         assert_eq!(pipeline_depth(4), 4);
         assert_eq!(pipeline_depth(64), PIPELINE_MAX);
         assert_eq!(pipeline_depth(256), PIPELINE_MAX);
+    }
+
+    /// One reader serves every piece: the buffer and its address do not change.
+    #[tokio::test]
+    async fn the_reader_reuses_one_buffer_for_every_piece() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("source.bin");
+        let data: Vec<u8> = (0..8192u32).map(|value| (value % 251) as u8).collect();
+        fs::write(&path, &data).unwrap();
+
+        let mut reader = LocalReader::open(&path, 4096).await.unwrap();
+        let address = reader.bytes().as_ptr();
+        reader.seek_to(0).await.unwrap();
+        assert_eq!(reader.fill(4096).await.unwrap(), 4096);
+        assert_eq!(reader.bytes(), &data[..4096]);
+        reader.seek_to(4096).await.unwrap();
+        assert_eq!(reader.fill(4096).await.unwrap(), 4096);
+        assert_eq!(reader.bytes(), &data[4096..]);
+        assert_eq!(
+            reader.bytes().as_ptr(),
+            address,
+            "the second piece reused the buffer"
+        );
+    }
+
+    /// One reader per handle, so the pieces of a range read in parallel.
+    #[tokio::test]
+    async fn the_readers_number_one_per_handle() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("source.bin");
+        fs::write(&path, [7u8; 4096]).unwrap();
+        let readers = LocalReaders::open(&path, 4096, 4).await.unwrap();
+        assert_eq!(readers.len(), 4);
+        assert_eq!(LocalReaders::open(&path, 4096, 0).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_short_reader_names_the_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("short.bin");
+        fs::write(&path, [0u8; 16]).unwrap();
+        let mut reader = LocalReader::open(&path, 4096).await.unwrap();
+        assert_eq!(reader.fill(64).await.expect("the short read"), 16);
+        let error = reader.fill(48).await.expect_err("the file ended");
+        assert!(error.to_string().contains("short.bin"), "{error}");
     }
 }
