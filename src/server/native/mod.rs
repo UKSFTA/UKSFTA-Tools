@@ -5,7 +5,6 @@
 pub mod checkpoint;
 pub mod connect;
 pub mod known_hosts;
-pub mod progress;
 pub mod publish;
 pub mod schedule;
 pub mod secret;
@@ -21,16 +20,19 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use indicatif::ProgressBar;
 use openssh_sftp_client::file::File;
 use openssh_sftp_client::Sftp;
 use tokio::task::JoinSet;
 
 use self::checkpoint::{Checkpoint, LocalIdentity, Start};
 use self::connect::NativeSession;
-use self::progress::SegmentedProgress;
 use self::schedule::Scheduler;
 use self::secret::Secret;
 use self::segment::{Chunk, SegmentPlan};
+use super::progress::{
+    clear_bars, range_advanced, range_finished, range_retried, range_started, SegmentedTrace,
+};
 use crate::error::UksftaError;
 use crate::server::config::Settings;
 use crate::server::report::UploadUnit;
@@ -52,7 +54,7 @@ pub fn run(
     state_root: &Path,
     pack_id: &str,
     unit: &UploadUnit,
-    show_progress: bool,
+    trace: Option<SegmentedTrace>,
     password_prompt: bool,
 ) -> Result<String, UksftaError> {
     let connections = settings.segment.connections.max(1);
@@ -63,15 +65,7 @@ pub fn run(
         .build()
         .map_err(UksftaError::Io)?;
     runtime.block_on(async {
-        transfer(
-            settings,
-            state_root,
-            pack_id,
-            unit,
-            show_progress,
-            password_prompt,
-        )
-        .await
+        transfer(settings, state_root, pack_id, unit, trace, password_prompt).await
     })
 }
 
@@ -80,7 +74,7 @@ async fn transfer(
     state_root: &Path,
     pack_id: &str,
     unit: &UploadUnit,
-    show_progress: bool,
+    trace: Option<SegmentedTrace>,
     password_prompt: bool,
 ) -> Result<String, UksftaError> {
     let plan = SegmentPlan::new(
@@ -131,7 +125,7 @@ async fn transfer(
         run_id: &run_id,
         from,
         buffer,
-        show_progress,
+        trace,
         state_root,
         pack_id,
         identity: &identity,
@@ -150,7 +144,7 @@ struct Job<'a> {
     run_id: &'a str,
     from: u64,
     buffer: u32,
-    show_progress: bool,
+    trace: Option<SegmentedTrace>,
     state_root: &'a Path,
     pack_id: &'a str,
     identity: &'a LocalIdentity,
@@ -261,11 +255,11 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
     }
 
     let scheduler = Arc::new(Mutex::new(Scheduler::new(&pending)));
-    let progress = SegmentedProgress::new(
-        job.unit.size,
-        usize::from(job.settings.segment.connections),
-        job.show_progress,
-    );
+    let bars: Vec<ProgressBar> = job.trace.as_ref().map_or_else(Vec::new, |trace| {
+        trace
+            .progress
+            .connection_bars(&trace.remote, usize::from(job.settings.segment.connections))
+    });
 
     let mut tasks = JoinSet::new();
     for worker in 0..usize::from(job.settings.segment.connections.max(1)) {
@@ -273,15 +267,25 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
         let password = job.password.cloned();
         let scheduler = Arc::clone(&scheduler);
         let acks = Arc::clone(&acks);
-        let progress = Arc::clone(&progress);
+        let trace = job.trace.clone();
+        let bars = bars.clone();
         let temp = job.temp.to_string();
         let local = job.unit.local.clone();
         let buffer = job.buffer;
         let size = job.unit.size;
         tasks.spawn(async move {
             run_worker(
-                &settings, &local, &temp, buffer, size, worker, password, &scheduler, &acks,
-                &progress,
+                &settings,
+                &local,
+                &temp,
+                buffer,
+                size,
+                worker,
+                password,
+                &scheduler,
+                &acks,
+                &bars,
+                trace.as_ref(),
             )
             .await
         });
@@ -305,7 +309,7 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
             }
         }
     }
-    progress.finish();
+    clear_bars(&bars);
 
     if let Some(error) = failure {
         return Err(error);
@@ -349,7 +353,8 @@ async fn run_worker(
     password: Option<Arc<Secret>>,
     scheduler: &Arc<Mutex<Scheduler>>,
     acks: &Arc<Mutex<Acks>>,
-    progress: &Arc<SegmentedProgress>,
+    bars: &[ProgressBar],
+    trace: Option<&SegmentedTrace>,
 ) -> Result<(), UksftaError> {
     let reconnects = settings.segment.reconnects;
     let mut attempts: u8 = 0;
@@ -380,8 +385,13 @@ async fn run_worker(
         let (current, file) = session
             .as_mut()
             .ok_or_else(|| UksftaError::Input("a segmented worker lost its handle".to_string()))?;
-        let mut advance = |bytes: u64| progress.advance(worker, bytes);
-        progress.start_range(worker, &chunk);
+        let mut advance = |bytes: u64| {
+            range_advanced(bars, worker, bytes);
+            if let Some(trace) = trace {
+                trace.progress.advance(&trace.remote, bytes);
+            }
+        };
+        range_started(bars, worker, chunk.index, chunk.len);
         let written = writer::write_range(file, &chunk, local, buffer, &mut advance).await;
         let synced = match written {
             Ok(()) if current.sftp.support_fsync() => file
@@ -394,7 +404,7 @@ async fn run_worker(
 
         match synced {
             Ok(()) => {
-                progress.finish_range(worker);
+                range_finished(bars, worker);
                 complete(scheduler, chunk.index)?;
                 let mut guard = acks.lock().map_err(|_| {
                     UksftaError::Input("the checkpoint lock is poisoned".to_string())
@@ -402,12 +412,12 @@ async fn run_worker(
                 guard.ack(chunk.index, size);
             }
             Err(error) if is_fatal(&error) => {
-                progress.reset_range(worker);
+                range_retried(bars, worker);
                 fail(scheduler, chunk.index)?;
                 return Err(error);
             }
             Err(_) => {
-                progress.reset_range(worker);
+                range_retried(bars, worker);
                 fail(scheduler, chunk.index)?;
                 session = None;
                 attempts += 1;

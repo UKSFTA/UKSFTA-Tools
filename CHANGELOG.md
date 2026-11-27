@@ -9,6 +9,13 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- One whole-upload progress view: a total bar, one row per planned file
+  with `waiting`, `uploading` and `done`, and the segmented file's
+  connection rows beneath its own row. A redirect gets one plain line
+  every five seconds, and `--progress-json` writes one JSON object per
+  line on standard error. A segmented fallback now prints
+  `segment: not used: <kind>: <message>; using the whole-file path`.
+
 - `uksfta server --json` writes one machine-readable object to standard
   output, with the plan, counts, timings and a result. `--doctor` is a
   read-only preflight of the connection, the pack folder and free space.

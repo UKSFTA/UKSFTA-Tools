@@ -813,13 +813,15 @@ stream gave 1.70 to 1.81 MB/s. Use more jobs only on a link with a high
 latency. Each attempt puts the files that are still missing or stale
 again, and the files are balanced across the workers by size.
 
-An interactive upload shows the client's own meter for each file, with
-the percentage, the bytes, the rate and the time left. The meter is on
-by default when the output is a terminal and `--jobs` is 1. Use
-`--no-progress` to hide it. Use `--progress` to choose the meter path
-when the output is redirected. A parallel upload runs without the meter,
-because concurrent meters overwrite each other. The verify phases use
-`LogLevel=ERROR`, so their output stays parseable.
+An interactive upload shows one total bar, one row per planned file, and
+the per-connection rows that the segmented file expands into. The rows
+read `waiting`, `uploading` and `done`. The view is on by default when
+the output is a terminal and `--jobs` is 1. Use `--no-progress` to hide
+it. Use `--progress` when the output is redirected: it prints one plain
+line every five seconds, with no escape codes. Use `--progress-json` to
+write one JSON object per line on standard error, so standard output
+stays clean for `--json`. The verify phases use `LogLevel=ERROR`, so
+their output stays parseable.
 
 An interrupted whole-file upload restarts the file from byte zero. The
 system `sftp` path never resumes part of a file. In testing, `reput`

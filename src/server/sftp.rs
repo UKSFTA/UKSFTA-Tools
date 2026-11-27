@@ -154,34 +154,6 @@ impl Sftp {
         }
         Ok(stdout)
     }
-
-    /// Send one phase with the client's meter attached to this terminal.
-    /// The output is not captured, so the meter needs a real terminal.
-    ///
-    /// # Errors
-    /// Returns `Input` when the client cannot start, cannot take the
-    /// commands, or exits non-zero.
-    pub fn batch_progress(&self, lines: &[String]) -> Result<(), UksftaError> {
-        if lines.is_empty() {
-            return Ok(());
-        }
-
-        let mut command = self.command();
-        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-        let mut child = self.spawn(command)?;
-        self.send(&mut child, lines)?;
-        let status = child
-            .wait()
-            .map_err(|e| UksftaError::Input(format!("cannot wait for {}: {e}", self.binary)))?;
-        if !status.success() {
-            let detail = status.code().map_or_else(
-                || "terminated by a signal".to_string(),
-                |code| format!("exit {code}"),
-            );
-            return Err(UksftaError::Input(format!("sftp failed: {detail}")));
-        }
-        Ok(())
-    }
 }
 
 /// The last non-empty line of client output, stripped of terminal escapes.
