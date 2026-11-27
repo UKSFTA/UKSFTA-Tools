@@ -1,7 +1,7 @@
 //! Open the SFTP subsystem with russh, then authenticate with a key file
 //! and the SSH agent. There is no password or keyboard-interactive path.
 
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -316,10 +316,14 @@ pub async fn connect_with(
     let stream = channel.into_stream();
     let (reader, writer) = tokio::io::split(stream);
     let requests = NonZeroU16::new(settings.transfer.requests).unwrap_or(NonZeroU16::MIN);
+    let requests_buffer =
+        NonZeroUsize::new(usize::from(requests.get())).unwrap_or(NonZeroUsize::MIN);
     let sftp = Sftp::new(
         writer,
         reader,
-        SftpOptions::default().max_pending_requests(requests),
+        SftpOptions::default()
+            .max_pending_requests(requests)
+            .requests_buffer_size(requests_buffer),
     )
     .await
     .map_err(|error| UksftaError::Input(format!("cannot start the sftp client: {error}")))?;
@@ -331,12 +335,21 @@ pub async fn connect_with(
     })
 }
 
+/// The receive window. A large window keeps many 261120-byte writes in
+/// flight without a round trip per packet.
+const WINDOW_SIZE: u32 = 16 * 1024 * 1024;
+/// The largest SSH packet the client accepts. It matches the native write
+/// block.
+const MAXIMUM_PACKET_SIZE: u32 = 261_120;
+
 fn client_config() -> Config {
     Config {
         keepalive_interval: Some(Duration::from_secs(15)),
         keepalive_max: 3,
         inactivity_timeout: Some(Duration::from_secs(30)),
         nodelay: true,
+        window_size: WINDOW_SIZE,
+        maximum_packet_size: MAXIMUM_PACKET_SIZE,
         ..Config::default()
     }
 }
@@ -634,6 +647,8 @@ mod tests {
         assert_eq!(config.keepalive_interval, Some(Duration::from_secs(15)));
         assert_eq!(config.keepalive_max, 3);
         assert_eq!(config.inactivity_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(config.window_size, WINDOW_SIZE);
+        assert_eq!(config.maximum_packet_size, MAXIMUM_PACKET_SIZE);
     }
 }
 
