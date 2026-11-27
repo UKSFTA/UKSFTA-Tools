@@ -14,6 +14,18 @@ use crate::server::report::UploadUnit;
 /// host key. Regenerate it with `ssh-keygen -H` if the fixture key changes.
 const HASHED_2222: &str = "|1|wavKFbDi2nh5VKKyOlZEc2kkhqE=|ZilRQJZjyh+j1aDXMMVz/ovQK6w=";
 
+/// The live tests share one server, and the kill cases stop every session,
+/// so only one may run at a time.
+static LIVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn live_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    LIVE_LOCK.blocking_lock()
+}
+
+async fn live_lock_async() -> tokio::sync::MutexGuard<'static, ()> {
+    LIVE_LOCK.lock().await
+}
+
 fn live() -> bool {
     if std::env::var("UKSFTA_SFTP_LIVE").ok().as_deref() != Some("1") {
         eprintln!("skipped: set UKSFTA_SFTP_LIVE=1 and start the fixture");
@@ -83,6 +95,7 @@ async fn a_key_file_connects_and_lists_the_root() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     let (_dir, pinned) = pin(port());
     let settings = settings(pinned, Some(client_key()), port());
 
@@ -101,6 +114,7 @@ async fn an_agent_identity_connects_when_one_is_available() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     if std::env::var_os("SSH_AUTH_SOCK").is_none() {
         eprintln!("skipped: SSH_AUTH_SOCK is not set");
         return;
@@ -118,6 +132,7 @@ async fn an_unknown_host_is_refused() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     let (_dir, pinned) = known_hosts("");
     let settings = settings(pinned, Some(client_key()), port());
 
@@ -133,6 +148,7 @@ async fn a_changed_host_key_is_refused() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     let client = std::fs::read_to_string(client_key().with_extension("pub"))
         .expect("read the client public key");
     let (_dir, pinned) = known_hosts(&format!("[{}]:{} {}\n", host(), port(), client.trim()));
@@ -148,6 +164,7 @@ async fn a_hashed_host_entry_is_accepted() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     let (_dir, pinned) = known_hosts(&format!("{HASHED_2222} {}\n", host_key()));
     let settings = settings(pinned, Some(client_key()), 2222);
 
@@ -162,6 +179,7 @@ async fn a_revoked_entry_is_refused() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     let (_dir, pinned) = known_hosts(&format!(
         "@revoked [{}]:{} {}\n",
         host(),
@@ -180,6 +198,7 @@ async fn a_certificate_authority_line_is_refused() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     let (_dir, pinned) = known_hosts(&format!(
         "@cert-authority [{}]:{} {}\n",
         host(),
@@ -198,6 +217,7 @@ async fn a_non_default_port_entry_is_accepted() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     let (_dir, pinned) = pin(2223);
     let settings = settings(pinned, Some(client_key()), 2223);
 
@@ -212,6 +232,7 @@ async fn no_identity_names_the_two_supported_methods() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     let (_dir, pinned) = pin(port());
     let settings = settings(pinned, None, port());
 
@@ -296,6 +317,7 @@ async fn the_temp_file_starts_empty_and_two_handles_share_it() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     let (dir, pinned) = pin(port());
     let settings = segmented_settings(pinned, 2, Some(4096 * 4));
     let session = session(&settings).await;
@@ -338,6 +360,7 @@ async fn four_connections_write_a_sixteen_mebibyte_file() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     const SIZE: u64 = 16 * 1024 * 1024;
     let (dir, pinned) = pin(port());
     let local = local_file(&dir, "sixteen.bin", SIZE);
@@ -352,20 +375,23 @@ async fn four_connections_write_a_sixteen_mebibyte_file() {
         .await
         .expect("create");
 
-    let queue = super::writer::queue(&plan.chunks);
+    let scheduler = std::sync::Arc::new(std::sync::Mutex::new(super::schedule::Scheduler::new(
+        &plan.chunks,
+    )));
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..4 {
         let settings = settings.clone();
-        let queue = std::sync::Arc::clone(&queue);
+        let scheduler = std::sync::Arc::clone(&scheduler);
         let remote = remote.clone();
         let local = local.clone();
         tasks.spawn(async move {
             let session = session(&settings).await;
             let mut file = super::writer::open_range_writer(&session.sftp, &remote).await?;
             loop {
-                let next = queue.lock().expect("queue").pop_front();
+                let next = scheduler.lock().expect("scheduler").take();
                 let Some(chunk) = next else { break };
                 super::writer::write_range(&mut file, &chunk, &local, 32_768, &mut |_| {}).await?;
+                scheduler.lock().expect("scheduler").complete(chunk.index);
             }
             file.close()
                 .await
@@ -396,6 +422,7 @@ async fn a_short_local_file_is_refused_by_name() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     let (dir, pinned) = pin(port());
     let local = local_file(&dir, "short.bin", 4095);
     let settings = segmented_settings(pinned, 1, Some(4096));
@@ -432,6 +459,7 @@ async fn a_missing_range_makes_finish_refuse_and_publish_never_run() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     const SIZE: u64 = 2 * 1024 * 1024;
     let (dir, pinned) = pin(port());
     let local = local_file(&dir, "gap.bin", SIZE);
@@ -477,6 +505,7 @@ async fn a_wrong_length_is_refused_by_the_hash() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     let (dir, pinned) = pin(port());
     let local = local_file(&dir, "hash.bin", 8192);
     let settings = segmented_settings(pinned, 1, None);
@@ -511,6 +540,7 @@ async fn publish_renames_the_temp_and_sets_the_time() {
     if !live() {
         return;
     }
+    let _serial = live_lock_async().await;
     let (dir, pinned) = pin(port());
     let settings = segmented_settings(pinned, 1, None);
     let base = remote_dir("publish");
@@ -561,6 +591,7 @@ fn a_full_segmented_run_publishes_and_returns_the_hash() {
     if !live() {
         return;
     }
+    let _serial = live_lock();
     const SIZE: u64 = 64 * 1024 * 1024;
     let (dir, pinned) = pin(port());
     let local = local_file(&dir, "big.pbo", SIZE);
@@ -611,6 +642,7 @@ fn a_failed_segmented_run_leaves_no_temp_and_no_final() {
     if !live() {
         return;
     }
+    let _serial = live_lock();
     let (dir, pinned) = pin(port());
     let local = local_file(&dir, "fail.pbo", 64 * 1024);
     let settings = segmented_settings(pinned, 2, None);
@@ -635,15 +667,436 @@ fn a_failed_segmented_run_leaves_no_temp_and_no_final() {
     runtime.block_on(async {
         let session = session(&settings).await;
         let mut fs = session.sftp.fs();
-        assert!(
-            fs.metadata(&format!("{final_path}.uksfta-part"))
-                .await
-                .is_err(),
-            "the temp file was removed"
-        );
+        let kept = fs
+            .metadata(&format!("{final_path}.uksfta-part"))
+            .await
+            .expect("the temp file is kept for a resume");
+        assert!(kept.len().unwrap_or(0) > 0, "some bytes were written");
         assert!(
             fs.metadata(&final_path).await.is_err(),
             "nothing reached the final name"
         );
     });
+}
+
+// ---- Checkpoints, resume and retries ---------------------------------------
+
+/// Poll the remote temp until it reaches `at_least`, or it disappears.
+fn poll_temp(settings: &Settings, path: &str, at_least: u64) {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let session = session(settings).await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut seen = false;
+        loop {
+            match session.sftp.fs().metadata(path).await {
+                Ok(meta) => {
+                    seen = true;
+                    if meta.len().unwrap_or(0) >= at_least {
+                        return;
+                    }
+                }
+                // The temp only disappears when the run finished.
+                Err(_) if seen => return,
+                Err(_) => {}
+            }
+            if tokio::time::Instant::now() > deadline {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    });
+}
+
+/// Wait until a checkpoint records at least one acknowledged range.
+fn wait_for_ack(state: &Path, pack_id: &str, remote: &str) -> super::checkpoint::Checkpoint {
+    let path = super::checkpoint::path_for(state, pack_id, remote);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if let Some(checkpoint) = super::checkpoint::load(&path) {
+            if checkpoint.acked_prefix > 0 {
+                return checkpoint;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no range was acknowledged in 60 s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Kill every server-side sftp subsystem process.
+fn kill_sessions() {
+    let status = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-f",
+            "tools/sftp-test-server/docker-compose.yml",
+            "exec",
+            "-T",
+            "sftp",
+            "pkill",
+            "-f",
+            "sftp-server",
+        ])
+        .status()
+        .expect("docker compose exec");
+    assert!(status.success(), "the session kill failed");
+}
+
+/// A 64 MiB pack file and the settings to send it.
+struct ResumeFixture {
+    dir: tempfile::TempDir,
+    state: tempfile::TempDir,
+    settings: Settings,
+    base: String,
+    final_path: String,
+    temp: String,
+    local: PathBuf,
+    unit: UploadUnit,
+}
+
+const RESUME_SIZE: u64 = 96 * 1024 * 1024;
+
+fn resume_fixture(tag: &str, reconnects: u8) -> ResumeFixture {
+    let (dir, pinned) = pin(port());
+    let local = local_file(&dir, "resume.pbo", RESUME_SIZE);
+    let mut settings = segmented_settings(pinned, 4, Some(4 * 1024 * 1024));
+    settings.segment.reconnects = reconnects;
+    let base = remote_dir(tag);
+    let final_path = format!("{base}/resume.pbo");
+    let temp = format!("{final_path}.uksfta-part");
+    let unit = units(&local, &final_path, RESUME_SIZE);
+    let state = tempfile::TempDir::new().expect("state dir");
+    ResumeFixture {
+        dir,
+        state,
+        settings,
+        base,
+        final_path,
+        temp,
+        local,
+        unit,
+    }
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_killed_session_reconnects_and_publishes() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let fixture = resume_fixture("reconnect", 2);
+    {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let session = session(&fixture.settings).await;
+            make_dir(&session.sftp, &fixture.base).await;
+        });
+    }
+
+    let settings = fixture.settings.clone();
+    let state = fixture.state.path().to_path_buf();
+    let unit = fixture.unit.clone();
+    let handle = std::thread::spawn(move || super::run(&settings, &state, "pack-r", &unit, false));
+
+    poll_temp(&fixture.settings, &fixture.temp, 4 * 1024 * 1024);
+    kill_sessions();
+    let result = handle.join().expect("the run thread");
+
+    let hash = result.expect("one killed session must be replaced");
+    assert_eq!(
+        hash,
+        crate::util::file_sha256(&fixture.local).expect("local hash")
+    );
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let session = session(&fixture.settings).await;
+        let metadata = session
+            .sftp
+            .fs()
+            .metadata(&fixture.final_path)
+            .await
+            .expect("the published file");
+        assert_eq!(metadata.len(), Some(RESUME_SIZE));
+    });
+    drop(fixture.dir);
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_killed_session_with_no_reconnect_fails_and_keeps_the_temp() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let fixture = resume_fixture("noreconnect", 0);
+    {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let session = session(&fixture.settings).await;
+            make_dir(&session.sftp, &fixture.base).await;
+        });
+    }
+
+    let settings = fixture.settings.clone();
+    let state = fixture.state.path().to_path_buf();
+    let unit = fixture.unit.clone();
+    let handle = std::thread::spawn(move || super::run(&settings, &state, "pack-n", &unit, false));
+
+    poll_temp(&fixture.settings, &fixture.temp, 4 * 1024 * 1024);
+    kill_sessions();
+    let result = handle.join().expect("the run thread");
+    assert!(result.is_err(), "a dead session with no reconnect fails");
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let session = session(&fixture.settings).await;
+        let mut fs = session.sftp.fs();
+        assert!(
+            fs.metadata(&fixture.temp).await.is_ok(),
+            "the temp file is kept for a resume"
+        );
+        assert!(
+            fs.metadata(&fixture.final_path).await.is_err(),
+            "nothing reached the final name"
+        );
+    });
+    drop(fixture.dir);
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_resume_continues_from_the_acked_prefix() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let fixture = resume_fixture("resume", 0);
+    {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let session = session(&fixture.settings).await;
+            make_dir(&session.sftp, &fixture.base).await;
+        });
+    }
+
+    let settings = fixture.settings.clone();
+    let state = fixture.state.path().to_path_buf();
+    let unit = fixture.unit.clone();
+    let handle = std::thread::spawn(move || super::run(&settings, &state, "pack-a", &unit, false));
+    wait_for_ack(fixture.state.path(), "pack-a", &fixture.final_path);
+    kill_sessions();
+    assert!(handle.join().expect("the run thread").is_err());
+
+    let path = super::checkpoint::path_for(fixture.state.path(), "pack-a", &fixture.final_path);
+    let checkpoint = super::checkpoint::load(&path).expect("a checkpoint");
+    assert!(checkpoint.acked_prefix > 0, "some ranges were acknowledged");
+    assert_eq!(checkpoint.local_size, RESUME_SIZE);
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (start, temp) = runtime.block_on(async {
+        let session = session(&fixture.settings).await;
+        let temp_size = session
+            .sftp
+            .fs()
+            .metadata(&fixture.temp)
+            .await
+            .expect("the temp file")
+            .len()
+            .unwrap_or(0);
+        assert!(
+            checkpoint.acked_prefix <= temp_size,
+            "the prefix never exceeds the bytes on the server"
+        );
+        let decision = super::checkpoint::decide(
+            &session.sftp,
+            fixture.state.path(),
+            "pack-a",
+            &fixture.unit,
+            &fixture.settings,
+            fixture.settings.transfer.buffer,
+        )
+        .await
+        .expect("decide");
+        (decision.0, decision.1)
+    });
+    assert_eq!(temp, fixture.temp);
+    match start {
+        super::checkpoint::Start::Resume { from } => {
+            assert_eq!(from, checkpoint.acked_prefix);
+            assert!(from < RESUME_SIZE, "the run was interrupted mid-file");
+        }
+        super::checkpoint::Start::Fresh => panic!("a valid checkpoint must resume"),
+    }
+
+    let hash = super::run(
+        &fixture.settings,
+        fixture.state.path(),
+        "pack-a",
+        &fixture.unit,
+        false,
+    )
+    .expect("the resumed run");
+    assert_eq!(
+        hash,
+        crate::util::file_sha256(&fixture.local).expect("local hash")
+    );
+    assert!(!path.exists(), "the checkpoint is removed after a publish");
+    drop(fixture.dir);
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_corrupted_prefix_restarts_from_scratch() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let fixture = resume_fixture("corrupt", 0);
+    {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let session = session(&fixture.settings).await;
+            make_dir(&session.sftp, &fixture.base).await;
+        });
+    }
+
+    let settings = fixture.settings.clone();
+    let state = fixture.state.path().to_path_buf();
+    let unit = fixture.unit.clone();
+    let handle = std::thread::spawn(move || super::run(&settings, &state, "pack-c", &unit, false));
+    wait_for_ack(fixture.state.path(), "pack-c", &fixture.final_path);
+    kill_sessions();
+    assert!(handle.join().expect("the run thread").is_err());
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let start = runtime.block_on(async {
+        let session = session(&fixture.settings).await;
+        // Flip one byte inside the acknowledged prefix.
+        let mut file = session
+            .sftp
+            .options()
+            .write(true)
+            .open(&fixture.temp)
+            .await
+            .expect("open the temp");
+        file.seek(SeekFrom::Start(0)).await.expect("seek");
+        file.write(&[0xff]).await.expect("write the corrupt byte");
+        file.close().await.expect("close");
+
+        let (start, _) = super::checkpoint::decide(
+            &session.sftp,
+            fixture.state.path(),
+            "pack-c",
+            &fixture.unit,
+            &fixture.settings,
+            fixture.settings.transfer.buffer,
+        )
+        .await
+        .expect("decide");
+        start
+    });
+    assert_eq!(
+        start,
+        super::checkpoint::Start::Fresh,
+        "corruption restarts"
+    );
+    assert!(
+        !super::checkpoint::path_for(fixture.state.path(), "pack-c", &fixture.final_path).exists(),
+        "the discarded checkpoint is removed"
+    );
+
+    let hash = super::run(
+        &fixture.settings,
+        fixture.state.path(),
+        "pack-c",
+        &fixture.unit,
+        false,
+    )
+    .expect("the restarted run");
+    assert_eq!(
+        hash,
+        crate::util::file_sha256(&fixture.local).expect("local hash")
+    );
+    drop(fixture.dir);
+}
+
+#[tokio::test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+async fn an_old_orphan_is_removed_and_a_fresh_one_is_kept() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock_async().await;
+    use openssh_sftp_client::metadata::MetaDataBuilder;
+    use openssh_sftp_client::UnixTimeStamp;
+
+    let (dir, pinned) = pin(port());
+    let settings = segmented_settings(pinned, 1, None);
+    let base = remote_dir("orphan");
+    let session = session(&settings).await;
+    make_dir(&session.sftp, &base).await;
+    let old = format!("{base}/x.pbo.uksfta-part-old");
+    let fresh = format!("{base}/y.pbo.uksfta-part-new");
+    let folder = format!("{base}/z.uksfta-part-dir");
+    let mut fs = session.sftp.fs();
+    fs.write(&old, b"old").await.expect("seed the old temp");
+    fs.write(&fresh, b"new").await.expect("seed the fresh temp");
+    fs.create_dir(&folder).await.expect("seed the directory");
+
+    let two_days_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs().saturating_sub(2 * 24 * 60 * 60))
+        .unwrap_or_default();
+    let stamp = UnixTimeStamp::from_raw(u32::try_from(two_days_ago).expect("stamp"))
+        .expect("a valid stamp");
+    let mut builder = MetaDataBuilder::new();
+    builder.time(stamp, stamp);
+    fs.set_metadata(&old, builder.create())
+        .await
+        .expect("age the old temp");
+
+    let removed = super::writer::clean_orphans(&session.sftp, &base, None)
+        .await
+        .expect("clean");
+    assert_eq!(removed, vec![old.clone()], "{removed:?}");
+    assert!(fs.metadata(&old).await.is_err(), "the old temp is gone");
+    assert!(fs.metadata(&fresh).await.is_ok(), "the fresh temp stays");
+    assert!(
+        fs.metadata(&folder).await.is_ok(),
+        "a directory is not removed"
+    );
+    drop(dir);
+}
+
+#[tokio::test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+async fn a_shortfall_names_the_free_and_needed_bytes() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock_async().await;
+    let (dir, pinned) = pin(port());
+    let settings = segmented_settings(pinned, 1, None);
+    let base = remote_dir("space");
+    let session = session(&settings).await;
+    make_dir(&session.sftp, &base).await;
+
+    let free = super::writer::check_space(&session.sftp, &base, 1)
+        .await
+        .expect("a small need fits");
+    if let Some(free) = free {
+        assert!(free > 0, "the server reports some free space");
+    }
+    let need = 1024u64 * 1024 * 1024 * 1024;
+    let error = super::writer::check_space(&session.sftp, &base, need)
+        .await
+        .expect_err("1 TiB cannot fit");
+    let text = error.to_string();
+    assert!(text.contains(&need.to_string()), "{text}");
+    assert!(free.is_some(), "the fixture advertises statvfs");
+    drop(dir);
 }

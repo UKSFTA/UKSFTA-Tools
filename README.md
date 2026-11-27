@@ -807,10 +807,12 @@ when the output is redirected. A parallel upload runs without the meter,
 because concurrent meters overwrite each other. The verify phases use
 `LogLevel=ERROR`, so their output stays parseable.
 
-An interrupted upload restarts the file from byte zero. The command does
-not resume part of a file. In testing, `reput` trusted the remote size
-and produced a corrupt file of the correct length. Only a complete `put`
-gives a file that matches the local copy.
+An interrupted whole-file upload restarts the file from byte zero. The
+system `sftp` path never resumes part of a file. In testing, `reput`
+trusted the remote size and produced a corrupt file of the correct
+length. Only a complete `put` gives a file that matches the local copy.
+The segmented path does resume, and only from ranges the server
+acknowledged.
 
 #### Segmented upload
 
@@ -818,12 +820,34 @@ gives a file that matches the local copy.
 largest planned upload at or above `--segment-min` (default 64 MiB) and
 splits it into 1 to 16 MiB ranges across `--segment-connections` (default
 4). The file is written to `<name>.uksfta-part`, read back and hashed,
-then published with an atomic rename. A failed run removes the temporary
-file. The other files use the normal upload path.
+then published with an atomic rename. The other files use the normal
+upload path.
 
 This mode needs a key file or an agent. It does not prompt for a password.
-Use it on a link that is faster than one connection. Resume is not active
-yet, so an interrupted segmented file starts again.
+Use it on a link that is faster than one connection.
+
+A failed range is retried with a wait of 1 s, 2 s, 4 s, then 8 s. When a
+connection dies, only that connection is replaced and only its in-flight
+range is sent again. `--segment-reconnects` sets the replacements per
+connection (default 3, range 0 to 10). When every connection has given
+up, the run exits 2.
+
+A checkpoint under `.uksfta/upload/<pack-id>/` records the ranges the
+server acknowledged, with the size, modification time and SHA-256 of the
+local file. A range is recorded only after its write is acknowledged, and
+after an fsync when the server advertises `fsync@openssh.com`. A failed
+run keeps the temporary file and the checkpoint. The next run continues
+from the acknowledged prefix, but it first hashes that prefix on both
+sides and compares them. The remote size is never trusted. A mismatch, a
+changed local file or an older checkpoint restarts the file from zero and
+prints the reason.
+
+`--segment-resume auto|off` selects this behaviour. `auto` is the default.
+`off` discards any checkpoint and starts the file again.
+
+A stale temporary file with no checkpoint, or one more than a day old, is
+removed with a warning, at most eight per run. The current temporary file
+is never removed.
 
 The client also sends `ServerAliveInterval=15`, `ServerAliveCountMax=3`
 and `ConnectTimeout=15`, so a dead link fails in seconds.

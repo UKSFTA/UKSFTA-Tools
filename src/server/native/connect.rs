@@ -23,7 +23,7 @@ pub struct NativeSession {
     #[allow(dead_code)]
     pub handle: Handle<Handler>,
     pub sftp: Sftp,
-    /// The accept-new line, when this connection added a key. Wave 3 prints it.
+    /// The accept-new line, when this connection added a key.
     #[allow(dead_code)]
     pub notice: Option<String>,
 }
