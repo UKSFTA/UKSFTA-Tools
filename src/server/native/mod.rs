@@ -265,6 +265,10 @@ struct Acks {
     path: std::path::PathBuf,
     done: BTreeSet<u32>,
     last_saved: Instant,
+    /// Ranges completed since the last save. The temp file is synced only
+    /// when a save follows, so `--segment-fsync-every` gates the save.
+    since_save: u32,
+    fsync_every: u32,
 }
 
 impl Acks {
@@ -293,14 +297,17 @@ impl Acks {
             return false;
         };
         let next = self.prefix_with(index, checkpoint.chunk, size);
+        let due_ranges = self.since_save >= self.fsync_every.max(1);
         next > checkpoint.acked_prefix
-            && (checkpoint.acked_prefix == 0 || self.last_saved.elapsed() >= CHECKPOINT_INTERVAL)
+            && (checkpoint.acked_prefix == 0
+                || (due_ranges && self.last_saved.elapsed() >= CHECKPOINT_INTERVAL))
     }
 
     /// Record one acknowledged range and write the checkpoint when it pays.
     fn ack(&mut self, index: u32, size: u64) {
         let due = self.due(index, size);
         self.done.insert(index);
+        self.since_save = self.since_save.saturating_add(1);
         if due {
             self.save(size);
         }
@@ -313,6 +320,7 @@ impl Acks {
         };
         checkpoint::recompute_prefix(checkpoint, &self.done, size);
         self.last_saved = Instant::now();
+        self.since_save = 0;
         if let Err(error) = checkpoint::save(&self.path, checkpoint) {
             eprintln!("Warning: cannot save the checkpoint: {error}");
         }
@@ -361,6 +369,8 @@ async fn send_ranges(job: &Job<'_>) -> Result<u8, UksftaError> {
                 .map(|chunk| chunk.index),
         ),
         last_saved: Instant::now(),
+        since_save: 0,
+        fsync_every: u32::from(job.settings.segment.fsync_every),
     }));
 
     let max_connections = job.settings.segment.connections.max(1);
@@ -904,6 +914,8 @@ mod backoff_tests {
             path: path.clone(),
             done: BTreeSet::new(),
             last_saved: Instant::now(),
+            since_save: 0,
+            fsync_every: 1,
         };
 
         // An ack before the local identity lands writes nothing.
