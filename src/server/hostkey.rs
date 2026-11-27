@@ -226,12 +226,15 @@ mod tests {
         let default = default_known_hosts().unwrap();
         assert_eq!(resolve_known_hosts(None, None).unwrap(), default);
 
-        let from_file = resolve_known_hosts(None, Some(Path::new("/etc/kh"))).unwrap();
-        assert_eq!(from_file, PathBuf::from("/etc/kh"));
+        let dir = tempfile::TempDir::new().unwrap();
+        let from_file_path = dir.path().join("file-kh");
+        let from_flag_path = dir.path().join("flag-kh");
 
-        let from_flag =
-            resolve_known_hosts(Some(Path::new("/flag/kh")), Some(Path::new("/file/kh"))).unwrap();
-        assert_eq!(from_flag, PathBuf::from("/flag/kh"));
+        let from_file = resolve_known_hosts(None, Some(&from_file_path)).unwrap();
+        assert_eq!(from_file, from_file_path);
+
+        let from_flag = resolve_known_hosts(Some(&from_flag_path), Some(&from_file_path)).unwrap();
+        assert_eq!(from_flag, from_flag_path);
     }
 
     #[test]
