@@ -30,6 +30,31 @@ jobs:
             target
             .hemttout
 
+  ast-grep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Scan for local performance patterns
+        shell: bash
+        run: |
+          matches=$(npx --yes -p @ast-grep/cli sg scan src \
+            --config .ast-grep/sgconfig.yml \
+            --min-severity warning \
+            --json=stream)
+          if [ -n "$matches" ] && [ "$matches" != "[]" ]; then
+            npx --yes -p @ast-grep/cli sg scan src \
+              --config .ast-grep/sgconfig.yml \
+              --min-severity warning
+            exit 1
+          fi
+
   lint-ps1:
     runs-on: ubuntu-latest
     steps:

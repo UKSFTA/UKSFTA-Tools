@@ -1,0 +1,11 @@
+id: whole-file-read
+language: Rust
+severity: info
+message: This reads a whole file into memory. Confirm the size is bounded.
+note: A PBO or a pack file can be hundreds of megabytes, so prefer a capped or
+  streaming read.
+rule:
+  any:
+    - pattern: std::fs::read($PATH)
+    - pattern: fs::read($PATH)
+    - pattern: $READER.read_to_end($BUF)

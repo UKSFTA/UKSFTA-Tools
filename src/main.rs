@@ -370,6 +370,9 @@ fn reset_sigpipe() {
 }
 
 fn main() {
+    #[cfg(feature = "console")]
+    console_subscriber::init();
+
     #[cfg(unix)]
     reset_sigpipe();
 
