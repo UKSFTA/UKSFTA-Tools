@@ -42,6 +42,11 @@ cargo clippy -- -D warnings
 
 1. Create a branch from `main`:
    `git checkout -b feat/<issue-id>-<description>`
+
+   The branch starts with one of seven types: `feat`, `fix`, `docs`,
+   `refactor`, `test`, `ops` or `sec`. Add the issue id when there is one.
+   Without an issue, use `<type>/<description>`. A performance change takes
+   `feat` when it changes behaviour and `refactor` when it does not.
 2. Make your change. Add a unit test for any new logic.
 3. Run the CI gate locally: `cargo fmt --check`, `cargo clippy -- -D
    warnings`, `cargo test`.
@@ -52,13 +57,16 @@ cargo clippy -- -D warnings
 
 ## Commit messages
 
-Use [conventional commits](https://www.conventionalcommits.org/):
+Use [conventional commits](https://www.conventionalcommits.org/), with the
+seven types above:
 
-- `feat:` for a new feature
-- `fix:` for a bug fix
+- `feat:` for a new feature or a behaviour change
+- `fix:` for a defect fix
 - `docs:` for documentation
-- `ci:` for CI changes
-- `chore(deps):` for dependency bumps
+- `refactor:` for a change that keeps behaviour
+- `test:` for tests only
+- `ops:` for build, CI and dependency changes
+- `sec:` for a security fix
 
 Reference the issue or pull request number in the message where it
 applies. Sign every commit with GPG.
