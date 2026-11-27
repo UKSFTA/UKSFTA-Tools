@@ -402,6 +402,19 @@ impl Fixture {
         fs::write(self.dir.path().join("mod_sources.txt"), text).expect("write mod_sources.txt");
     }
 
+    /// A config that turns the segmented path on for every file.
+    fn enable_segment(&self, min_bytes: u64) {
+        let known_hosts = self.dir.path().join("known_hosts");
+        fs::write(
+            self.dir.path().join(".uksfta/server.toml"),
+            format!(
+                "destination = \"tester@127.0.0.1\"\nport = 1\nroot = \"{ROOT}\"\nknown_hosts = \"{}\"\nsegment = true\nsegment_min = {min_bytes}\n",
+                known_hosts.display()
+            ),
+        )
+        .expect("write the config");
+    }
+
     fn remove_local_signature(&self) {
         fs::remove_file(self.dir.path().join(".hemttout/release/addons").join(SIG))
             .expect("remove the local signature");
@@ -1377,4 +1390,210 @@ fn human_runs_print_one_timing_line() {
         .success()
         .stderr(predicate::str::contains("timing: connect/list"))
         .stderr(predicate::str::contains("total"));
+}
+
+#[test]
+fn a_small_file_is_uploaded_the_same_with_and_without_the_flag() {
+    let plain = Fixture::new(LISTING_MISSING);
+    let flagged = Fixture::new(LISTING_MISSING);
+
+    let plain_out = plain
+        .command()
+        .args(["server", "--upload", "--retries", "0"])
+        .output()
+        .expect("run without the flag");
+    let flagged_out = flagged
+        .command()
+        .args(["server", "--upload", "--retries", "0", "--segmented"])
+        .output()
+        .expect("run with the flag");
+
+    assert_eq!(plain_out.status.code(), flagged_out.status.code());
+    assert_eq!(
+        stable_stdout(&String::from_utf8_lossy(&plain_out.stdout)),
+        stable_stdout(&String::from_utf8_lossy(&flagged_out.stdout)),
+        "a file below the minimum must not change stdout"
+    );
+    assert_eq!(puts(&plain), puts(&flagged), "the same put lines");
+    assert_eq!(puts(&plain), 2, "both files use the system path");
+}
+
+/// Standard output with the elapsed and rate fields of an attempt line
+/// replaced, so two runs can be compared byte for byte.
+fn stable_stdout(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            if line.starts_with("attempt ") {
+                let head = line.split_once(':').map(|(head, _)| head).unwrap_or(line);
+                format!("{head}: <timing>")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn puts(fixture: &Fixture) -> usize {
+    fixture
+        .log()
+        .lines()
+        .filter(|line| line.starts_with("put -p "))
+        .count()
+}
+
+#[test]
+fn a_config_that_enables_segment_prints_the_prediction_without_a_connection() {
+    let fixture = Fixture::new(LISTING_MISSING);
+    fixture.enable_segment(1);
+
+    fixture
+        .command()
+        .args(["server", "--upload", "--dry-run"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("segment: uksfta_main.pbo"));
+
+    assert_eq!(puts(&fixture), 0, "a dry run sends nothing");
+}
+
+#[test]
+fn the_legacy_flag_overrides_a_config_that_enables_segment() {
+    let fixture = Fixture::new(LISTING_MISSING);
+    fixture.enable_segment(1);
+
+    fixture
+        .command()
+        .args(["server", "--upload", "--retries", "0", "--legacy-sftp"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("attempt 1: 2 file(s)"))
+        .stdout(predicate::str::contains("segment:").not());
+
+    assert_eq!(puts(&fixture), 2, "the system path sends both files");
+}
+
+#[test]
+fn the_two_segment_flags_conflict() {
+    let fixture = Fixture::new(LISTING_MATCH);
+
+    fixture
+        .command()
+        .args(["server", "--segmented", "--legacy-sftp"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn json_reports_the_segment_settings_only_when_requested() {
+    let plain = Fixture::new(LISTING_MATCH);
+    let assert = plain
+        .command()
+        .args(["server", "--json"])
+        .assert()
+        .success();
+    let value = json_stdout(assert.get_output());
+    assert!(
+        value["server"].get("segment").is_none(),
+        "absent by default"
+    );
+    assert!(value.get("uploads").is_none(), "absent by default");
+
+    let flagged = Fixture::new(LISTING_MATCH);
+    let assert = flagged
+        .command()
+        .args(["server", "--json", "--segmented"])
+        .assert()
+        .success();
+    let value = json_stdout(assert.get_output());
+    assert_eq!(value["server"]["segment"]["enabled"], true);
+    assert_eq!(value["server"]["segment"]["min_bytes"], 67_108_864u64);
+    assert_eq!(value["server"]["segment"]["connections"], 4);
+    assert_eq!(value["server"]["segment"]["chunk"], serde_json::Value::Null);
+    assert_eq!(value["server"]["segment"]["resume"], "auto");
+    assert_eq!(value["server"]["segment"]["reconnects"], 3);
+    assert!(value["uploads"].is_array(), "the upload list is present");
+}
+
+#[test]
+fn the_doctor_reports_the_segment_settings_only_when_requested() {
+    let plain = Fixture::new(LISTING_MATCH);
+    plain
+        .command()
+        .args(["server", "--doctor"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("segment: not requested"));
+
+    let flagged = Fixture::new(LISTING_MATCH);
+    flagged.enable_segment(1);
+    flagged
+        .command()
+        .args(["server", "--doctor"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "segment: min 1 bytes, 4 connections, chunk auto, resume auto, 3 reconnects",
+        ))
+        .stdout(predicate::str::contains("segment: largest "))
+        .stdout(predicate::str::contains("segment: server check failed:"));
+}
+
+#[test]
+fn a_dry_run_marks_the_selected_file_as_segmented() {
+    let fixture = Fixture::new(LISTING_MISSING);
+
+    let assert = fixture
+        .command()
+        .args([
+            "server",
+            "--json",
+            "--dry-run",
+            "--segmented",
+            "--segment-min",
+            "1",
+        ])
+        .assert()
+        .code(1);
+    let value = json_stdout(assert.get_output());
+    println!("JSON:{}", serde_json::to_string(&value).expect("json"));
+
+    let uploads = value["uploads"].as_array().expect("an upload list");
+    let segmented: Vec<&serde_json::Value> = uploads
+        .iter()
+        .filter(|upload| upload["mode"] == "segmented")
+        .collect();
+    assert_eq!(
+        segmented.len(),
+        1,
+        "exactly one planned target: {uploads:?}"
+    );
+    assert_eq!(segmented[0]["connections"], 4);
+    assert!(
+        segmented[0].get("sha256").is_none(),
+        "no hash before publication"
+    );
+
+    let largest = value["actions"]
+        .as_array()
+        .expect("actions")
+        .iter()
+        .filter(|action| action["kind"] == "upload")
+        .max_by_key(|action| action["size"].as_u64().unwrap_or_default())
+        .expect("an upload action");
+    assert_eq!(
+        segmented[0]["name"], largest["name"],
+        "the segmented entry is the largest planned file"
+    );
+
+    let plain = Fixture::new(LISTING_MISSING);
+    let assert = plain
+        .command()
+        .args(["server", "--json", "--dry-run"])
+        .assert()
+        .code(1);
+    let value = json_stdout(assert.get_output());
+    assert!(value["server"].get("segment").is_none());
+    assert!(value.get("uploads").is_none());
 }

@@ -24,6 +24,7 @@ pub struct Check {
 pub struct Probe {
     pub checks: Vec<Check>,
     pub free_space: Option<u64>,
+    pub largest: Option<u64>,
     pub connect_ms: u64,
 }
 
@@ -76,13 +77,14 @@ pub fn probe(settings: &Settings, pack_dir: Option<&str>) -> Probe {
         return Probe {
             checks,
             free_space: None,
+            largest: None,
             connect_ms: millis(started.elapsed()),
         };
     };
 
     let client = Sftp::new(settings);
-    let (connect, pack) = match list(&client, settings, pack_dir) {
-        Ok(files) => (
+    let (connect, pack, largest) = match list(&client, settings, pack_dir) {
+        Ok((files, largest)) => (
             Check {
                 name: "connect",
                 ok: true,
@@ -93,6 +95,7 @@ pub fn probe(settings: &Settings, pack_dir: Option<&str>) -> Probe {
                 ok: true,
                 detail: format!("{files} file(s)"),
             },
+            Some(largest),
         ),
         Err(error) => (
             Check {
@@ -105,6 +108,7 @@ pub fn probe(settings: &Settings, pack_dir: Option<&str>) -> Probe {
                 ok: false,
                 detail: format!("{pack_dir}: not listed"),
             },
+            None,
         ),
     };
     let free_space = if connect.ok {
@@ -117,11 +121,45 @@ pub fn probe(settings: &Settings, pack_dir: Option<&str>) -> Probe {
     Probe {
         checks,
         free_space,
+        largest,
         connect_ms: millis(started.elapsed()),
     }
 }
 
-fn list(client: &Sftp, settings: &Settings, pack_dir: &str) -> Result<usize, UksftaError> {
+/// The effective segmented settings, or the not-requested line.
+pub fn segment_line(settings: &Settings) -> String {
+    if !settings.segment.enabled {
+        return "segment: not requested".to_string();
+    }
+    let chunk = settings
+        .segment
+        .chunk
+        .map_or_else(|| "auto".to_string(), |chunk| chunk.to_string());
+    format!(
+        "segment: min {} bytes, {} connections, chunk {chunk}, resume {}, {} reconnects",
+        settings.segment.min_bytes,
+        settings.segment.connections,
+        settings.segment.resume.as_str(),
+        settings.segment.reconnects
+    )
+}
+
+/// The largest file in the pack listing against the minimum.
+pub fn segment_size_line(settings: &Settings, largest: Option<u64>) -> String {
+    match largest {
+        Some(bytes) if bytes >= settings.segment.min_bytes => format!(
+            "segment: largest {bytes} bytes, takes the segmented path (min {} bytes)",
+            settings.segment.min_bytes
+        ),
+        Some(bytes) => format!(
+            "segment: largest {bytes} bytes, below the min {} bytes",
+            settings.segment.min_bytes
+        ),
+        None => "segment: largest unknown (no pack listing)".to_string(),
+    }
+}
+
+fn list(client: &Sftp, settings: &Settings, pack_dir: &str) -> Result<(usize, u64), UksftaError> {
     let lines = vec![
         format!("cd {}", quote(&settings.root)?),
         format!("-cd {}", quote(pack_dir)?),
@@ -131,11 +169,17 @@ fn list(client: &Sftp, settings: &Settings, pack_dir: &str) -> Result<usize, Uks
     let blocks = parse::parse_blocks(&client.batch(&lines)?);
     let block = parse::find_block(&blocks, pack_dir)
         .ok_or_else(|| UksftaError::Input(format!("no pack folder at {pack_dir}")))?;
-    Ok(block
+    let files: Vec<_> = block
         .entries
         .iter()
         .filter(|entry| !entry.is_dir && !entry.is_symlink)
-        .count())
+        .collect();
+    let largest = files
+        .iter()
+        .map(|entry| entry.size)
+        .max()
+        .unwrap_or_default();
+    Ok((files.len(), largest))
 }
 
 /// Free space on the server, best effort. No `df` support is `None`.

@@ -428,6 +428,31 @@ fn mark_dead(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), UksftaError> {
         .map(|mut guard| guard.mark_worker_dead())
 }
 
+/// The server extensions the segmented path depends on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Extensions {
+    pub posix_rename: bool,
+    pub fsync: bool,
+}
+
+/// Connect once and report the extensions. Nothing is read or written.
+///
+/// # Errors
+/// Returns `Input` when the connection fails.
+pub fn probe(settings: &Settings) -> Result<Extensions, UksftaError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(UksftaError::Io)?;
+    runtime.block_on(async {
+        let session = connect::connect(settings).await?;
+        Ok(Extensions {
+            posix_rename: session.sftp.support_posix_rename(),
+            fsync: session.sftp.support_fsync(),
+        })
+    })
+}
+
 /// The wait before retry `attempt` (1 based): 1 s, 2 s, 4 s, then 8 s.
 fn backoff(attempt: u8) -> Duration {
     let exponent = attempt.saturating_sub(1).min(3);

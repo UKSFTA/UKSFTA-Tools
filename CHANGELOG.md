@@ -39,6 +39,21 @@ This project uses [Semantic Versioning](https://semver.org/).
   acknowledged prefix and the exit codes. CI builds and tests on Windows,
   and runs the suite with every feature.
 
+- `--legacy-sftp` forces the system `sftp` path for one release and
+  conflicts with `--segmented`. A config `segment = true` now takes effect
+  without the flag. The JSON report adds `server.segment` and `uploads`,
+  and the doctor reports the segment settings and the server extensions.
+
+  The default transport stays the system `sftp` path. The flip is a
+  separate change. It keeps `--legacy-sftp` for one release and removes
+  the flag after that. The flip needs these five results:
+
+  (a) 20 consecutive live uploads of the 977 MB PBO with equal SHA-256;
+  (b) the Docker suite green on OpenSSH 9.6 and 10.6;
+  (c) 10 forced-kill resumes with equal hashes and no temp residue;
+  (d) host key and agent auth confirmed on the real panel;
+  (e) one release cycle with no defect report.
+
 - Opt-in launch-line and `server.cfg` checks. `--launch-line` reads a
   local copy and finds `@<id>` in `-mod` or `-serverMod`. `--server-cfg`
   reads one file over SFTP and checks `verifySignatures` and

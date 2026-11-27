@@ -91,6 +91,8 @@ pub struct ServerOptions {
     pub strict_config: bool,
     /// Use the native segmented transport.
     pub segmented: bool,
+    /// Force the system sftp path for one release.
+    pub legacy_sftp: bool,
     /// Files at or above this size may be segmented.
     pub segment_min: Option<u64>,
     /// Segmented connections.
@@ -133,6 +135,14 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
                 upload_ms: outcome.upload_ms,
                 total_ms,
             },
+            outcome
+                .segment_choice
+                .as_ref()
+                .map(|(remote, connections)| (remote.as_str(), *connections)),
+            outcome
+                .segment
+                .as_ref()
+                .map(|segment| (segment.remote.as_str(), segment.sha256.as_str())),
             &result,
         );
         if let Ok(text) = serde_json::to_string(&report) {
@@ -158,6 +168,30 @@ struct Outcome {
     connect_ms: u64,
     deep_ms: Option<u64>,
     upload_ms: Option<u64>,
+    segment: Option<SegmentOutcome>,
+    segment_choice: Option<(String, u8)>,
+}
+
+/// What the one segmented file produced.
+struct SegmentOutcome {
+    remote: String,
+    sha256: String,
+}
+
+/// Where the upload loop reports progress and where the segmented result
+/// lands.
+struct UploadReport<'a> {
+    progress: bool,
+    json: bool,
+    segment: &'a mut Option<SegmentOutcome>,
+}
+
+const fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn millis(elapsed: Duration) -> u64 {
@@ -267,6 +301,9 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
     } else {
         None
     };
+    outcome.segment_choice = segment
+        .as_ref()
+        .map(|choice| (choice.unit.remote.clone(), settings.segment.connections));
     if let Some(choice) = &segment {
         say(
             opts.json,
@@ -289,8 +326,11 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
             plan,
             opts.retries,
             opts.jobs,
-            show_progress,
-            opts.json,
+            UploadReport {
+                progress: show_progress,
+                json: opts.json,
+                segment: &mut outcome.segment,
+            },
             segment.as_ref(),
         )?;
         outcome.upload_ms = Some(millis(upload_started.elapsed()));
@@ -346,7 +386,13 @@ fn overrides(opts: &ServerOptions) -> Overrides {
         host_key_policy: opts.host_key_policy.clone(),
         launch_line: opts.launch_line.clone(),
         server_cfg: opts.server_cfg.clone(),
-        segment: Some(opts.segmented),
+        segment: if opts.legacy_sftp {
+            Some(false)
+        } else if opts.segmented {
+            Some(true)
+        } else {
+            None
+        },
         segment_min: opts.segment_min,
         segment_connections: opts.segment_connections,
         segment_chunk: opts.segment_chunk,
@@ -394,6 +440,7 @@ fn run_doctor(opts: &ServerOptions) -> Result<(), UksftaError> {
     for line in doctor::settings_lines(&settings) {
         say(opts.json, &line);
     }
+    say(opts.json, &doctor::segment_line(&settings));
 
     let meta_path = opts
         .meta
@@ -414,6 +461,23 @@ fn run_doctor(opts: &ServerOptions) -> Result<(), UksftaError> {
     }
 
     let probe = doctor::probe(&settings, pack_dir.as_deref());
+    if settings.segment.enabled {
+        say(
+            opts.json,
+            &doctor::segment_size_line(&settings, probe.largest),
+        );
+        match native::probe(&settings) {
+            Ok(extensions) => say(
+                opts.json,
+                &format!(
+                    "segment: server posix-rename {}, fsync {}",
+                    yes_no(extensions.posix_rename),
+                    yes_no(extensions.fsync)
+                ),
+            ),
+            Err(error) => say(opts.json, &format!("segment: server check failed: {error}")),
+        }
+    }
     let mut checks = probe.checks;
     if pack.is_none() {
         checks.push(doctor::Check {
@@ -621,8 +685,7 @@ fn upload_with_retries(
     mut plan: Plan,
     retries: u8,
     jobs: u8,
-    progress: bool,
-    json: bool,
+    report: UploadReport<'_>,
     segment: Option<&SegmentChoice>,
 ) -> Result<Plan, UksftaError> {
     let mut skip: HashSet<String> = HashSet::new();
@@ -634,12 +697,12 @@ fn upload_with_retries(
             Path::new("."),
             &verifier.local.id,
             &choice.unit,
-            progress,
+            report.progress,
         ) {
             Ok(hash) => {
                 let elapsed = started.elapsed();
                 say(
-                    json,
+                    report.json,
                     &format!(
                         "segment: {name} published in {:.1} s, {:.2} MB/s, sha256 {}",
                         elapsed.as_secs_f64(),
@@ -647,6 +710,10 @@ fn upload_with_retries(
                         hash.get(..12).unwrap_or(&hash)
                     ),
                 );
+                *report.segment = Some(SegmentOutcome {
+                    remote: choice.unit.remote.clone(),
+                    sha256: hash,
+                });
                 skip.insert(choice.unit.remote.clone());
             }
             Err(error) => {
@@ -671,7 +738,7 @@ fn upload_with_retries(
         let bytes: u64 = units.iter().map(|unit| unit.size).sum();
         let started = Instant::now();
         if jobs <= 1 {
-            let sent = if progress {
+            let sent = if report.progress {
                 verifier.client.batch_progress(&batch)
             } else {
                 verifier.client.batch(&batch).map(|_| ())
@@ -685,7 +752,7 @@ fn upload_with_retries(
         plan = verifier.verify()?;
         let elapsed = started.elapsed();
         say(
-            json,
+            report.json,
             &format!(
                 "attempt {attempt}: {files} file(s), {} attempted, {:.1} s, {:.2} MB/s",
                 human_size(bytes),
@@ -699,8 +766,8 @@ fn upload_with_retries(
         }
     }
     if attempted {
-        say(json, "after upload:");
-        write_report(&plan, json);
+        say(report.json, "after upload:");
+        write_report(&plan, report.json);
     }
     Ok(plan)
 }
