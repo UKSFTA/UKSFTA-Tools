@@ -43,8 +43,8 @@ use self::plan::{
     Action, LocalEntry, LocalPack, Plan,
 };
 use self::report::{
-    plan_workers, print_plan, print_report, put_line, remaining_units, upload_batch, upload_dirs,
-    upload_units, UploadUnit,
+    plan_workers, print_plan, print_report, remaining_units, upload_batch, upload_dirs,
+    upload_units, worker_lines, UploadUnit,
 };
 use self::sftp::ScratchDir;
 use self::sftp::Sftp;
@@ -761,11 +761,13 @@ fn remote_name(remote: &str) -> &str {
 /// The digest the summary shows for a file that cannot be read.
 const MISSING_HASH: &str = "-";
 
-/// The hashing threads: four at most, and never more than the machine has.
-fn hash_threads() -> usize {
+/// The hashing threads: four at most, and two when one worker sends,
+/// because a single connection leaves the disk and the link competing.
+fn hash_threads(jobs: u8) -> usize {
+    let cap = if jobs <= 1 { 2 } else { 4 };
     std::thread::available_parallelism()
         .map_or(1, |count| count.get())
-        .min(4)
+        .min(cap)
 }
 
 /// A pool that hashes local files on several threads. The caller may join
@@ -812,6 +814,42 @@ impl LocalHashes {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         std::mem::take(&mut *guard)
+    }
+}
+
+/// A pool that starts on demand. The upload begins it at the first completed
+/// file, so the local reads do not compete with the first send.
+struct LazyHashes {
+    paths: Vec<PathBuf>,
+    threads: usize,
+    pool: Mutex<Option<LocalHashes>>,
+}
+
+impl LazyHashes {
+    fn new(paths: Vec<PathBuf>, threads: usize) -> Self {
+        Self {
+            paths,
+            threads,
+            pool: Mutex::new(None),
+        }
+    }
+
+    /// Start the pool once. A second call does nothing.
+    fn begin(&self) {
+        let mut pool = self.pool.lock().unwrap_or_else(|error| error.into_inner());
+        if pool.is_none() {
+            *pool = Some(LocalHashes::start(self.paths.clone(), self.threads));
+        }
+    }
+
+    /// Start the pool if it never started, then collect the digests.
+    fn join(self) -> HashMap<PathBuf, String> {
+        self.begin();
+        self.pool
+            .into_inner()
+            .unwrap_or_else(|error| error.into_inner())
+            .map(LocalHashes::join)
+            .unwrap_or_default()
     }
 }
 
@@ -988,13 +1026,13 @@ fn upload_loop(
     let limit = u16::from(retries) + 1;
     let mut attempted = false;
     let mut sent_files: Vec<(UploadUnit, f64)> = Vec::new();
-    // The pool runs beside the batch. The send waits on the peer, so the
-    // local reads and hashes use time the transfer leaves idle.
+    // The pool hashes beside the batch. It starts when the first file
+    // completes, so a fast link is not waiting on four threads of disk.
     let paths: Vec<PathBuf> = remaining_units(plan, &skip)
         .into_iter()
         .map(|unit| unit.local)
         .collect();
-    let hashes = LocalHashes::start(paths, hash_threads());
+    let hashes = LazyHashes::new(paths, hash_threads(jobs));
     for attempt in 1..=limit {
         let batch = upload_batch(plan, &skip)?;
         if batch.is_empty() {
@@ -1005,38 +1043,18 @@ fn upload_loop(
         let files = units.len();
         let bytes: u64 = units.iter().map(|unit| unit.size).sum();
         let started = Instant::now();
-        match &view {
-            Some(view) if jobs <= 1 => {
-                for unit in &units {
-                    view.file_started(&unit.remote);
-                    let one = vec![put_line(unit)?];
-                    match verifier.client.batch(&one) {
-                        Ok(_) => {
-                            view.advance(&unit.remote, unit.size);
-                            view.file_done(&unit.remote, None);
-                        }
-                        Err(error) => {
-                            view.file_failed(&unit.remote);
-                            eprintln!("Warning: upload attempt {attempt}: {error}");
-                            break;
-                        }
-                    }
-                }
-            }
-            Some(view) => {
-                send_parallel(verifier, plan, jobs, attempt, &skip, Some(view))?;
-            }
-            None => {
-                if jobs <= 1 {
-                    if let Err(e) = verifier.client.batch(&batch) {
-                        eprintln!("Warning: upload attempt {attempt}: {e}");
-                    }
-                } else {
-                    send_parallel(verifier, plan, jobs, attempt, &skip, None)?;
-                }
-            }
+        let clean = send_parallel(verifier, plan, jobs, attempt, &skip, view.as_ref(), &hashes)?;
+        // A worker that never reported a completion has left the pool to the
+        // verify phase instead.
+        hashes.begin();
+        if clean {
+            // Every batch reported success, so the plan is already what a
+            // re-listing would return and the remote walk is not paid again.
+            let remotes: HashSet<String> = units.iter().map(|unit| unit.remote.clone()).collect();
+            plan.mark_uploaded(&remotes);
+        } else {
+            *plan = verifier.verify()?;
         }
-        *plan = verifier.verify()?;
         let elapsed = started.elapsed();
         // A file that is no longer in the plan is on the server. Its seconds
         // are its share of this attempt's bytes, so the row is marked as an
@@ -1102,8 +1120,9 @@ fn upload_loop(
     Ok(())
 }
 
-/// Make the directories once, then send one batch per worker. Each worker
-/// builds its own client, so the workers run at the same time.
+/// Make the directories once, then send every unit in one batch per worker.
+/// Each worker builds its own client, so the workers run at the same time.
+/// Returns false when any batch reported an error.
 fn send_parallel(
     verifier: &Verifier<'_>,
     plan: &Plan,
@@ -1111,20 +1130,41 @@ fn send_parallel(
     attempt: u16,
     skip: &HashSet<String>,
     view: Option<&Arc<progress::UploadProgress>>,
-) -> Result<(), UksftaError> {
+    hashes: &LazyHashes,
+) -> Result<bool, UksftaError> {
     let dirs = upload_dirs(plan)?;
-    if !dirs.is_empty() {
+    let units = remaining_units(plan, skip);
+    let workers = plan_workers(units, jobs);
+    let markers = view.is_some();
+    let mut clean = true;
+
+    // A single worker also creates the directories in its own batch, so a
+    // serial upload is one child for the whole attempt.
+    if workers.len() > 1 && !dirs.is_empty() {
         if let Err(e) = verifier.client.batch(&dirs) {
             eprintln!("Warning: upload attempt {attempt}: {e}");
+            clean = false;
         }
     }
 
-    let units: Vec<UploadUnit> = remaining_units(plan, skip);
-    let workers = plan_workers(units, jobs);
+    let mut batches: Vec<Vec<String>> = Vec::with_capacity(workers.len());
+    for worker in &workers {
+        let mut lines = worker_lines(worker, markers)?;
+        if workers.len() <= 1 && !dirs.is_empty() {
+            let mut all = dirs.clone();
+            all.append(&mut lines);
+            lines = all;
+        }
+        batches.push(lines);
+    }
+
     let results: Vec<Result<(), UksftaError>> = std::thread::scope(|scope| {
         let handles: Vec<_> = workers
             .iter()
-            .map(|units| scope.spawn(move || upload_worker(verifier.settings, units, view)))
+            .zip(&batches)
+            .map(|(units, lines)| {
+                scope.spawn(move || upload_worker(verifier.settings, lines, units, view, hashes))
+            })
             .collect();
         handles
             .into_iter()
@@ -1139,43 +1179,59 @@ fn send_parallel(
     });
     for (index, result) in results.iter().enumerate() {
         if let Err(e) = result {
+            clean = false;
             eprintln!(
                 "Warning: upload attempt {attempt} worker {}: {e}",
                 index + 1
             );
         }
     }
-    Ok(())
+    Ok(clean)
 }
 
-/// One worker: a private client and its own `put -p` batch.
+/// One worker: a private client, one batch for all of its units, and the
+/// progress rows it updates. Each `pwd` marker names the file that has just
+/// completed, so the rows move without a child per file.
 fn upload_worker(
     settings: &Settings,
+    lines: &[String],
     units: &[UploadUnit],
     view: Option<&Arc<progress::UploadProgress>>,
+    hashes: &LazyHashes,
 ) -> Result<(), UksftaError> {
     let Some(view) = view else {
-        let mut batch = Vec::new();
-        for unit in units {
-            batch.push(put_line(unit)?);
-        }
-        return Sftp::new(settings).batch(&batch).map(|_| ());
+        return Sftp::new(settings).batch(lines).map(|_| ());
     };
-    for unit in units {
-        view.file_started(&unit.remote);
-        let sent = Sftp::new(settings).batch(&[put_line(unit)?]).map(|_| ());
-        match sent {
-            Ok(()) => {
-                view.advance(&unit.remote, unit.size);
-                view.file_done(&unit.remote, None);
-            }
-            Err(error) => {
+    let Some(first) = units.first() else {
+        return Sftp::new(settings).batch(lines).map(|_| ());
+    };
+
+    view.file_started(&first.remote);
+    let mut completed = 0usize;
+    let sent = Sftp::new(settings).batch_tracked(lines, |line| {
+        if !parse::is_completion_marker(line) {
+            return;
+        }
+        let Some(unit) = units.get(completed) else {
+            return;
+        };
+        hashes.begin();
+        view.advance(&unit.remote, unit.size);
+        view.file_done(&unit.remote, None);
+        completed += 1;
+        if let Some(next) = units.get(completed) {
+            view.file_started(&next.remote);
+        }
+    });
+    match sent {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            if let Some(unit) = units.get(completed) {
                 view.file_failed(&unit.remote);
-                return Err(error);
             }
+            Err(error)
         }
     }
-    Ok(())
 }
 
 /// Stop when every file is in place, or when no attempt remains.
@@ -1810,6 +1866,57 @@ mod tests {
         let hashes = LocalHashes::start(vec![missing.clone()], 1).join();
 
         assert_eq!(hashes.get(&missing).map(String::as_str), Some(MISSING_HASH));
+    }
+
+    #[test]
+    fn a_lazy_pool_waits_for_the_first_completion_and_still_hashes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("lazy.pbo");
+        fs::write(&path, b"lazy digest").unwrap();
+        let hashes = LazyHashes::new(vec![path.clone()], 1);
+        assert!(
+            hashes
+                .pool
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_none(),
+            "no worker has started"
+        );
+
+        hashes.begin();
+        assert!(hashes
+            .pool
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some());
+
+        assert_eq!(
+            hashes.join().get(&path),
+            crate::util::file_sha256(&path).as_ref(),
+            "a started pool returns the same digest"
+        );
+    }
+
+    #[test]
+    fn a_lazy_pool_that_never_started_hashes_on_join() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("late.pbo");
+        fs::write(&path, b"late digest").unwrap();
+
+        let hashes = LazyHashes::new(vec![path.clone()], 1).join();
+
+        assert_eq!(hashes.get(&path), crate::util::file_sha256(&path).as_ref());
+    }
+
+    #[test]
+    fn a_single_worker_caps_the_hash_pool_at_two() {
+        assert!(hash_threads(1) >= 1);
+        assert!(
+            hash_threads(1) <= 2,
+            "one worker must not start four threads"
+        );
+        assert!(hash_threads(0) <= 2);
+        assert_eq!(hash_threads(1), hash_threads(8).min(2));
     }
 
     #[test]

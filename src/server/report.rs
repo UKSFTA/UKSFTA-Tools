@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 
+use super::parse;
 use super::plan::{inside, Action, Finding, Plan};
 use super::sftp::quote;
 use crate::error::UksftaError;
@@ -216,6 +217,19 @@ pub fn put_line(unit: &UploadUnit) -> Result<String, UksftaError> {
     ))
 }
 
+/// The commands one worker sends: a `put` per unit, each followed by a
+/// completion marker when the caller tracks progress.
+pub fn worker_lines(units: &[UploadUnit], markers: bool) -> Result<Vec<String>, UksftaError> {
+    let mut lines = Vec::with_capacity(units.len() * 2);
+    for unit in units {
+        lines.push(put_line(unit)?);
+        if markers {
+            lines.push(parse::MARKER_COMMAND.to_string());
+        }
+    }
+    Ok(lines)
+}
+
 /// Split the units across workers by greedy longest-processing-time: the
 /// largest file goes first, each to the worker with the smallest total.
 /// A tie goes to the lowest worker index. Each worker is then ascending.
@@ -323,6 +337,66 @@ mod tests {
         assert!(batch[1].starts_with("-mkdir"), "{batch:?}");
         assert!(batch[2].starts_with("-mkdir"), "{batch:?}");
         assert!(batch[3].starts_with("put "), "{batch:?}");
+    }
+
+    fn units(plan: &Plan) -> Vec<UploadUnit> {
+        upload_units(plan)
+    }
+
+    #[test]
+    fn one_worker_carries_every_unit_in_a_single_batch() {
+        let plan = plan_with(vec![
+            upload("a.pbo", "/srv/arma/@1/addons/a.pbo", 10),
+            upload("b.pbo", "/srv/arma/@1/addons/b.pbo", 20),
+            upload("c.pbo", "/srv/arma/@1/addons/c.pbo", 30),
+        ]);
+
+        let workers = plan_workers(units(&plan), 1);
+        assert_eq!(workers.len(), 1, "one worker, so one client");
+        assert_eq!(workers[0].len(), 3);
+
+        let lines = worker_lines(&workers[0], true).unwrap();
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with("put -p "))
+                .count(),
+            3
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| *line == parse::MARKER_COMMAND)
+                .count(),
+            3,
+            "each file gets its own completion marker: {lines:?}"
+        );
+        assert_eq!(
+            lines[0],
+            "put -p \"/local/a.pbo\" \"/srv/arma/@1/addons/a.pbo\""
+        );
+        assert_eq!(
+            lines[1],
+            parse::MARKER_COMMAND,
+            "the marker follows its put"
+        );
+    }
+
+    #[test]
+    fn two_workers_split_the_units_without_losing_one() {
+        let plan = plan_with(vec![
+            upload("a.pbo", "/srv/arma/@1/addons/a.pbo", 10),
+            upload("b.pbo", "/srv/arma/@1/addons/b.pbo", 20),
+        ]);
+
+        let workers = plan_workers(units(&plan), 2);
+        assert_eq!(workers.len(), 2, "one client per worker");
+        let total: usize = workers.iter().map(Vec::len).sum();
+        assert_eq!(total, 2);
+        for worker in &workers {
+            let lines = worker_lines(worker, false).unwrap();
+            assert_eq!(lines.len(), worker.len(), "no marker without a view");
+        }
     }
 
     #[test]

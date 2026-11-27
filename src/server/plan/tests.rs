@@ -544,3 +544,59 @@ fn signature_authorities_still_match_the_shipped_keys() {
     let plan = fixture.plan();
     assert_eq!(plan.status(), Status::Ok);
 }
+
+#[test]
+fn a_clean_batch_applies_the_sent_files_without_a_relisting() {
+    let mut fixture = Fixture::new();
+    fixture
+        .remote
+        .files
+        .retain(|file| file.rel != format!("addons/{PBO}"));
+    fixture
+        .remote
+        .files
+        .push(remote_file(&format!("addons/{SIG}"), 10));
+    let mut plan = fixture.plan();
+    assert!(plan.failed(), "the missing PBO fails before the upload");
+    assert_eq!(plan.remote_pbos, 0);
+
+    plan.mark_uploaded(&HashSet::from([format!("{DIR}/addons/{PBO}")]));
+
+    assert!(
+        plan.findings
+            .iter()
+            .all(|finding| !matches!(finding, Finding::Missing { name } if name == PBO)),
+        "the sent file is no longer missing: {:?}",
+        plan.findings
+    );
+    assert!(
+        !remote_targets(&plan).contains(&format!("{DIR}/addons/{PBO}")),
+        "the sent file has no upload action left: {:?}",
+        remote_targets(&plan)
+    );
+    assert_eq!(plan.remote_pbos, 1, "the remote folder gained the PBO");
+    assert_eq!(plan.status(), Status::Ok);
+}
+
+#[test]
+fn a_clean_batch_resolves_meta_and_mod_cpp() {
+    let mut fixture = Fixture::new();
+    fixture.remote.meta_id = None;
+    fixture.remote.mod_size = None;
+    let mut plan = fixture.plan();
+    assert!(plan
+        .findings
+        .iter()
+        .any(|finding| matches!(finding, Finding::MetaMismatch { .. })));
+
+    plan.mark_uploaded(&HashSet::from([
+        format!("{DIR}/meta.cpp"),
+        format!("{DIR}/mod.cpp"),
+    ]));
+
+    assert!(plan.findings.iter().all(|finding| !matches!(
+        finding,
+        Finding::MetaMismatch { .. } | Finding::ModCppMissing | Finding::ModCppStale { .. }
+    )));
+    assert_eq!(plan.status(), Status::Ok);
+}

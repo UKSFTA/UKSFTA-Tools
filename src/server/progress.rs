@@ -332,7 +332,8 @@ impl UploadProgress {
                     );
                     bar.set_prefix(row.state.label());
                     bar.set_message(format!("{}  {}", row.name, human_size(row.size)));
-                    bar.enable_steady_tick(Duration::from_millis(250));
+                    // A ticker starts only when the row begins to upload, so
+                    // a 114-file pack does not run 114 of them at once.
                     bar
                 })
                 .collect();
@@ -447,6 +448,7 @@ impl UploadProgress {
         }
         if let Some(bar) = self.rows.get(index) {
             bar.set_prefix(State::Uploading.label());
+            bar.enable_steady_tick(Duration::from_millis(250));
         }
     }
 
@@ -526,6 +528,7 @@ impl UploadProgress {
         };
         if let Some(bar) = self.rows.get(index) {
             bar.set_prefix(State::Done.label());
+            bar.disable_steady_tick();
             bar.set_position(bar.length().unwrap_or(size));
         }
         if self.mode == Mode::Json {
@@ -554,6 +557,7 @@ impl UploadProgress {
         }
         if let Some(bar) = self.rows.get(index) {
             bar.set_prefix(State::Waiting.label());
+            bar.disable_steady_tick();
         }
     }
 

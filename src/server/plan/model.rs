@@ -333,6 +333,67 @@ impl Plan {
             .iter()
             .filter(|a| matches!(a, Action::Remove { .. }))
     }
+
+    /// Record a batch that reported success: the files are on the server, so
+    /// their upload actions and their findings go, and the remote counts gain
+    /// the files that were absent. The result is what a re-listing would
+    /// report, without the second walk of the remote tree.
+    pub fn mark_uploaded(&mut self, remotes: &HashSet<String>) {
+        if remotes.is_empty() {
+            return;
+        }
+        let prefix = format!("{}/", self.remote_dir);
+        let rels: Vec<&str> = remotes
+            .iter()
+            .filter_map(|remote| remote.strip_prefix(&prefix))
+            .collect();
+        let names: HashSet<String> = rels.iter().map(|rel| display_name(rel)).collect();
+        let was_absent = |name: &str| {
+            self.findings.iter().any(|finding| {
+                matches!(
+                    finding,
+                    Finding::Missing { name: found } | Finding::KeyMissing { name: found }
+                        if found == name
+                )
+            })
+        };
+
+        let mut added_pbos = 0;
+        let mut added_keys = 0;
+        for rel in &rels {
+            if !was_absent(&display_name(rel)) {
+                continue;
+            }
+            if is_addons_pbo(rel) {
+                added_pbos += 1;
+            } else if is_key_file(rel) {
+                added_keys += 1;
+            }
+        }
+
+        let meta_sent = rels.contains(&"meta.cpp");
+        let mod_sent = rels.contains(&"mod.cpp");
+        self.findings.retain(|finding| match finding {
+            Finding::Missing { name } | Finding::StaleSize { name, .. } => !names.contains(name),
+            Finding::StaleHash { name } | Finding::KeyMissing { name } => !names.contains(name),
+            Finding::KeyStale { name, .. } => !names.contains(name),
+            Finding::ModCppMissing | Finding::ModCppStale { .. } => !mod_sent,
+            Finding::MetaMismatch { .. } => !meta_sent,
+            Finding::NoPack => !meta_sent,
+            Finding::Extra { .. }
+            | Finding::KeyExtra { .. }
+            | Finding::KeyAuthorityMissing { .. } => true,
+        });
+        self.actions.retain(|action| match action {
+            Action::Upload { remote, .. } => !remotes.contains(remote),
+            Action::Remove { .. } => true,
+        });
+        self.remote_pbos += added_pbos;
+        self.remote_keys += added_keys;
+        if meta_sent {
+            self.remote_exists = true;
+        }
+    }
 }
 
 /// Everything the comparison reads.

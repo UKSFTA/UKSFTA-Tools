@@ -253,7 +253,6 @@ if [ -n "${UKSFTA_TEST_KNOWN_HOSTS:-}" ]; then
 fi
 if grep -q 'ls -l' "$commands"; then
   cat "$UKSFTA_TEST_LISTING"
-  exit 0
 fi
 if grep -q '^put ' "$commands"; then
   marker="${UKSFTA_TEST_PUT_MARKER:-}"
@@ -262,6 +261,13 @@ if grep -q '^put ' "$commands"; then
     echo 'fake sftp: connection closed during write' >&2
     exit 1
   fi
+fi
+if ! grep -q 'ls -l' "$commands"; then
+  while IFS= read -r line; do
+    if [ "$line" = "pwd" ]; then
+      printf 'Remote working directory: %s\n' "$UKSFTA_TEST_ROOT"
+    fi
+  done < "$commands"
 fi
 if grep -q 'get ' "$commands"; then
   grep 'get ' "$commands" | while read -r command remote local; do
@@ -439,8 +445,8 @@ fn a_matching_pack_plans_no_change() {
     let log = fixture.log();
     assert_eq!(
         log.matches("ARGV ").count(),
-        4,
-        "the root listing, the directory listing, the meta phase and the remote key phase"
+        3,
+        "the root listing with the meta fetch, the directory listing, and the remote key phase"
     );
     let argv: Vec<&str> = log
         .lines()
@@ -504,7 +510,7 @@ fn upload_dry_run_prints_the_plan_and_writes_nothing() {
     );
     assert_eq!(
         log.matches("ARGV ").count(),
-        4,
+        3,
         "a dry run must not start an upload phase"
     );
 }
@@ -617,7 +623,8 @@ fn a_failed_upload_is_retried_and_reported() {
         .env("UKSFTA_TEST_PUT_MARKER", &marker)
         .args(["server", "--upload", "--retries", "1"])
         .assert()
-        .code(1)
+        // The second attempt reports success, so the plan needs no re-read.
+        .success()
         .stdout(predicate::str::contains("attempt 1: 2 file(s)"))
         .stdout(predicate::str::contains("attempt 2: 2 file(s)"))
         .stdout(predicate::str::contains("MB/s"))
@@ -643,7 +650,7 @@ fn parallel_upload_puts_each_file_exactly_once() {
         .command()
         .args(["server", "--upload", "--jobs", "2", "--retries", "0"])
         .assert()
-        .code(1)
+        .success()
         .stdout(predicate::str::contains("attempt 1: 2 file(s)"));
 
     let log = fixture.log();
@@ -669,6 +676,84 @@ fn parallel_upload_puts_each_file_exactly_once() {
     assert!(!log.contains("reput"), "{log}");
 }
 
+/// The command block of every client run, in the order the stub logged them.
+fn runs(fixture: &Fixture) -> Vec<String> {
+    fixture
+        .log()
+        .split("ARGV ")
+        .skip(1)
+        .map(str::to_string)
+        .collect()
+}
+
+fn upload_runs(fixture: &Fixture) -> Vec<String> {
+    runs(fixture)
+        .into_iter()
+        .filter(|run| run.lines().skip(1).any(|line| line.starts_with("put -p ")))
+        .collect()
+}
+
+#[test]
+fn a_serial_upload_with_progress_uses_one_client_for_every_file() {
+    let fixture = Fixture::new(LISTING_MISSING);
+
+    fixture
+        .command()
+        .args([
+            "server",
+            "--upload",
+            "--jobs",
+            "1",
+            "--progress",
+            "--retries",
+            "0",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("attempt 1: 2 file(s)"));
+
+    let log = fixture.log();
+    assert_eq!(
+        log.matches("put -p ").count(),
+        2,
+        "both files are sent once: {log}"
+    );
+    let uploads = upload_runs(&fixture);
+    assert_eq!(
+        uploads.len(),
+        1,
+        "one client carries every file of the worker: {log}"
+    );
+    assert_eq!(
+        uploads[0].lines().filter(|line| *line == "pwd").count(),
+        2,
+        "each put is followed by its completion marker: {}",
+        uploads[0]
+    );
+}
+
+#[test]
+fn a_clean_upload_does_not_reverify_the_remote_tree() {
+    let fixture = Fixture::new(LISTING_MISSING);
+
+    fixture
+        .command()
+        .args(["server", "--upload", "--jobs", "1", "--retries", "0"])
+        .assert()
+        .success();
+
+    let runs = runs(&fixture);
+    assert_eq!(
+        runs.len(),
+        4,
+        "three read-only phases and one upload: {runs:?}"
+    );
+    assert!(
+        runs.last().is_some_and(|run| run.contains("put -p ")),
+        "the upload is the last client run: {runs:?}"
+    );
+}
+
 /// Every client run uses the error log level, and none passes `-q`.
 fn assert_error_log_level(log: &str) {
     let argv: Vec<&str> = log
@@ -692,7 +777,7 @@ fn every_client_run_uses_the_error_log_level() {
         let mut args = vec!["server", "--upload", "--retries", "0"];
         args.extend(extra);
 
-        fixture.command().args(args).assert().code(1);
+        fixture.command().args(args).assert().success();
 
         let log = fixture.log();
         assert!(log.contains("put -p "), "the upload must run: {log}");
@@ -717,7 +802,7 @@ fn transfer_flags_reach_every_client_run() {
             "8",
         ])
         .assert()
-        .code(1);
+        .success();
 
     let log = fixture.log();
     let argv: Vec<&str> = log
@@ -942,7 +1027,9 @@ fn a_nested_upload_creates_the_directory_first() {
         .command()
         .args(["server", "--upload", "--prune", "--retries", "0"])
         .assert()
-        .code(1);
+        // A clean batch ends the run, so the leftover remote extra decides
+        // the status but not a failed upload.
+        .success();
 
     let log = fixture.log();
     let release = std::path::Path::new(".hemttout/release");
@@ -1466,7 +1553,7 @@ fn the_legacy_flag_overrides_a_config_that_enables_segment() {
         .command()
         .args(["server", "--upload", "--retries", "0", "--legacy-sftp"])
         .assert()
-        .code(1)
+        .success()
         .stdout(predicate::str::contains("attempt 1: 2 file(s)"))
         .stdout(predicate::str::contains("segment:").not());
 

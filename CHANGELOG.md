@@ -136,10 +136,24 @@ This project uses [Semantic Versioning](https://semver.org/).
   median on the local fixture, and the full 15.46 GB pack takes 184.8 s
   at 83.77 MB/s, from 210.7 s at 75.03 MB/s. The completion read-back
   reaches 114.83 MB/s on one stream, so it stays single-stream.
-- A whole-file upload hashes the local files on four threads while the
-  batch sends, so the summary digest no longer costs a second read of
-  the pack after the transfer. The digest column and the JSON `sha256`
-  field are unchanged.
+- A whole-file upload hashes the local files while the batch sends, so the
+  summary digest no longer costs a second read of the pack after the
+  transfer. The digest column and the JSON `sha256` field are unchanged.
+  With one worker the pool uses at most two threads and starts at the
+  first completed file, so a fast link does not wait on the disk.
+- A whole-file upload runs one `sftp` child per worker instead of one per
+  file. Each `put` is followed by a `pwd` marker, so the per-file rows
+  still move as their files finish; batch mode prints no transfer meter.
+- A batch that reports success ends the attempt without a second remote
+  listing. The plan is updated in memory, so the report after the upload
+  is the same as a re-listing would give. A failed or partial batch still
+  re-verifies.
+- The read-only verification uses fewer children: the `meta.cpp` and
+  `mod.cpp` fetches ride in the root listing batch, and the remote key
+  read shares the deep-download batch. The listing batches stay separate
+  because each one's commands depend on the previous listing.
+- The terminal view ticks the total bar and only the rows that are
+  uploading, instead of all rows at once.
 - The minimum supported Rust version is 1.89, for the native transport
   dependencies.
 
