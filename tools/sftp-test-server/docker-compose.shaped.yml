@@ -1,0 +1,16 @@
+# A bridge-network fixture used only by the shaped tests. It publishes no
+# ports and shapes its own eth0, so the host network is never touched.
+name: uksfta-shaped
+
+services:
+  shaped:
+    build: .
+    image: uksfta-sftp-test:latest
+    command: ["/usr/sbin/sshd", "-D", "-e", "-p", "2222"]
+    cap_add:
+      - NET_ADMIN
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/2222'"]
+      interval: 2s
+      timeout: 2s
+      retries: 15

@@ -849,6 +849,14 @@ A stale temporary file with no checkpoint, or one more than a day old, is
 removed with a warning, at most eight per run. The current temporary file
 is never removed.
 
+`tests/throughput_live.rs` measures the segmented path against one stream
+on a shaped bridge link (60 ms delay, 40 Mbit). It uploads a 128 MiB file
+twice and prints `single`, `segmented` and `ratio`. `tests/sftp_live.rs`
+adds shaped kill, loss-burst and repeated-resume cases. They need
+`UKSFTA_SFTP_SHAPED=1` and a kernel that provides `sch_netem`; without it
+they skip with a printed reason. The shaped container shapes only its own
+interface, never the host network.
+
 The client also sends `ServerAliveInterval=15`, `ServerAliveCountMax=3`
 and `ConnectTimeout=15`, so a dead link fails in seconds.
 
