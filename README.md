@@ -1141,7 +1141,8 @@ The command sends a whole file in a batch, so its seconds are its share of the
 batch time and its rate is the batch rate.
 
 Both values carry a `~` to mark the estimate. The command computes the local
-SHA-256 for each whole file. A total row gives the exact bytes, the elapsed
+SHA-256 for each whole file on four threads while the batch uploads, so the
+pass costs no extra time. A total row gives the exact bytes, the elapsed
 seconds and the average rate. A 0-byte file shows `0 B`, `0.0 s` and `-`.
 
 The table goes to the human output only. With `--json` the same values appear in

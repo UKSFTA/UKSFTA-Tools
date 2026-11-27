@@ -156,14 +156,27 @@ pub fn find_pbos(dir: &Path) -> Vec<PathBuf> {
     pbos
 }
 
+/// The read size for a caller that hashes a small file, or cannot spare
+/// the memory for a large buffer.
+const HASH_BUFFER: usize = 8192;
+/// The read size for a PBO-sized file. One read per MiB keeps the syscall
+/// count low without holding an unreasonable buffer.
+pub const HASH_BUFFER_LARGE: usize = 1 << 20;
+
 /// SHA256 of a file's contents, hex-encoded. None on read failure.
 pub fn file_sha256(path: &Path) -> Option<String> {
+    file_sha256_with_buffer(path, HASH_BUFFER)
+}
+
+/// SHA256 of a file's contents with a chosen read size, hex-encoded. None
+/// on read failure. The digest does not depend on the read size.
+pub fn file_sha256_with_buffer(path: &Path, buffer: usize) -> Option<String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
 
     let mut file = fs::File::open(path).ok()?;
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; 8192];
+    let mut buf = vec![0u8; buffer.max(1)];
     loop {
         let n = file.read(&mut buf).ok()?;
         if n == 0 {
@@ -367,6 +380,20 @@ mod tests {
     #[test]
     fn file_sha256_missing_file_returns_none() {
         assert_eq!(file_sha256(Path::new("/nonexistent/uksfta/test.pbo")), None);
+    }
+
+    #[test]
+    fn file_sha256_with_buffer_matches_the_default_digest() {
+        let dir = std::env::temp_dir().join("uksfta-sha-buffer-test");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("data.bin");
+        fs::write(&f, vec![b'q'; 3 * 1024 * 1024 + 17]).unwrap();
+        assert_eq!(
+            file_sha256_with_buffer(&f, 1 << 20),
+            file_sha256(&f),
+            "the digest must not depend on the read size"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
