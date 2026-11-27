@@ -18,8 +18,8 @@ Install with [`install.ps1`](install.ps1) on Windows or
 ## Contents
 
 - [Usage](#usage)
-- [Publish Files](#publish-files)
-- [Input Format](#input-format)
+- [Publish files](#publish-files)
+- [Input format](#input-format)
 - [Output](#output)
 - [Exit codes](#exit-codes)
 - [Missing mods](#missing-mods)
@@ -159,7 +159,7 @@ uksfta size --pbo --sort name
 
 </details>
 
-## Publish Files
+## Publish files
 
 `uksfta docs` reads `.hemtt/project.toml` and acts only when the project
 sets a publish path:
@@ -230,7 +230,7 @@ it uploads old text. To upload regenerated text, run `uksfta docs
 --online` earlier in the job and commit the result, or run it in the
 release job before `hemtt publish`.
 
-## Input Format
+## Input format
 
 `mod_sources.txt` names every mod in the pack. It has a TOML form and a
 line-based form.
@@ -263,7 +263,7 @@ enabled = false
 Fields per mod:
 
 - `id`: Steam Workshop item ID, or the full Workshop page URL. URLs are
-  easier to verify at a glance; both forms are accepted. When a legacy
+  easier to verify at a glance. Both forms are accepted. When a legacy
   file is migrated, ids are written as URLs so entries stay clickable.
 - `name`: display name, shown in sync output
 - `tags`: optional array of tags
@@ -330,8 +330,8 @@ and downloaded, re-run `uksfta sync` to pull the PBOs into `addons/`.
 
 Use `--modlist` to generate an Arma 3 launcher preset file (HTML) that
 lists all missing mods. Open the file in the launcher to batch-subscribe
-to every missing mod at once. The output defaults to `missing-mods.html`;
-override with `--modlist-path`.
+to every missing mod at once. The output defaults to `missing-mods.html`.
+Use `--modlist-path` to choose another path.
 
 Add `--resolve-deps` to fetch the Workshop page of every enabled mod. It
 discovers dependencies not listed in `mod_sources.txt`. Resolution covers
@@ -985,7 +985,7 @@ that and keeps the segmented path, and the native measurements use the
 password you typed. `--password-prompt` asks once, before the probe and the
 transfer, while the progress view is hidden. The probe never publishes,
 never uses a name Arma loads, and removes its files on every exit path. A
-hard kill can leave the probe files; the next probe overwrites and removes
+hard kill can leave the probe files. The next probe overwrites and removes
 them. `--no-segment-probe` turns it off.
 
 Fsync now runs every fourth completed range by default
@@ -1254,7 +1254,7 @@ when they exist. It uses them only for warnings:
 A missing file skips its check. Neither warning changes the exit code, and
 neither file decides which server folder is checked.
 
-One line reports unsigned PBOs, for example `unsigned: 3 of 114 PBO(s)
+One line reports unsigned PBOs, for example `unsigned: 3 of 114 PBOs
 have no signature (advisory)`. The line is advisory by default.
 `--require-signatures` fails the command when the count is above zero, and
 the error names the count.
