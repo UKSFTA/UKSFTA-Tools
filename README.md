@@ -1,17 +1,61 @@
 # UKSFTA-Tools
 
-Shared tooling for the UKSF Task Force Alpha Arma 3 workspace, written in Rust.
+Shared tooling for the UKSF Task Force Alpha Arma 3 workspace, written in
+Rust.
+
+[![Rust](https://github.com/UKSFTA/UKSFTA-Tools/actions/workflows/rust.yml/badge.svg)](https://github.com/UKSFTA/UKSFTA-Tools/actions/workflows/rust.yml)
+[![Release](https://img.shields.io/github/v/release/UKSFTA/UKSFTA-Tools)](https://github.com/UKSFTA/UKSFTA-Tools/releases)
+[![Licence](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
+[![Rust version](https://img.shields.io/badge/rust-1.89%2B-orange)](Cargo.toml)
+
+Sync a modpack from the Steam Workshop, audit every PBO, check the game
+server over SFTP, and upload only the files that changed.
+
+Install with [`install.ps1`](install.ps1) on Windows or
+[`install.sh`](install.sh) on Linux and macOS. See
+[Installation](#installation).
+
+## Contents
+
+- [Usage](#usage)
+- [Publish Files](#publish-files)
+- [Input Format](#input-format)
+- [Output](#output)
+- [Exit codes](#exit-codes)
+- [Missing mods](#missing-mods)
+- [Investigating PBO origins](#investigating-pbo-origins)
+- [Server verification over SFTP](#server-verification-over-sftp)
+- [Dependencies](#dependencies)
+- [Update checking](#update-checking)
+- [Platforms](#platforms)
+- [Installation](#installation)
+- [Licence](#licence)
+- [Maintainers](#maintainers)
 
 ## Usage
 
 Run from a mod repository root (a directory containing `mod_sources.txt` and `addons/`).
 
 ```bash
-# Preview what a sync would change
-uksfta sync --dry-run
-
 # Copy PBOs from the local Steam Workshop cache into addons/, write mods.lock
 uksfta sync
+
+# Confirm all locked PBOs are present
+uksfta verify
+
+# Verify the game server's workshop tree over SFTP
+uksfta server
+
+# Upload missing PBOs and signatures
+uksfta server --upload
+```
+
+<details>
+<summary>Every command and example</summary>
+
+```bash
+# Preview what a sync would change
+uksfta sync --dry-run
 
 # Generate an Arma 3 launcher modlist for missing mods
 uksfta sync --modlist
@@ -27,9 +71,6 @@ uksfta sync --offline
 
 # Show which PBOs came from which Workshop mod
 uksfta identify
-
-# Confirm all locked PBOs are present
-uksfta verify
 
 # Audit each mod's PBOs against addons/ (present/missing per PBO)
 uksfta audit
@@ -55,10 +96,7 @@ uksfta investigate --report --online
 # Print the stored resolution lines with no network
 uksfta investigate --report
 
-# Verify the game server's workshop tree over SFTP
-uksfta server
-
-# Upload missing PBOs and signatures, then remove extra PBOs
+# Upload the missing files, then remove extra PBOs
 uksfta server --upload --prune
 
 # Check every required addon is provided by the pack or the external list
@@ -118,6 +156,8 @@ uksfta size
 # Print one line per PBO, and sort the report by name
 uksfta size --pbo --sort name
 ```
+
+</details>
 
 ## Publish Files
 
@@ -192,6 +232,12 @@ release job before `hemtt publish`.
 
 ## Input Format
 
+`mod_sources.txt` names every mod in the pack. It has a TOML form and a
+line-based form.
+
+<details>
+<summary>The mod_sources.txt formats</summary>
+
 `mod_sources.txt` supports two formats. The TOML format (v2) adds metadata
 per mod and is written automatically when a legacy file is first read (a
 `.bak` backup is kept):
@@ -216,14 +262,14 @@ enabled = false
 
 Fields per mod:
 
-- `id` — Steam Workshop item ID, or the full Workshop page URL. URLs are
+- `id`: Steam Workshop item ID, or the full Workshop page URL. URLs are
   easier to verify at a glance; both forms are accepted. When a legacy
   file is migrated, ids are written as URLs so entries stay clickable.
-- `name` — display name, shown in sync output
-- `tags` — optional array of tags
-- `role` — `mod` (default) or `ignore`
-- `enabled` — set `false` to exclude without deleting the entry
-- `dependencies` — array of required Workshop IDs. `sync --resolve-deps`
+- `name`: display name, shown in sync output
+- `tags`: optional array of tags
+- `role`: `mod` (default) or `ignore`
+- `enabled`: set `false` to exclude without deleting the entry
+- `dependencies`: array of required Workshop IDs. `sync --resolve-deps`
   writes discovered ids here automatically, sorted and de-duplicated.
 
 The legacy format (v1) is still accepted: one Workshop mod per line (URL
@@ -238,10 +284,12 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=887302721 # Boat Mod
 463939057 # ACE
 ```
 
+</details>
+
 ## Output
 
-- `addons/` — PBOs copied from the Workshop cache
-- `mods.lock` — JSON manifest of synced mods (files, name, tags, dependencies, last-updated timestamp)
+- `addons/`: PBOs copied from the Workshop cache
+- `mods.lock`: JSON manifest of synced mods (files, name, tags, dependencies, last-updated timestamp)
 
 The tool reads the Workshop cache and its `appworkshop_107410.acf` metadata
 directly from your Steam libraries. It is offline by default. `investigate
@@ -267,6 +315,12 @@ failed Workshop name lookup leaves the description stale, so `--check`
 exits 1.
 
 ## Missing mods
+
+`sync` reports a mod it cannot find, and can open the Workshop page so
+you can subscribe.
+
+<details>
+<summary>What sync reports, and how to subscribe</summary>
 
 When a mod in `mod_sources.txt` is not present in any local Workshop
 cache, `sync` reports it with its name and a direct link to the Steam
@@ -296,7 +350,14 @@ rate limiting. A page that does not load is a warning for that mod, and
 the run continues. When no Workshop page loads at all, `sync --resolve-deps`
 exits 2 and resolves no dependencies.
 
+</details>
+
 ## Importing a modlist
+
+`import` reads a launcher preset file (HTML) and adds its mods.
+
+<details>
+<summary>Import rules and the dry run</summary>
 
 Use `import` to add mods from an Arma 3 launcher preset file (HTML) to
 `mod_sources.txt`:
@@ -305,7 +366,7 @@ Use `import` to add mods from an Arma 3 launcher preset file (HTML) to
 # Add all Steam mods from a shared modlist
 uksfta import ./my-modlist.html
 
-# Preview first — prints what would be added, changes nothing
+# Preview first: prints what would be added, changes nothing
 uksfta import ./my-modlist.html --dry-run
 ```
 
@@ -314,7 +375,14 @@ Each Steam mod is appended as `{id} # {name}`. Mods already present in
 mods without a Workshop ID are skipped with a warning. New entries are
 inserted before the `[ignore]` section if one exists.
 
+</details>
+
 ## Exporting a modlist
+
+`export` writes every enabled mod as a launcher preset file (HTML).
+
+<details>
+<summary>Export details, naming and defaults</summary>
 
 Use `export` to write every enabled mod in `mod_sources.txt` as an Arma 3
 launcher preset file (HTML):
@@ -349,7 +417,15 @@ The output is a normal launcher preset, so `uksfta import` reads it back.
 Local mods cannot be exported. `mod_sources.txt` holds Workshop ids only,
 and a local mod has no Workshop id.
 
+</details>
+
 ## Modlist size
+
+`size` totals the download size of a launcher preset, or of the
+installed pack.
+
+<details>
+<summary>How sizes are read and coloured</summary>
 
 Use `size` to list the download size of every mod in an Arma 3 launcher
 preset file (HTML) and the total:
@@ -372,7 +448,12 @@ When the output is a terminal, each size is coloured by its share of the
 total: green under 5%, yellow under 20%, red at or above 20%. Mods with no
 known size are shown in grey.
 
+</details>
+
 ### Installed pack size
+
+<details>
+<summary>The installed-size report and its flags</summary>
 
 Run `size` with no file to report the installed size of each mod in
 `mods.lock`. The command reads every PBO path in the lock and measures
@@ -404,11 +485,16 @@ with the name and the Workshop ID. The command stays silent when there is
 no `mod_sources.txt`. It prints a warning to stderr when the file exists
 but cannot be parsed.
 
+</details>
+
 ## Investigating PBO origins
 
 Use `investigate` to trace PBOs in `addons/` back to their Workshop
-origin. By default it examines PBOs not tracked in `mods.lock` — leftovers
-from removed mods, merged packs, or manual copies:
+origin. By default it examines PBOs not tracked in `mods.lock`, such
+as leftovers from removed mods, merged packs, or manual copies:
+
+<details>
+<summary>Matching, online lookups and the result format</summary>
 
 ```bash
 # Trace untracked PBOs to their source Workshop mod
@@ -430,14 +516,14 @@ winning mod's `meta.cpp` gives its Workshop ID and name. The prefix
 survives re-packing, so a repacked copy still resolves to its original
 mod. When a PBO exists in multiple cache folders, the standalone mod is
 preferred over aggregate packs (identified by spanning many distinct
-prefix roots). PBOs with no matching copy are reported as unknown — they
+prefix roots). PBOs with no matching copy are reported as unknown. They
 may come from a deleted or private mod, or be manually placed. A result
 whose best match is itself a pack is flagged `[pack: verify source]`.
 
 With `--online`, the tool also calls Steam's `GetPublishedFileDetails` API
 (no key required) to report whether each origin still exists and is
 publicly visible. An item that is not publicly visible is either removed
-or set private — the API cannot tell the two apart without the owner
+or set private. The API cannot tell the two apart without the owner
 authenticating.
 
 The same run then resolves the identity of every examined PBO from its own
@@ -470,7 +556,6 @@ need, so a family of six identically titled variants stays ambiguous.
 Agreement on a generic title never confirms, and a shared word such as
 `markers` or `backpacks` is not a link. Popularity never orders or confirms
 a candidate.
-
 
 A tie is resolved by content where possible: the tied candidates' item
 pages are checked for the PBO's stem, prefix or `CfgPatches` class, then
@@ -555,6 +640,8 @@ stored status, and exits 1 only when a confirmed row names the wrong id.
 The `identify` command uses the same byte-hash matching, so its origin
 reports are now deterministic too.
 
+</details>
+
 ## Server verification over SFTP
 
 `uksfta server` compares the private modpack in the local build output with
@@ -579,6 +666,9 @@ overrides the file.
 
 ### Host key checks
 
+<details>
+<summary>The default policy and the accept-new option</summary>
+
 The command checks the server host key on every `sftp` run. It passes
 `StrictHostKeyChecking=yes` by default, so an unknown or changed key
 stops the run. The key file is `~/.ssh/known_hosts`, unless
@@ -599,7 +689,12 @@ The native segmented path reads the same file. It checks the key before
 authentication. It refuses an `@cert-authority` line and an `@revoked`
 line, so those lines stop both paths.
 
+</details>
+
 ### Launch line and server.cfg checks
+
+<details>
+<summary>Launch line tokens and the server.cfg rules</summary>
 
 Both checks are opt-in. They print one line per check on standard error
 as a warning, and they do not change the exit code. `--strict-config`
@@ -633,7 +728,12 @@ warns. `equalModRequired` is shown for information and never fails. A
 missing `verifySignatures` fails, because the engine default is 0. A
 comment and a quoted string cannot hide a setting.
 
+</details>
+
 ### JSON output and the doctor
+
+<details>
+<summary>The JSON fields and the doctor</summary>
 
 `--json` writes one JSON object to standard output, and it writes nothing
 else there. The human report and the warnings move to standard error, so
@@ -771,11 +871,16 @@ each directory the uploads need, starting with the pack folder, before it
 sends the file. After the upload the command lists the server again and
 re-runs the check.
 
+</details>
+
 ### Upload performance
 
 An upload sends the smallest file first. A failure in the middle of a
 batch therefore leaves the large files for the next attempt. Each file
 uses `put -p`, so the server keeps the local modification time.
+
+<details>
+<summary>Buffers, retries, parallel jobs and progress</summary>
 
 The transfer has two settings, and both pass to every `sftp` run,
 including the verify phases and each parallel worker.
@@ -830,11 +935,18 @@ length. Only a complete `put` gives a file that matches the local copy.
 The segmented path does resume, and only from ranges the server
 acknowledged.
 
+</details>
+
 #### Segmented upload
 
 `--segmented` sends one large file over several connections. The command
 picks the largest planned upload at or above `--segment-min`. The other
-files use the normal upload path. The feature is off by default.
+files use the normal upload path. The feature is off by default. The
+mode uses a key file or an agent, or one password typed at the terminal
+with `--password-prompt`.
+
+<details>
+<summary>Flags, chunking, probe, resume and publish</summary>
 
 | Flag | Range | Default | Effect |
 | --- | --- | --- | --- |
@@ -1006,9 +1118,8 @@ The command removes a stale temp file with a warning when it has no
 checkpoint, or when it is more than a day old. It removes at most eight per
 run. It never removes the current temp file.
 
-This mode needs a key file or an agent. It does not prompt for a password.
-A server that accepts only a password must use the default `sftp` path,
-without `--segmented`.
+A server that accepts only a password needs `--password-prompt` and a
+terminal. Without a terminal, use the default `sftp` path.
 
 A failed segment exits 2. The pack checks keep their codes: 1 for a check
 failure and 2 for an input or environment failure. See Exit codes.
@@ -1037,6 +1148,8 @@ on a shaped bridge link. The link delays 60 ms and limits the rate to
 cases. They need `UKSFTA_SFTP_SHAPED=1` and a kernel that provides
 `sch_netem`. Without that kernel they skip with a printed reason. The
 shaped container shapes only its own interface, never the host network.
+
+</details>
 
 #### Measured throughput
 
@@ -1079,9 +1192,13 @@ connections change little there. They help a fast or high-latency link.
 #### Password prompt
 
 `--password-prompt` reads one password from the controlling terminal for
-the native segmented path. The flag takes no value, so shell history
-cannot hold a secret. It is off by default and conflicts with
-`--legacy-sftp`.
+the native segmented path. It is off by default.
+
+The flag takes no value, so shell history cannot hold a secret. It
+conflicts with `--legacy-sftp`.
+
+<details>
+<summary>Terminal use, failures and limits</summary>
 
 There is no config key and no environment variable for the password. The
 command never reads a file, an askpass helper, a keyring or the system
@@ -1115,6 +1232,8 @@ attacker who can read this process's memory is out of scope.
 The live cases in `tests/password_live.rs` need a Linux PTY through
 `script`. Without `script` they print a skip reason. The Windows runtime
 is not covered by a live case.
+
+</details>
 
 The client also sends `ServerAliveInterval=15`, `ServerAliveCountMax=3`
 and `ConnectTimeout=15`, so a dead link fails in seconds.
@@ -1177,6 +1296,11 @@ follows a symlink on the server, and it never recurses below `addons/` or
 
 ## Dependencies
 
+Every addon that the pack needs must be present, or listed as external.
+
+<details>
+<summary>How the addon closure is checked</summary>
+
 `uksfta deps` checks the addon closure of a built pack. It reads every
 `CfgPatches` class that each PBO in `addons/` provides, and every
 `requiredAddons[]` entry that each PBO declares. The command is local and
@@ -1232,6 +1356,8 @@ The command has four outcomes:
 - An unaccounted entry with `--strict`. The command exits 1.
 - A bad input. The command exits 2 and names the path or the reason.
 
+</details>
+
 ## Update checking
 
 Every command checks for a newer release and prints a notice when one
@@ -1250,7 +1376,7 @@ the install one-liner for your platform.
 
 ## Platforms
 
-Steam library discovery is dynamic — the tool reads what Steam records,
+Steam library discovery is dynamic. The tool reads what Steam records,
 it does not guess paths:
 
 - **Windows**: Steam's install path from the registry
@@ -1295,6 +1421,9 @@ run `uksfta --help` to verify.
 
 ### Manual download
 
+<details>
+<summary>Assets, checksums and a source build</summary>
+
 Download the binary for your platform from the [Releases
 page](https://github.com/UKSFTA/UKSFTA-Tools/releases) and put it on your
 `PATH`:
@@ -1321,8 +1450,12 @@ Or build from source: `cargo build --release` (Linux, macOS) /
 `cargo build --release --target x86_64-pc-windows-msvc` (Windows, matches
 the published release binary). The minimum supported Rust version is 1.89.
 
+</details>
+
 ## Licence
 
 This project is licensed under the MIT Licence. See the `LICENSE` file.
 
-### Maintained by the UKSF Taskforce Alpha Development Team
+## Maintainers
+
+The UKSF Task Force Alpha Development Team maintains this project.
