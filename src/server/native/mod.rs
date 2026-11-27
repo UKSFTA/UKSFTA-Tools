@@ -61,10 +61,9 @@ pub fn run(
     pack_id: &str,
     unit: &UploadUnit,
     trace: Option<SegmentedTrace>,
-    password_prompt: bool,
+    password: Option<Arc<Secret>>,
 ) -> Result<String, UksftaError> {
-    run_report(settings, state_root, pack_id, unit, trace, password_prompt)
-        .map(|report| report.hash)
+    run_report(settings, state_root, pack_id, unit, trace, password).map(|report| report.hash)
 }
 
 /// The hash and the connection counts of one segmented run.
@@ -89,7 +88,7 @@ pub fn run_report(
     pack_id: &str,
     unit: &UploadUnit,
     trace: Option<SegmentedTrace>,
-    password_prompt: bool,
+    password: Option<Arc<Secret>>,
 ) -> Result<RunReport, UksftaError> {
     let connections = settings.segment.connections.max(1);
     let threads = usize::from(connections.min(8)).max(1);
@@ -98,9 +97,21 @@ pub fn run_report(
         .enable_all()
         .build()
         .map_err(UksftaError::Io)?;
-    runtime.block_on(async {
-        transfer(settings, state_root, pack_id, unit, trace, password_prompt).await
-    })
+    runtime.block_on(async { transfer(settings, state_root, pack_id, unit, trace, password).await })
+}
+
+/// Prompt once for the native path, before the probe and the transfer.
+///
+/// # Errors
+/// Returns `Auth` when the terminal cannot be read or the read fails. The
+/// run never falls back to another credential.
+pub fn prompt_password(settings: &Settings) -> Result<Arc<Secret>, UksftaError> {
+    let (user, host) = connect::split_destination(&settings.destination)?;
+    match secret::prompt(&host, &user) {
+        Ok(secret) => Ok(Arc::new(secret)),
+        Err(UksftaError::Input(message)) => Err(UksftaError::Auth(message)),
+        Err(error) => Err(error),
+    }
 }
 
 /// The active limit a run starts at.
@@ -119,7 +130,7 @@ async fn transfer(
     pack_id: &str,
     unit: &UploadUnit,
     trace: Option<SegmentedTrace>,
-    password_prompt: bool,
+    password: Option<Arc<Secret>>,
 ) -> Result<RunReport, UksftaError> {
     let plan = SegmentPlan::new(
         unit.size,
@@ -134,28 +145,6 @@ async fn transfer(
     if let Some(trace) = trace.as_ref() {
         trace.progress.hide();
     }
-    let password = if password_prompt {
-        let (user, host) = connect::split_destination(&settings.destination)?;
-        // An explicit prompt owns the credential: a failure to read it is
-        // fatal, so the run cannot fall back to another credential.
-        match secret::prompt(&host, &user) {
-            Ok(secret) => Some(Arc::new(secret)),
-            Err(UksftaError::Input(message)) => {
-                if let Some(trace) = trace.as_ref() {
-                    trace.progress.show();
-                }
-                return Err(UksftaError::Auth(message));
-            }
-            Err(error) => {
-                if let Some(trace) = trace.as_ref() {
-                    trace.progress.show();
-                }
-                return Err(error);
-            }
-        }
-    } else {
-        None
-    };
     if let Some(trace) = trace.as_ref() {
         trace.progress.show();
     }

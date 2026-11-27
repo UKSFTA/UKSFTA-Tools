@@ -88,6 +88,7 @@ pub struct UploadJson {
 #[derive(Serialize)]
 pub struct ProbeJson {
     pub system_mbps: f64,
+    pub system_jobs: u8,
     pub native_one_mbps: f64,
     pub native_two_mbps: f64,
     pub read_mbps: f64,
@@ -100,6 +101,7 @@ impl From<&super::native::probe::Decision> for ProbeJson {
     fn from(decision: &super::native::probe::Decision) -> Self {
         Self {
             system_mbps: decision.probe.system_mbps,
+            system_jobs: decision.probe.system_jobs,
             native_one_mbps: decision.probe.native_one_mbps,
             native_two_mbps: decision.probe.native_two_mbps,
             read_mbps: decision.probe.read_mbps,

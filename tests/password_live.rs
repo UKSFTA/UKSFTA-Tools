@@ -119,6 +119,10 @@ struct Setup {
 
 impl Setup {
     fn new(tag: &str, port: u16, service: &'static str) -> Self {
+        Self::with_size(tag, port, service, SIZE)
+    }
+
+    fn with_size(tag: &str, port: u16, service: &'static str, size: u64) -> Self {
         let repo = tempfile::TempDir::new().expect("a repository");
         let addons = repo.path().join(".hemttout/release/addons");
         std::fs::create_dir_all(&addons).expect("addons");
@@ -128,7 +132,7 @@ impl Setup {
         )
         .expect("meta.cpp");
         let pbo = addons.join(format!("pw_{tag}.pbo"));
-        common::write_pattern(&pbo, SIZE);
+        common::write_pattern(&pbo, size);
 
         let known_hosts = repo.path().join("known_hosts");
         std::fs::write(
@@ -314,6 +318,50 @@ fn the_correct_password_uploads_over_a_pty() {
     assert!(
         !state_text(setup.repo.path()).contains(&password),
         "the password reached .uksfta/"
+    );
+}
+
+#[test]
+#[ignore = "needs the Docker password fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_password_prompt_probes_once_and_publishes() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    if !script_available() {
+        eprintln!("skipped: script is not installed");
+        return;
+    }
+    // The probe threshold is 256 MiB, so this file makes the probe run.
+    let setup = Setup::with_size("pwprobe", 2224, "sftp-password", 300 * 1024 * 1024);
+    setup.prepare();
+    let password = fixture_password("sftp-password");
+
+    let (code, output) = run_pty(&setup.command(), &password, &password);
+    println!("password_probe: exit={code:?}");
+    assert_eq!(code, Some(0), "the run failed: {output}");
+    assert_eq!(
+        output.matches("Password for ").count(),
+        1,
+        "the native password must be asked once: {output}"
+    );
+    assert!(
+        output.contains("published in"),
+        "the segmented transfer must publish: {output}"
+    );
+    // The system probe runs in batch mode, so it cannot authenticate with a
+    // password-only server. The documented fallback keeps the segmented path.
+    assert!(
+        output.contains("the system path could not authenticate; keeping the segmented path"),
+        "the fallback must be reported: {output}"
+    );
+    assert_eq!(
+        remote_sha(setup.service, &setup.remote_pbo),
+        local_sha(&setup.pbo)
+    );
+    assert!(
+        !output.contains(&password),
+        "the password reached the terminal output: {output}"
     );
 }
 

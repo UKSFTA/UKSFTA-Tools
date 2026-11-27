@@ -773,6 +773,19 @@ fn upload_with_retries(
         .mode
         .is_on()
         .then(|| progress::UploadProgress::new(&units, report.mode));
+    // The prompt owns the terminal, so the view is hidden while it runs.
+    let password = if password_prompt && segment.is_some() {
+        if let Some(view) = &view {
+            view.hide();
+        }
+        let prompted = native::prompt_password(verifier.settings);
+        if let Some(view) = &view {
+            view.show();
+        }
+        Some(prompted?)
+    } else {
+        None
+    };
     let outcome = upload_loop(
         verifier,
         &mut plan,
@@ -780,7 +793,7 @@ fn upload_with_retries(
         jobs,
         &mut report,
         segment,
-        password_prompt,
+        password,
         view.clone(),
     );
     if let Some(view) = &view {
@@ -797,7 +810,7 @@ fn upload_loop(
     jobs: u8,
     report: &mut UploadReport<'_>,
     segment: Option<&SegmentChoice>,
-    password_prompt: bool,
+    password: Option<Arc<native::secret::Secret>>,
     view: Option<Arc<progress::UploadProgress>>,
 ) -> Result<(), UksftaError> {
     let upload_started = Instant::now();
@@ -818,24 +831,29 @@ fn upload_loop(
 
         let mut use_segment = true;
         if verifier.settings.segment.probe && choice.unit.size >= native::probe::MIN_PROBE_BYTES {
-            if password_prompt {
-                eprintln!("Warning: probe: a password prompt keeps the segmented path");
-            } else {
-                match native::probe::run_blocking(
-                    verifier.settings,
-                    Path::new("."),
-                    &verifier.local.id,
-                    &choice.unit,
-                ) {
-                    Ok(decision) => {
+            match native::probe::run_blocking(
+                verifier.settings,
+                Path::new("."),
+                &verifier.local.id,
+                &choice.unit,
+                password.as_ref(),
+                jobs,
+            ) {
+                Ok(decision) => {
+                    if decision.probe.system_mbps > 0.0 {
                         say(report.json, &decision.rates_line());
                         say(report.json, &decision.decision_line());
                         use_segment = decision.segmented;
-                        *report.probe = Some(decision);
+                    } else {
+                        eprintln!(
+                            "Warning: probe: the system path could not authenticate; keeping the segmented path"
+                        );
                     }
-                    Err(error) => {
-                        eprintln!("Warning: probe: {error}; keeping the segmented path");
-                    }
+                    *report.probe = Some(decision);
+                }
+                Err(UksftaError::Auth(message)) => return Err(UksftaError::Auth(message)),
+                Err(error) => {
+                    eprintln!("Warning: probe: {error}; keeping the segmented path");
                 }
             }
         }
@@ -856,7 +874,7 @@ fn upload_loop(
                 &verifier.local.id,
                 &choice.unit,
                 trace,
-                password_prompt,
+                password.clone(),
             ) {
                 Ok(run) => {
                     let elapsed = started.elapsed();
@@ -896,7 +914,7 @@ fn upload_loop(
                 Err(UksftaError::Locked(message)) => {
                     return Err(UksftaError::Locked(message));
                 }
-                Err(UksftaError::Auth(message)) if password_prompt => {
+                Err(UksftaError::Auth(message)) if password.is_some() => {
                     return Err(UksftaError::Auth(message));
                 }
                 Err(error) => {
