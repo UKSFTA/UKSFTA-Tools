@@ -742,6 +742,59 @@ fn json_reports_the_published_segmented_file() {
 
 #[test]
 #[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_probe_chooses_the_whole_file_path_on_a_fast_link() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::with_size("probe", 300 * 1024 * 1024);
+    prepare_remote(&setup);
+
+    let output = setup.run(&["--segment-probe"]);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        output.status.success(),
+        "the probe run failed: {}",
+        stderr(&output)
+    );
+    assert!(
+        stdout.contains("probe: whole-file faster"),
+        "the fast link must choose whole: {stdout}"
+    );
+    assert!(
+        !stdout.contains("published in"),
+        "the whole-file path must carry it: {stdout}"
+    );
+    assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_disabled_probe_keeps_the_segmented_path() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::with_size("noprobe", 64 * 1024 * 1024);
+    prepare_remote(&setup);
+
+    let output = setup.run(&["--no-segment-probe"]);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        output.status.success(),
+        "the upload failed: {}",
+        stderr(&output)
+    );
+    assert!(
+        stdout.contains("published in"),
+        "the segmented path must run: {stdout}"
+    );
+    assert!(!stdout.contains("probe:"), "no probe line: {stdout}");
+    assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
 fn a_limited_run_stays_below_the_rate() {
     if !live() {
         return;

@@ -6,6 +6,7 @@ pub mod adaptive;
 pub mod checkpoint;
 pub mod connect;
 pub mod known_hosts;
+pub mod probe;
 pub mod publish;
 pub mod schedule;
 pub mod secret;
@@ -53,6 +54,7 @@ const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 /// Returns `Input` when the plan, a write, the length check, the read-back
 /// hash or the publish fails. A failed run keeps the temp file and the
 /// checkpoint, so the next run can resume.
+#[allow(dead_code)] // the hash-only wrapper the live tests use
 pub fn run(
     settings: &Settings,
     state_root: &Path,
@@ -61,6 +63,34 @@ pub fn run(
     trace: Option<SegmentedTrace>,
     password_prompt: bool,
 ) -> Result<String, UksftaError> {
+    run_report(settings, state_root, pack_id, unit, trace, password_prompt)
+        .map(|report| report.hash)
+}
+
+/// The hash and the connection counts of one segmented run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunReport {
+    pub hash: String,
+    /// The configured maximum.
+    pub max: u8,
+    /// The limit the run started at.
+    pub start: u8,
+    /// The highest active limit seen.
+    pub peak: u8,
+}
+
+/// Upload one file and report how the connections moved.
+///
+/// # Errors
+/// The same errors as [`run`].
+pub fn run_report(
+    settings: &Settings,
+    state_root: &Path,
+    pack_id: &str,
+    unit: &UploadUnit,
+    trace: Option<SegmentedTrace>,
+    password_prompt: bool,
+) -> Result<RunReport, UksftaError> {
     let connections = settings.segment.connections.max(1);
     let threads = usize::from(connections.min(8)).max(1);
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -73,6 +103,16 @@ pub fn run(
     })
 }
 
+/// The active limit a run starts at.
+fn initial_limit(settings: &Settings) -> u8 {
+    let max = settings.segment.connections.max(1);
+    if settings.segment.adaptive && max > 1 {
+        adaptive::START.min(max)
+    } else {
+        max
+    }
+}
+
 async fn transfer(
     settings: &Settings,
     state_root: &Path,
@@ -80,7 +120,7 @@ async fn transfer(
     unit: &UploadUnit,
     trace: Option<SegmentedTrace>,
     password_prompt: bool,
-) -> Result<String, UksftaError> {
+) -> Result<RunReport, UksftaError> {
     let plan = SegmentPlan::new(
         unit.size,
         settings.segment.connections,
@@ -123,8 +163,7 @@ async fn transfer(
     let client = coordinator.sftp;
     let buffer = settings.transfer.buffer;
 
-    let (start, temp) =
-        checkpoint::decide(&client, state_root, pack_id, unit, settings, buffer).await?;
+    let (start, temp) = checkpoint::decide(&client, state_root, pack_id, unit, settings).await?;
     writer::assert_not_loadable(&temp)?;
 
     let directory = remote_dir(&unit.remote);
@@ -157,7 +196,15 @@ async fn transfer(
         identity: &identity,
         password: password.as_ref(),
     };
-    finish_job(&job).await
+    let max = settings.segment.connections.max(1);
+    let start = initial_limit(settings);
+    let (hash, peak) = finish_job(&job).await?;
+    Ok(RunReport {
+        hash,
+        max,
+        start,
+        peak,
+    })
 }
 
 /// Everything one segmented transfer needs.
@@ -177,11 +224,13 @@ struct Job<'a> {
     password: Option<&'a Arc<Secret>>,
 }
 
-async fn finish_job(job: &Job<'_>) -> Result<String, UksftaError> {
+async fn finish_job(job: &Job<'_>) -> Result<(String, u8), UksftaError> {
     let size = job.unit.size;
-    if job.from < size {
-        send_ranges(job).await?;
-    }
+    let peak = if job.from < size {
+        send_ranges(job).await?
+    } else {
+        initial_limit(job.settings)
+    };
 
     // The transfer may have replaced every worker connection, so the
     // completion steps use a fresh one.
@@ -190,7 +239,7 @@ async fn finish_job(job: &Job<'_>) -> Result<String, UksftaError> {
 
     writer::finish(client, job.temp, size).await?;
 
-    let hash = verify::hash_remote(client, job.temp, size, job.buffer).await?;
+    let hash = verify::hash_remote(client, job.temp, size, verify::READBACK_BUFFER).await?;
     if hash != job.identity.sha256 {
         return Err(UksftaError::Input(
             "the server received different bytes; nothing was published".to_string(),
@@ -208,7 +257,7 @@ async fn finish_job(job: &Job<'_>) -> Result<String, UksftaError> {
         job.pack_id,
         &job.unit.remote,
     ));
-    Ok(hash)
+    Ok((hash, peak))
 }
 
 /// The acknowledged ranges of one run, and the file that records them.
@@ -244,7 +293,7 @@ impl Acks {
 }
 
 /// Send every range at or above `job.from` on the configured connections.
-async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
+async fn send_ranges(job: &Job<'_>) -> Result<u8, UksftaError> {
     if job.from == 0 {
         writer::create_temp(job.client, job.temp).await?;
     } else {
@@ -300,17 +349,15 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
         .map(Arc::new);
     let signals = Arc::new(Signals::default());
     let adaptive = job.settings.segment.adaptive && max_connections > 1;
-    let initial = if adaptive {
-        adaptive::START.min(max_connections)
-    } else {
-        max_connections
-    };
+    let initial = initial_limit(job.settings);
+    signals.peak.store(u32::from(initial), Ordering::Relaxed);
     let (limit_tx, limit_rx) = tokio::sync::watch::channel(initial);
     let monitor = adaptive.then(|| {
         tokio::spawn(monitor_task(
             max_connections,
             limit_tx,
             Arc::clone(&signals),
+            job.trace.clone(),
         ))
     });
 
@@ -399,7 +446,10 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
         .map_err(|_| UksftaError::Input("the checkpoint lock is poisoned".to_string()))?;
     checkpoint::recompute_prefix(&mut guard.checkpoint, &done, job.unit.size);
     guard.save_now();
-    Ok(())
+    Ok(signals
+        .peak
+        .load(Ordering::Relaxed)
+        .min(u32::from(max_connections)) as u8)
 }
 
 /// Make the temp file its final length before the first range.
@@ -429,6 +479,8 @@ struct Signals {
     acked: AtomicU64,
     retries: AtomicU32,
     failures: AtomicU32,
+    /// The highest active limit the run reached.
+    peak: AtomicU32,
     /// Sessions this run holds open, so a refusal is only read as a server
     /// session limit when at least one connection works.
     opened: AtomicU32,
@@ -441,7 +493,12 @@ const TURN_POLL: Duration = Duration::from_millis(100);
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Measure the acknowledged rate and move the active limit.
-async fn monitor_task(max: u8, sender: tokio::sync::watch::Sender<u8>, signals: Arc<Signals>) {
+async fn monitor_task(
+    max: u8,
+    sender: tokio::sync::watch::Sender<u8>,
+    signals: Arc<Signals>,
+    trace: Option<SegmentedTrace>,
+) {
     let mut tracker = adaptive::Tracker::new(max);
     let mut previous = Instant::now();
     let mut acked = 0;
@@ -460,6 +517,12 @@ async fn monitor_task(max: u8, sender: tokio::sync::watch::Sender<u8>, signals: 
         }
         match tracker.sample(delta as f64 / seconds, retries, failure) {
             adaptive::Action::Raise(next) | adaptive::Action::Lower(next) => {
+                let current = *sender.borrow();
+                signals.peak.fetch_max(u32::from(next), Ordering::Relaxed);
+                match &trace {
+                    Some(trace) => trace.progress.connections(current, next),
+                    None => eprintln!("segment: connections {current} -> {next}"),
+                }
                 let _ = sender.send(next);
             }
             adaptive::Action::Hold => {}
@@ -516,6 +579,8 @@ async fn run_worker(
     trace: Option<&SegmentedTrace>,
 ) -> Result<(), UksftaError> {
     let reconnects = settings.segment.reconnects;
+    let fsync_every = u32::from(settings.segment.fsync_every);
+    let mut completed: u32 = 0;
     let mut attempts: u8 = 0;
     let mut session: Option<(NativeSession, File)> = None;
 
@@ -573,10 +638,16 @@ async fn run_worker(
         range_started(bars, worker, chunk.index, chunk.len);
         let written = writer::write_range(file, &chunk, local, buffer, limiter, &mut advance).await;
         let synced = match written {
-            Ok(()) if current.sftp.support_fsync() => file
-                .sync_all()
-                .await
-                .map_err(|error| UksftaError::Input(format!("sftp: {error}"))),
+            Ok(()) if current.sftp.support_fsync() => {
+                completed = completed.saturating_add(1);
+                if completed.is_multiple_of(fsync_every) {
+                    file.sync_all()
+                        .await
+                        .map_err(|error| UksftaError::Input(format!("sftp: {error}")))
+                } else {
+                    Ok(())
+                }
+            }
             Ok(()) => Ok(()),
             Err(error) => Err(error),
         };

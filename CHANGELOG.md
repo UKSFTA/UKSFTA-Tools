@@ -9,6 +9,16 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- A link probe chooses the whole-file path when it is faster. It runs for a
+  segmented file of 256 MiB or more, moves 4 MiB four times, and prints the
+  estimates and the decision. `--segment-probe` is on by default and
+  `--no-segment-probe` turns it off.
+- `--segment-fsync-every N` fsyncs every fourth completed range by default.
+  A resume re-hashes the prefix, so a checkpoint may safely run ahead of the
+  last fsync.
+- The read-back hash uses a dedicated 261120-byte buffer.
+- The segmented published line reports `max`, `start` and `peak`
+  connection counts, and each adaptive change logs one line.
 - `--limit` caps the upload rate on both paths. A `K`, `M` or `G` suffix is
   1024-based. The segmented path uses one shared limiter for every
   connection, and the system `sftp` path passes `-l` in Kbit/s.

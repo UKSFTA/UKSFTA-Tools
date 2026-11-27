@@ -646,6 +646,59 @@ fn a_full_segmented_run_publishes_and_returns_the_hash() {
 
 #[tokio::test]
 #[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+async fn the_readback_buffer_rate_is_measurable() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock_async().await;
+    const SIZE: u64 = 256 * 1024 * 1024;
+    let (dir, pinned) = pin(port());
+    let local = local_file(&dir, "read.pbo", SIZE);
+    let settings = segmented_settings(pinned, 8, Some(8 * 1024 * 1024));
+    let base = remote_dir("readbuf");
+    let temp = format!("{base}/read.probe");
+    let session = session(&settings).await;
+    make_dir(&session.sftp, &base).await;
+
+    super::writer::create_temp(&session.sftp, &temp)
+        .await
+        .expect("the temp file");
+    let mut file = super::writer::open_range_writer(&session.sftp, &temp)
+        .await
+        .expect("the writer");
+    let chunk = super::segment::Chunk {
+        index: 0,
+        start: 0,
+        len: SIZE as u32,
+    };
+    super::writer::write_range(&mut file, &chunk, &local, 32_768, None, &mut |_| {})
+        .await
+        .expect("the write");
+    file.close().await.expect("close");
+
+    let started = std::time::Instant::now();
+    super::verify::hash_remote(&session.sftp, &temp, SIZE, 32_768)
+        .await
+        .expect("the small-buffer hash");
+    let small = started.elapsed();
+    let started = std::time::Instant::now();
+    super::verify::hash_remote(&session.sftp, &temp, SIZE, super::verify::READBACK_BUFFER)
+        .await
+        .expect("the read-back hash");
+    let large = started.elapsed();
+    println!(
+        "readback 256 MiB: 32 KiB {:.2} s, {} B {:.2} s",
+        small.as_secs_f64(),
+        super::verify::READBACK_BUFFER,
+        large.as_secs_f64()
+    );
+
+    let mut fs = session.sftp.fs();
+    let _ = fs.remove_file(&temp).await;
+}
+
+#[tokio::test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
 async fn preallocation_sets_the_temp_length_before_the_first_write() {
     if !live() {
         return;
@@ -1016,7 +1069,6 @@ fn a_resume_continues_from_the_acked_prefix() {
             "pack-a",
             &fixture.unit,
             &fixture.settings,
-            fixture.settings.transfer.buffer,
         )
         .await
         .expect("decide");
@@ -1101,7 +1153,6 @@ fn a_corrupted_prefix_restarts_from_scratch() {
             "pack-c",
             &fixture.unit,
             &fixture.settings,
-            fixture.settings.transfer.buffer,
         )
         .await
         .expect("decide");

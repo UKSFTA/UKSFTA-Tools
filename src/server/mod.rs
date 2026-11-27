@@ -107,6 +107,10 @@ pub struct ServerOptions {
     pub segment_min: Option<u64>,
     /// Scale the segmented connections between one and the maximum.
     pub segment_adaptive: bool,
+    /// Probe the link before segmenting.
+    pub segment_probe: Option<bool>,
+    /// Fsync every N completed ranges.
+    pub segment_fsync_every: Option<u8>,
     /// Preallocate the segmented temp file.
     pub preallocate: Option<bool>,
     /// The upload rate limit text.
@@ -164,6 +168,11 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
                 .segment
                 .as_ref()
                 .map(|segment| (segment.remote.as_str(), segment.sha256.as_str())),
+            outcome
+                .segment
+                .as_ref()
+                .map(|segment| (segment.max, segment.start, segment.peak)),
+            outcome.probe.as_ref(),
             &outcome.sent,
             &result,
         );
@@ -204,6 +213,7 @@ struct Outcome {
     upload_ms: Option<u64>,
     segment: Option<SegmentOutcome>,
     segment_choice: Option<(String, u8)>,
+    probe: Option<native::probe::Decision>,
     sent: Vec<summary::SentFile>,
 }
 
@@ -211,6 +221,9 @@ struct Outcome {
 struct SegmentOutcome {
     remote: String,
     sha256: String,
+    max: u8,
+    start: u8,
+    peak: u8,
 }
 
 /// Where the upload loop reports progress and where the segmented result
@@ -219,6 +232,7 @@ struct UploadReport<'a> {
     mode: progress::Mode,
     json: bool,
     segment: &'a mut Option<SegmentOutcome>,
+    probe: &'a mut Option<native::probe::Decision>,
     sent: &'a mut Vec<summary::SentFile>,
 }
 
@@ -374,6 +388,7 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
                 mode,
                 json: opts.json,
                 segment: &mut outcome.segment,
+                probe: &mut outcome.probe,
                 sent: &mut outcome.sent,
             },
             segment.as_ref(),
@@ -441,6 +456,8 @@ fn overrides(opts: &ServerOptions) -> Overrides {
         },
         segment_min: opts.segment_min,
         segment_adaptive: opts.segment_adaptive.then_some(true),
+        probe: opts.segment_probe,
+        fsync_every: opts.segment_fsync_every,
         preallocate: opts.preallocate,
         limit: opts.limit.clone(),
         segment_connections: opts.segment_connections,
@@ -799,61 +816,94 @@ fn upload_loop(
             Err(error) => eprintln!("Warning: {error}"),
         }
 
-        if let Some(view) = &view {
-            view.file_started(&choice.unit.remote);
+        let mut use_segment = true;
+        if verifier.settings.segment.probe && choice.unit.size >= native::probe::MIN_PROBE_BYTES {
+            if password_prompt {
+                eprintln!("Warning: probe: a password prompt keeps the segmented path");
+            } else {
+                match native::probe::run_blocking(
+                    verifier.settings,
+                    Path::new("."),
+                    &verifier.local.id,
+                    &choice.unit,
+                ) {
+                    Ok(decision) => {
+                        say(report.json, &decision.rates_line());
+                        say(report.json, &decision.decision_line());
+                        use_segment = decision.segmented;
+                        *report.probe = Some(decision);
+                    }
+                    Err(error) => {
+                        eprintln!("Warning: probe: {error}; keeping the segmented path");
+                    }
+                }
+            }
         }
-        let trace = view.as_ref().map(|view| progress::SegmentedTrace {
-            progress: Arc::clone(view),
-            remote: choice.unit.remote.clone(),
-        });
-        let name = remote_name(&choice.unit.remote);
-        let started = Instant::now();
-        match native::run(
-            verifier.settings,
-            Path::new("."),
-            &verifier.local.id,
-            &choice.unit,
-            trace,
-            password_prompt,
-        ) {
-            Ok(hash) => {
-                let elapsed = started.elapsed();
-                say(
+
+        if use_segment {
+            if let Some(view) = &view {
+                view.file_started(&choice.unit.remote);
+            }
+            let trace = view.as_ref().map(|view| progress::SegmentedTrace {
+                progress: Arc::clone(view),
+                remote: choice.unit.remote.clone(),
+            });
+            let name = remote_name(&choice.unit.remote);
+            let started = Instant::now();
+            match native::run_report(
+                verifier.settings,
+                Path::new("."),
+                &verifier.local.id,
+                &choice.unit,
+                trace,
+                password_prompt,
+            ) {
+                Ok(run) => {
+                    let elapsed = started.elapsed();
+                    let hash = run.hash;
+                    say(
                     report.json,
                     &format!(
-                        "segment: {name} published in {:.1} s, {:.2} MB/s, sha256 {}",
+                        "segment: {name} published in {:.1} s, {:.2} MB/s, max {}, start {}, peak {}, sha256 {}",
                         elapsed.as_secs_f64(),
                         transfer_rate(choice.unit.size, elapsed),
+                        run.max,
+                        run.start,
+                        run.peak,
                         hash.get(..12).unwrap_or(&hash)
                     ),
                 );
-                if let Some(view) = &view {
-                    view.file_done(&choice.unit.remote, Some(&hash));
+                    if let Some(view) = &view {
+                        view.file_done(&choice.unit.remote, Some(&hash));
+                    }
+                    report.sent.push(summary::SentFile::new(
+                        name.to_string(),
+                        choice.unit.remote.clone(),
+                        choice.unit.size,
+                        elapsed.as_secs_f64(),
+                        false,
+                        hash.clone(),
+                    ));
+                    *report.segment = Some(SegmentOutcome {
+                        remote: choice.unit.remote.clone(),
+                        sha256: hash,
+                        max: run.max,
+                        start: run.start,
+                        peak: run.peak,
+                    });
+                    skip.insert(choice.unit.remote.clone());
                 }
-                report.sent.push(summary::SentFile::new(
-                    name.to_string(),
-                    choice.unit.remote.clone(),
-                    choice.unit.size,
-                    elapsed.as_secs_f64(),
-                    false,
-                    hash.clone(),
-                ));
-                *report.segment = Some(SegmentOutcome {
-                    remote: choice.unit.remote.clone(),
-                    sha256: hash,
-                });
-                skip.insert(choice.unit.remote.clone());
-            }
-            Err(UksftaError::Locked(message)) => {
-                return Err(UksftaError::Locked(message));
-            }
-            Err(UksftaError::Auth(message)) if password_prompt => {
-                return Err(UksftaError::Auth(message));
-            }
-            Err(error) => {
-                eprintln!("{}", progress::fallback_line(&error));
-                if let Some(view) = &view {
-                    view.file_failed(&choice.unit.remote);
+                Err(UksftaError::Locked(message)) => {
+                    return Err(UksftaError::Locked(message));
+                }
+                Err(UksftaError::Auth(message)) if password_prompt => {
+                    return Err(UksftaError::Auth(message));
+                }
+                Err(error) => {
+                    eprintln!("{}", progress::fallback_line(&error));
+                    if let Some(view) = &view {
+                        view.file_failed(&choice.unit.remote);
+                    }
                 }
             }
         }

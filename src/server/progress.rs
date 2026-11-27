@@ -188,6 +188,14 @@ struct ResumeEvent {
 }
 
 #[derive(Serialize)]
+struct ConnectionsEvent {
+    schema_version: u8,
+    event: &'static str,
+    from: u8,
+    to: u8,
+}
+
+#[derive(Serialize)]
 struct DoneEvent {
     schema_version: u8,
     event: &'static str,
@@ -617,6 +625,22 @@ impl UploadProgress {
         }
         if let Some(bar) = self.rows.get(index) {
             bar.set_position(from);
+        }
+    }
+
+    /// Report one adaptive change of the active connection count.
+    pub fn connections(&self, from: u8, to: u8) {
+        match self.mode {
+            Mode::Off => {}
+            Mode::Json => emit(&ConnectionsEvent {
+                schema_version: 1,
+                event: "connections",
+                from,
+                to,
+            }),
+            Mode::Plain | Mode::Terminal => {
+                eprintln!("segment: connections {from} -> {to}");
+            }
         }
     }
 

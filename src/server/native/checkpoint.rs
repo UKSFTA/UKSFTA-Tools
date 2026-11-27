@@ -198,7 +198,6 @@ pub async fn decide(
     pack_id: &str,
     unit: &UploadUnit,
     settings: &Settings,
-    buffer: u32,
 ) -> Result<(Start, String), UksftaError> {
     let temp = plan_temp_name(&unit.remote);
     let path = path_for(state_root, pack_id, &unit.remote);
@@ -236,7 +235,7 @@ pub async fn decide(
     }
 
     if checkpoint.acked_prefix == unit.size {
-        match verify::hash_remote(sftp, &temp, unit.size, buffer).await {
+        match verify::hash_remote(sftp, &temp, unit.size, verify::READBACK_BUFFER).await {
             Ok(hash) if hash == identity.sha256 => {
                 return Ok((Start::Resume { from: unit.size }, temp));
             }
@@ -251,7 +250,14 @@ pub async fn decide(
     }
 
     let local_prefix = verify::hash_local_prefix(&unit.local, checkpoint.acked_prefix)?;
-    match verify::hash_remote_prefix(sftp, &temp, checkpoint.acked_prefix, buffer).await {
+    match verify::hash_remote_prefix(
+        sftp,
+        &temp,
+        checkpoint.acked_prefix,
+        verify::READBACK_BUFFER,
+    )
+    .await
+    {
         Ok(hash) if hash == local_prefix => {
             checkpoint.updated_unix = now();
             Ok((

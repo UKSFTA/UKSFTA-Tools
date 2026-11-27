@@ -845,6 +845,8 @@ files use the normal upload path. The feature is off by default.
 | `--segment-chunk BYTES` | 1 MiB to 64 MiB | automatic | The range size. It must be a 4096-byte multiple. It is fixed for the run. |
 | `--limit BYTES` | at least 1 B/s | none | Cap the upload rate. A plain count is bytes per second. |
 | `--preallocate` | on or off | on | Set the segmented temp file to its full length before the first range. |
+| `--segment-probe` | on or off | on | Probe the link before segmenting a file of 256 MiB or more. |
+| `--segment-fsync-every N` | 1 to 64 | 4 | Fsync every N completed ranges. |
 | `--segment-resume POLICY` | auto or off | auto | Continue an earlier interrupted file. |
 | `--segment-reconnects N` | 0 to 10 | 3 | The reconnects for one dead connection. |
 | `--legacy-sftp` | on or off | off | Force the system `sftp` path for one release. |
@@ -855,6 +857,33 @@ to a 4096-byte multiple. The command chooses the chunk once, at plan time,
 and keeps it for the whole run. The checkpoint indexes and the acknowledged
 prefix depend on fixed range boundaries, so an adaptive run does not change
 the chunk.
+
+For a file of 256 MiB or more, the command probes the link first. It moves
+4 MiB four times in the pack folder with hidden `.uksfta-probe-*` names: a
+system `sftp` upload, a native write on one connection, a native write on
+two connections, and a native read-back. It then estimates both paths and
+keeps the whole-file path when the segmented estimate is not at least 10
+percent better. The decision line names both estimates, and the rates line
+names the four measured rates. A probe that cannot run gives one warning
+and keeps the segmented path. The probe never publishes, never uses a name
+Arma loads, and removes its files on every exit path. A hard kill can leave
+the three files; the next probe overwrites and removes them. The probe
+needs a key or an agent, so `--password-prompt` keeps the segmented path.
+`--no-segment-probe` turns it off.
+
+Fsync now runs every fourth completed range by default
+(`--segment-fsync-every`). The checkpoint can therefore record a range that
+was not yet synced. That is safe because a resume re-hashes the remote
+prefix, so a range lost after a crash makes the prefix mismatch and the run
+restarts from a verified point. The completion fsync, the publish hash and
+the equal-SHA-256 rule do not change.
+
+The read-back hash uses its own 261120-byte buffer, not the 32 KiB
+transfer buffer. The limit does not apply to the read-back.
+
+A segmented run reports `max`, `start` and `peak` connection counts in its
+published line. Every adaptive change prints one line, such as
+`segment: connections 4 -> 5`, and only changes are logged.
 
 `--limit` caps both upload paths. A plain number is bytes per second, and a
 `K`, `M` or `G` suffix is 1024-based: `500K`, `2M`, `1.5M`. The system
