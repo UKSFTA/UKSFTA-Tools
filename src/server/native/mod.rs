@@ -381,6 +381,7 @@ async fn run_worker(
             .as_mut()
             .ok_or_else(|| UksftaError::Input("a segmented worker lost its handle".to_string()))?;
         let mut advance = |bytes: u64| progress.advance(worker, bytes);
+        progress.start_range(worker, &chunk);
         let written = writer::write_range(file, &chunk, local, buffer, &mut advance).await;
         let synced = match written {
             Ok(()) if current.sftp.support_fsync() => file
@@ -393,6 +394,7 @@ async fn run_worker(
 
         match synced {
             Ok(()) => {
+                progress.finish_range(worker);
                 complete(scheduler, chunk.index)?;
                 let mut guard = acks.lock().map_err(|_| {
                     UksftaError::Input("the checkpoint lock is poisoned".to_string())
@@ -400,10 +402,12 @@ async fn run_worker(
                 guard.ack(chunk.index, size);
             }
             Err(error) if is_fatal(&error) => {
+                progress.reset_range(worker);
                 fail(scheduler, chunk.index)?;
                 return Err(error);
             }
             Err(_) => {
+                progress.reset_range(worker);
                 fail(scheduler, chunk.index)?;
                 session = None;
                 attempts += 1;

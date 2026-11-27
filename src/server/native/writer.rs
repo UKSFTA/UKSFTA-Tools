@@ -348,10 +348,26 @@ pub async fn check_space(sftp: &Sftp, dir: &str, need: u64) -> Result<Option<u64
         eprintln!("Warning: {dir} does not exist yet; the upload creates it");
         return Ok(None);
     }
-    let stat = fs.statvfs(dir).await.map_err(|error| {
-        UksftaError::Input(format!("cannot ask for free space at {dir}: {error}"))
-    })?;
+    let stat = match fs.statvfs(dir).await {
+        Ok(stat) => stat,
+        Err(openssh_sftp_client::Error::SftpError(
+            openssh_sftp_client::error::SftpErrorKind::OpUnsupported,
+            _,
+        )) => {
+            eprintln!("Warning: the server cannot report free space; the upload continues");
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(UksftaError::Input(format!(
+                "cannot ask for free space at {dir}: {error}"
+            )))
+        }
+    };
     let free = stat.bavail.saturating_mul(stat.frsize);
+    if stat.frsize == 0 || stat.blocks == 0 || free == 0 {
+        eprintln!("Warning: the server reported no usable free-space data; the upload continues");
+        return Ok(None);
+    }
     if free < need {
         return Err(UksftaError::Input(format!(
             "the server holds {free} free bytes but the upload needs {need}"
