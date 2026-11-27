@@ -930,6 +930,46 @@ cases. They need `UKSFTA_SFTP_SHAPED=1` and a kernel that provides
 `sch_netem`. Without that kernel they skip with a printed reason. The
 shaped container shapes only its own interface, never the host network.
 
+#### Password prompt
+
+`--password-prompt` reads one password from the controlling terminal for
+the native segmented path. The flag takes no value, so shell history
+cannot hold a secret. It is off by default and conflicts with
+`--legacy-sftp`.
+
+There is no config key and no environment variable for the password. The
+command never reads a file, an askpass helper, a keyring or the system
+`sftp` binary for it.
+
+The command opens `/dev/tty` (or `CONIN$` on Windows) before the host key
+check and before any socket. Without a controlling terminal it exits 2
+and names `--identity PATH`, ssh-agent and the default `sftp` path. The
+prompt uses echo off.
+
+The command makes one attempt. It prefers the password method, falls back
+to keyboard-interactive when the server offers only that, and gives up
+after one failure. A wrong password exits 2 with the destination,
+`(password)` and the remaining methods. The command never asks again.
+Server text in that message passes through the terminal sanitiser.
+
+An explicit prompt owns the credential. A wrong or empty password, or no
+accepted method, is fatal for the run: the command exits 2 and publishes
+nothing. It does not fall back to a key, an agent or the system `sftp`
+path for that file. Other native failures, such as a dropped link or a
+failed publish, still fall back to the system path.
+
+The password lives in one string for the duration of the attempt. The
+command does not write it to `.uksfta/`, the checkpoint, the JSON report
+or the log.
+
+The bytes are **not wiped**. `String` gives no way to overwrite the
+buffer without `unsafe`, and this build adds no `zeroize` dependency. An
+attacker who can read this process's memory is out of scope.
+
+The live cases in `tests/password_live.rs` need a Linux PTY through
+`script`. Without `script` they print a skip reason. The Windows runtime
+is not covered by a live case.
+
 The client also sends `ServerAliveInterval=15`, `ServerAliveCountMax=3`
 and `ConnectTimeout=15`, so a dead link fails in seconds.
 

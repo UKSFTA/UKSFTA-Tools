@@ -11,3 +11,38 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+
+  # Password auth for the native path. The password is test-only and comes
+  # from this environment block; nothing else in the repository holds it.
+  sftp-password:
+    build: .
+    image: uksfta-sftp-test:latest
+    network_mode: host
+    environment:
+      FIXTURE_PASSWORD: uksfta-fixture-password
+    command:
+      - sh
+      - -c
+      - echo "uksfta:$$FIXTURE_PASSWORD" | chpasswd && exec /usr/sbin/sshd -D -e -p 2224 -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=no -o UsePAM=no
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/2224'"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  # Keyboard-interactive only. Linux sshd needs PAM for this method.
+  sftp-kbdint:
+    build: .
+    image: uksfta-sftp-test:latest
+    network_mode: host
+    environment:
+      FIXTURE_PASSWORD: uksfta-fixture-password
+    command:
+      - sh
+      - -c
+      - echo "uksfta:$$FIXTURE_PASSWORD" | chpasswd && exec /usr/sbin/sshd -D -e -p 2225 -o PasswordAuthentication=no -o KbdInteractiveAuthentication=yes -o UsePAM=yes
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/2225'"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
