@@ -370,6 +370,11 @@ fn reset_sigpipe() {
 }
 
 fn main() {
+    // console-subscriber panics unless tokio was built with the
+    // tokio_unstable cfg, so the call is compiled only when both are set.
+    #[cfg(all(feature = "console", tokio_unstable))]
+    console_subscriber::init();
+
     #[cfg(unix)]
     reset_sigpipe();
 

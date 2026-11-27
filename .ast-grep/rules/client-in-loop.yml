@@ -1,0 +1,14 @@
+id: client-in-loop
+language: Rust
+severity: warning
+message: An SFTP client is constructed inside a loop. Build it once, outside.
+note: Each constructor pays a connection and an SSH handshake, so a loop of
+  files spawns a loop of sessions.
+rule:
+  pattern: Sftp::new($$$ARGS)
+  inside:
+    any:
+      - kind: for_expression
+      - kind: while_expression
+      - kind: loop_expression
+    stopBy: end

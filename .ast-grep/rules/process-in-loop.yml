@@ -1,0 +1,15 @@
+id: process-in-loop
+language: Rust
+severity: warning
+message: A process is spawned inside a loop. Batch the work into one process.
+note: Each spawn pays process creation, and for sftp an SSH negotiation.
+rule:
+  any:
+    - pattern: Command::new($$$ARGS)
+    - pattern: std::process::Command::new($$$ARGS)
+  inside:
+    any:
+      - kind: for_expression
+      - kind: while_expression
+      - kind: loop_expression
+    stopBy: end
