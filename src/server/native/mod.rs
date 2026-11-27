@@ -38,6 +38,7 @@ use super::progress::{
 };
 use crate::error::UksftaError;
 use crate::server::config::Settings;
+use crate::server::limit::RateLimiter;
 use crate::server::report::UploadUnit;
 
 /// The longest wait between a failed range and its retry.
@@ -235,6 +236,7 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
             .await
             .map(drop)?;
     }
+    preallocate(job).await?;
 
     let pending: Vec<Chunk> = job
         .plan
@@ -274,6 +276,12 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
         connection_active(&bars, worker, false);
     }
 
+    let limiter = job
+        .settings
+        .transfer
+        .limit
+        .map(RateLimiter::new)
+        .map(Arc::new);
     let signals = Arc::new(Signals::default());
     let adaptive = job.settings.segment.adaptive && max_connections > 1;
     let initial = if adaptive {
@@ -297,6 +305,7 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
         let scheduler = Arc::clone(&scheduler);
         let acks = Arc::clone(&acks);
         let signals = Arc::clone(&signals);
+        let limiter = limiter.clone();
         let trace = job.trace.clone();
         let bars = bars.clone();
         let temp = job.temp.to_string();
@@ -318,6 +327,7 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
                 &signals,
                 &bars,
                 &mut limit,
+                limiter.as_deref(),
                 trace.as_ref(),
             )
             .await
@@ -374,6 +384,27 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
     checkpoint::recompute_prefix(&mut guard.checkpoint, &done, job.unit.size);
     guard.save_now();
     Ok(())
+}
+
+/// Make the temp file its final length before the first range.
+async fn preallocate(job: &Job<'_>) -> Result<(), UksftaError> {
+    if !job.settings.segment.preallocate {
+        return Ok(());
+    }
+    if job.from > 0 {
+        // A resumed temp already has its final length.
+        let mut fs = job.client.fs();
+        if fs.metadata(job.temp).await.ok().and_then(|meta| meta.len()) == Some(job.unit.size) {
+            return Ok(());
+        }
+    }
+    match writer::preallocate(job.client, job.temp, job.unit.size).await? {
+        writer::Preallocated::Full => Ok(()),
+        writer::Preallocated::Unsupported => {
+            eprintln!("Warning: the server cannot preallocate the temp file; the upload continues");
+            Ok(())
+        }
+    }
 }
 
 /// What the monitor samples between ticks.
@@ -465,6 +496,7 @@ async fn run_worker(
     signals: &Arc<Signals>,
     bars: &[ProgressBar],
     limit: &mut tokio::sync::watch::Receiver<u8>,
+    limiter: Option<&RateLimiter>,
     trace: Option<&SegmentedTrace>,
 ) -> Result<(), UksftaError> {
     let reconnects = settings.segment.reconnects;
@@ -523,7 +555,7 @@ async fn run_worker(
             }
         };
         range_started(bars, worker, chunk.index, chunk.len);
-        let written = writer::write_range(file, &chunk, local, buffer, &mut advance).await;
+        let written = writer::write_range(file, &chunk, local, buffer, limiter, &mut advance).await;
         let synced = match written {
             Ok(()) if current.sftp.support_fsync() => file
                 .sync_all()

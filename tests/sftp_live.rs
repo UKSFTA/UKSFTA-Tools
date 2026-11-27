@@ -140,6 +140,14 @@ impl Setup {
     fn run(&self, extra: &[&str]) -> Output {
         self.command(extra).output().expect("run the command")
     }
+
+    fn run_with_env(&self, extra: &[&str], envs: &[(&str, &std::ffi::OsStr)]) -> Output {
+        let mut command = self.command(extra);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        command.output().expect("run the command")
+    }
 }
 
 /// A file of `size` bytes with a repeatable body.
@@ -730,6 +738,77 @@ fn json_reports_the_published_segmented_file() {
     );
     assert!(remote_exists(&setup.remote_pbo), "the file is published");
     assert_eq!(remote_sha256(&setup.remote_pbo), hash);
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_limited_run_stays_below_the_rate() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::with_size("limit", 64 * 1024 * 1024);
+    prepare_remote(&setup);
+
+    let output = setup.run(&["--limit", "5M"]);
+    let errors = stderr(&output);
+    assert!(
+        output.status.success(),
+        "the limited upload failed: {errors}"
+    );
+    assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
+
+    let report = format!("{}{}", String::from_utf8_lossy(&output.stdout), errors);
+    let rate = report
+        .lines()
+        .find(|line| line.starts_with("segment: ") && line.contains("published in"))
+        .and_then(|line| line.split_once(" MB/s").map(|(before, _)| before))
+        .and_then(|before| before.rsplit(' ').next())
+        .and_then(|value| value.parse::<f64>().ok())
+        .expect("the segmented rate line");
+    assert!(rate <= 6.5, "the limit was not held: {rate} MB/s");
+    println!("limited_run: {rate} MB/s");
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_finished_run_notifies_with_the_pack_the_result_and_the_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::with_size("notify", 8 * 1024 * 1024);
+    prepare_remote(&setup);
+
+    let stub = setup.repo.path().join("notify.sh");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$UKSFTA_NOTIFY_OUT\"\nprintf '%s\\n' \"$2\" >> \"$UKSFTA_NOTIFY_OUT\"\n",
+    )
+    .expect("write the stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("stub mode");
+    let out = setup.repo.path().join("notify.out");
+
+    let output = setup.run_with_env(
+        &["--notify"],
+        &[
+            ("UKSFTA_NOTIFY_BIN", stub.as_os_str()),
+            ("UKSFTA_NOTIFY_OUT", out.as_os_str()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "the upload failed: {}",
+        stderr(&output)
+    );
+    let text = std::fs::read_to_string(&out).expect("the notification body");
+    assert!(text.starts_with("uksfta\n"), "{text}");
+    assert!(text.contains(PACK_ID), "{text}");
+    assert!(text.contains("ok"), "{text}");
+    assert!(text.contains("8.4 MB"), "{text}");
 }
 
 #[test]

@@ -158,6 +158,44 @@ pub async fn create_temp(sftp: &Sftp, path: &str) -> Result<(), UksftaError> {
     Ok(())
 }
 
+/// What preallocation achieved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preallocated {
+    /// The temp file now has its final length.
+    Full,
+    /// The server does not support the request. The upload carries on.
+    Unsupported,
+}
+
+/// Set the temp file to its final length before the first range, so a
+/// shortfall shows before the transfer starts. This client exposes no
+/// `fallocate` extension, so the length comes from `set_len`.
+///
+/// # Errors
+/// Returns `Input` for a real failure, such as no space.
+pub async fn preallocate(sftp: &Sftp, path: &str, size: u64) -> Result<Preallocated, UksftaError> {
+    let mut file = sftp
+        .options()
+        .write(true)
+        .create(false)
+        .truncate(false)
+        .open(path)
+        .await
+        .map_err(sftp_error)?;
+    let outcome = match file.set_len(size).await {
+        Ok(()) => Ok(Preallocated::Full),
+        Err(openssh_sftp_client::Error::SftpError(
+            openssh_sftp_client::error::SftpErrorKind::OpUnsupported,
+            _,
+        )) => Ok(Preallocated::Unsupported),
+        Err(error) => Err(UksftaError::Input(format!(
+            "cannot preallocate {path} to {size} bytes: {error}"
+        ))),
+    };
+    let _ = file.close().await;
+    outcome
+}
+
 /// Open one write-only handle at the temp path. A missing file is refused.
 ///
 /// # Errors
@@ -184,6 +222,7 @@ pub async fn write_range(
     chunk: &Chunk,
     local: &Path,
     buffer: u32,
+    limiter: Option<&super::super::limit::RateLimiter>,
     progress: &mut (dyn FnMut(u64) + Send),
 ) -> Result<(), UksftaError> {
     file.seek(SeekFrom::Start(chunk.start))
@@ -210,6 +249,9 @@ pub async fn write_range(
                 "the local file ended early: {}",
                 local.display()
             )));
+        }
+        if let Some(limiter) = limiter {
+            limiter.wait(read as u64).await;
         }
         let mut written = 0;
         while written < read {

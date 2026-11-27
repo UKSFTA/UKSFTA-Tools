@@ -843,6 +843,8 @@ files use the normal upload path. The feature is off by default.
 | `--segment-connections N` | 1 to 16 | 4 | The connections, and the ranges in flight. With `--segment-adaptive` it is the maximum. |
 | `--segment-adaptive` | on or off | off | Scale the connections between 1 and the maximum. |
 | `--segment-chunk BYTES` | 1 MiB to 64 MiB | automatic | The range size. It must be a 4096-byte multiple. It is fixed for the run. |
+| `--limit BYTES` | at least 1 B/s | none | Cap the upload rate. A plain count is bytes per second. |
+| `--preallocate` | on or off | on | Set the segmented temp file to its full length before the first range. |
 | `--segment-resume POLICY` | auto or off | auto | Continue an earlier interrupted file. |
 | `--segment-reconnects N` | 0 to 10 | 3 | The reconnects for one dead connection. |
 | `--legacy-sftp` | on or off | off | Force the system `sftp` path for one release. |
@@ -853,6 +855,31 @@ to a 4096-byte multiple. The command chooses the chunk once, at plan time,
 and keeps it for the whole run. The checkpoint indexes and the acknowledged
 prefix depend on fixed range boundaries, so an adaptive run does not change
 the chunk.
+
+`--limit` caps both upload paths. A plain number is bytes per second, and a
+`K`, `M` or `G` suffix is 1024-based: `500K`, `2M`, `1.5M`. The system
+`sftp` path passes the rate as `-l` in Kbit/s, rounded up. The segmented
+path paces every connection through one shared limiter, so the total stays
+at the rate. The limit covers upload writes only. The read-back hash runs
+at full speed.
+
+`--preallocate` sets the segmented temp file to its full length after the
+temp file is created and before the first range, so a shortfall appears
+before the transfer. It is on by default. `--no-preallocate` turns it off.
+This client exposes no fallocate extension, so the length comes from
+`set_len`. A real failure, such as no space, stops the run with a clear
+message. A server that does not support the request gives one warning and
+the upload continues. A resumed temp that already has its length is not
+touched.
+
+`--notify` sends one desktop notification when the run finishes, success
+or failure. It runs `notify-send` on Linux and `osascript` on macOS. Any
+other platform prints one warning and sends nothing. The body names the
+pack id and name, the result, the file count, the bytes and the elapsed
+seconds. A failure adds the sanitised error. There is no notification for
+`--dry-run` or `--doctor`. `UKSFTA_NOTIFY_BIN` replaces the notifier
+binary for tests: it receives the title and the body as two arguments, and
+the exit status is ignored.
 
 `--segment-adaptive` starts at four connections, or the maximum when that is
 smaller. The command starts one worker per allowed connection. Only the
