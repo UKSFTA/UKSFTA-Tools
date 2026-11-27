@@ -253,6 +253,9 @@ enum Commands {
         /// Use the native segmented transport
         #[arg(long)]
         segmented: bool,
+        /// Force the system sftp path for one release
+        #[arg(long, conflicts_with = "segmented")]
+        legacy_sftp: bool,
         /// Files at or above this size use the segmented path
         #[arg(long, value_name = "BYTES")]
         segment_min: Option<u64>,
@@ -449,6 +452,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             server_cfg,
             strict_config,
             segmented,
+            legacy_sftp,
             segment_min,
             segment_connections,
             segment_chunk,
@@ -489,6 +493,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
                 server_cfg,
                 strict_config,
                 segmented,
+                legacy_sftp,
                 segment_min,
                 segment_connections,
                 segment_chunk,

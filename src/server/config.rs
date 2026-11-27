@@ -43,8 +43,6 @@ pub enum SegmentResume {
 }
 
 impl SegmentResume {
-    // Printed by the settings lines; kept next to the parser.
-    #[allow(dead_code)]
     pub const fn as_str(self) -> &'static str {
         match self {
             SegmentResume::Auto => "auto",

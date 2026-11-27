@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use super::config::Settings;
 use super::plan::{Action, Finding, Plan};
+use super::report::upload_units;
 
 /// Writer for `--json` on `uksfta server`.
 #[derive(Serialize)]
@@ -13,6 +14,8 @@ pub struct JsonReport {
     pub server: Option<ServerJson>,
     pub status: Option<String>,
     pub counts: CountsJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uploads: Option<Vec<UploadJson>>,
     pub findings: Vec<FindingJson>,
     pub actions: Vec<ActionJson>,
     pub timings: TimingsJson,
@@ -36,6 +39,30 @@ pub struct ServerJson {
     pub host_key_policy: String,
     pub buffer: u32,
     pub requests: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment: Option<SegmentJson>,
+}
+
+/// The effective segmented settings. Present only when the feature is on.
+#[derive(Serialize)]
+pub struct SegmentJson {
+    pub enabled: bool,
+    pub min_bytes: u64,
+    pub connections: u8,
+    pub chunk: Option<u32>,
+    pub resume: String,
+    pub reconnects: u8,
+}
+
+/// One planned upload and how it was sent.
+#[derive(Serialize)]
+pub struct UploadJson {
+    pub name: String,
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 impl From<&Settings> for ServerJson {
@@ -48,6 +75,14 @@ impl From<&Settings> for ServerJson {
             host_key_policy: settings.host_key_policy.as_str().to_string(),
             buffer: settings.transfer.buffer,
             requests: settings.transfer.requests,
+            segment: settings.segment.enabled.then(|| SegmentJson {
+                enabled: true,
+                min_bytes: settings.segment.min_bytes,
+                connections: settings.segment.connections,
+                chunk: settings.segment.chunk,
+                resume: settings.segment.resume.as_str().to_string(),
+                reconnects: settings.segment.reconnects,
+            }),
         }
     }
 }
@@ -109,6 +144,8 @@ impl JsonReport {
         pack: Option<(String, String)>,
         plan: Option<&Plan>,
         timings: TimingsJson,
+        segment_choice: Option<(&str, u8)>,
+        segment_result: Option<(&str, &str)>,
         result: &Result<(), crate::error::UksftaError>,
     ) -> Self {
         let counts = plan.map_or_else(CountsJson::default, |plan| CountsJson {
@@ -128,6 +165,37 @@ impl JsonReport {
         let actions = plan.map_or_else(Vec::new, |plan| {
             plan.actions.iter().map(action_json).collect()
         });
+        let uploads = settings
+            .filter(|settings| settings.segment.enabled)
+            .map(|_| {
+                plan.map_or_else(Vec::new, |plan| {
+                    upload_units(plan)
+                        .into_iter()
+                        .map(|unit| {
+                            let selected = segment_choice
+                                .filter(|(remote, _)| *remote == unit.remote.as_str());
+                            let published = segment_result
+                                .filter(|(remote, _)| *remote == unit.remote.as_str());
+                            UploadJson {
+                                name: unit
+                                    .remote
+                                    .rsplit('/')
+                                    .next()
+                                    .unwrap_or(&unit.remote)
+                                    .to_string(),
+                                mode: if selected.is_some() {
+                                    "segmented"
+                                } else {
+                                    "whole"
+                                }
+                                .to_string(),
+                                connections: selected.map(|(_, connections)| connections),
+                                sha256: published.map(|(_, hash)| (*hash).to_string()),
+                            }
+                        })
+                        .collect()
+                })
+            });
         let status = plan.map(|plan| plan.status().as_str().to_string());
         let result_name = match result {
             Ok(()) => "ok",
@@ -140,6 +208,7 @@ impl JsonReport {
             server: settings.map(ServerJson::from),
             status,
             counts,
+            uploads,
             findings,
             actions,
             timings,

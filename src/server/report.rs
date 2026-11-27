@@ -262,13 +262,19 @@ fn smallest_total(totals: &[u64]) -> usize {
 /// Returns `Input` when a path cannot be quoted.
 pub fn upload_batch(plan: &Plan, skip: &HashSet<String>) -> Result<Vec<String>, UksftaError> {
     let mut batch = upload_dirs(plan)?;
-    for unit in upload_units(plan) {
-        if skip.contains(&unit.remote) {
-            continue;
-        }
+    for unit in remaining_units(plan, skip) {
         batch.push(put_line(&unit)?);
     }
     Ok(batch)
+}
+
+/// The units a batch sends. The segmented path takes one file out of every
+/// attempt, so the retry loop keeps it out with the same set.
+pub fn remaining_units(plan: &Plan, skip: &HashSet<String>) -> Vec<UploadUnit> {
+    upload_units(plan)
+        .into_iter()
+        .filter(|unit| !skip.contains(&unit.remote))
+        .collect()
 }
 
 #[cfg(test)]

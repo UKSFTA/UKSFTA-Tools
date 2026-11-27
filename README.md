@@ -645,12 +645,22 @@ host key policy, buffer and requests. It holds no credential, and the
 `server.cfg` contents are never included. With `--doctor`, the object has
 `mode`, `checks`, `free_space_bytes` and the timings instead of a plan.
 
+The segmented settings are additive. A default run adds no key, so its
+output is byte-identical. When the feature is on, `server.segment` holds
+`enabled`, `min_bytes`, `connections`, `chunk`, `resume` and `reconnects`,
+and a top-level `uploads` array holds one entry per planned file. Each
+entry has a `name` and a `mode` of `segmented` or `whole`. A segmented
+entry also has `connections`. It gains the verified `sha256` after
+publication, so a dry run marks the selected file without a hash.
+
 `--doctor` is a read-only preflight. It prints the effective settings,
 checks the known_hosts file, runs one `pwd` and listing batch at the pack
 folder, and asks the server for free space. It does not plan, verify,
 upload or create a directory. It exits 0 when the connection and pack
 folder are usable, and 2 otherwise. A server without `df` support reports
-unknown free space, which is not an error.
+unknown free space, which is not an error. The doctor also prints
+`segment: not requested`, or the effective segmented settings and the
+server extension line (`posix-rename` and `fsync`) when the feature is on.
 
 Every human run prints one `timing:` line on standard error with the
 connect/list, deep, upload and total times in milliseconds. A failed run
@@ -832,6 +842,7 @@ files use the normal upload path. The feature is off by default.
 | `--segment-chunk BYTES` | 1 MiB to 64 MiB | automatic | The range size. It must be a 4096-byte multiple. |
 | `--segment-resume POLICY` | auto or off | auto | Continue an earlier interrupted file. |
 | `--segment-reconnects N` | 0 to 10 | 3 | The reconnects for one dead connection. |
+| `--legacy-sftp` | on or off | off | Force the system `sftp` path for one release. |
 
 The command sets the automatic chunk to one eighth of the file divided by
 the connection count. It clamps the value to 1 to 16 MiB and rounds it down
@@ -893,6 +904,21 @@ without `--segmented`.
 
 A failed segment exits 2. The pack checks keep their codes: 1 for a check
 failure and 2 for an input or environment failure. See Exit codes.
+
+A config file may set `segment = true`. `--legacy-sftp` forces the system
+`sftp` path for that run and conflicts with `--segmented`. The flag is an
+escape hatch for one release.
+
+The default transport stays the system `sftp` path. The flip to the native
+path is a separate change. That change keeps `--legacy-sftp` for one
+release and removes the flag after it. The flip happens after all five
+criteria hold:
+
+1. 20 consecutive live uploads of the 977 MB PBO with equal SHA-256
+2. the Docker suite green on OpenSSH 9.6 and 10.6
+3. 10 forced-kill resumes with equal hashes and no temp residue
+4. host key and agent auth confirmed on the real panel
+5. one release cycle with no defect report
 
 `tests/throughput_live.rs` measures the segmented path against one stream
 on a shaped bridge link. The link delays 60 ms and limits the rate to
