@@ -235,12 +235,15 @@ enum Commands {
         /// Host key policy: yes or accept-new (default: yes)
         #[arg(long, value_name = "POLICY")]
         host_key_policy: Option<String>,
-        /// Show the sftp transfer meter (default: a terminal, single job)
+        /// Show the whole-upload progress view (default: a terminal, single job)
         #[arg(long, group = "progress_mode")]
         progress: bool,
-        /// Hide the sftp transfer meter
+        /// Hide the progress view
         #[arg(long, group = "progress_mode")]
         no_progress: bool,
+        /// Write progress as one JSON object per line on standard error
+        #[arg(long, group = "progress_mode")]
+        progress_json: bool,
         /// Local copy of the launch line to check
         #[arg(long, value_name = "FILE")]
         launch_line: Option<PathBuf>,
@@ -451,6 +454,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             host_key_policy,
             progress,
             no_progress,
+            progress_json,
             launch_line,
             server_cfg,
             strict_config,
@@ -493,6 +497,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
                 known_hosts,
                 host_key_policy,
                 progress: mode,
+                progress_json,
                 launch_line,
                 server_cfg,
                 strict_config,

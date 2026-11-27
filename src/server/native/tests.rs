@@ -608,7 +608,7 @@ fn a_full_segmented_run_publishes_and_returns_the_hash() {
         });
     }
 
-    let hash = super::run(&settings, state.path(), "pack-1", &unit, false, false)
+    let hash = super::run(&settings, state.path(), "pack-1", &unit, None, false)
         .expect("the segmented run");
     assert_eq!(hash, crate::util::file_sha256(&local).expect("local hash"));
 
@@ -659,7 +659,7 @@ fn a_failed_segmented_run_leaves_no_temp_and_no_final() {
         });
     }
 
-    let error = super::run(&settings, state.path(), "pack-2", &unit, false, false)
+    let error = super::run(&settings, state.path(), "pack-2", &unit, None, false)
         .expect_err("the short read must fail the run");
     assert!(error.to_string().contains("ended early"), "{error}");
 
@@ -801,7 +801,7 @@ fn a_killed_session_reconnects_and_publishes() {
     let state = fixture.state.path().to_path_buf();
     let unit = fixture.unit.clone();
     let handle =
-        std::thread::spawn(move || super::run(&settings, &state, "pack-r", &unit, false, false));
+        std::thread::spawn(move || super::run(&settings, &state, "pack-r", &unit, None, false));
 
     poll_temp(&fixture.settings, &fixture.temp, 4 * 1024 * 1024);
     kill_sessions();
@@ -846,7 +846,7 @@ fn a_killed_session_with_no_reconnect_fails_and_keeps_the_temp() {
     let state = fixture.state.path().to_path_buf();
     let unit = fixture.unit.clone();
     let handle =
-        std::thread::spawn(move || super::run(&settings, &state, "pack-n", &unit, false, false));
+        std::thread::spawn(move || super::run(&settings, &state, "pack-n", &unit, None, false));
 
     poll_temp(&fixture.settings, &fixture.temp, 4 * 1024 * 1024);
     kill_sessions();
@@ -890,7 +890,7 @@ fn a_resume_continues_from_the_acked_prefix() {
     let state = fixture.state.path().to_path_buf();
     let unit = fixture.unit.clone();
     let handle =
-        std::thread::spawn(move || super::run(&settings, &state, "pack-a", &unit, false, false));
+        std::thread::spawn(move || super::run(&settings, &state, "pack-a", &unit, None, false));
     wait_for_ack(fixture.state.path(), "pack-a", &fixture.final_path);
     kill_sessions();
     assert!(handle.join().expect("the run thread").is_err());
@@ -941,7 +941,7 @@ fn a_resume_continues_from_the_acked_prefix() {
         fixture.state.path(),
         "pack-a",
         &fixture.unit,
-        false,
+        None,
         false,
     )
     .expect("the resumed run");
@@ -976,7 +976,7 @@ fn a_corrupted_prefix_restarts_from_scratch() {
     let state = fixture.state.path().to_path_buf();
     let unit = fixture.unit.clone();
     let handle =
-        std::thread::spawn(move || super::run(&settings, &state, "pack-c", &unit, false, false));
+        std::thread::spawn(move || super::run(&settings, &state, "pack-c", &unit, None, false));
     wait_for_ack(fixture.state.path(), "pack-c", &fixture.final_path);
     kill_sessions();
     assert!(handle.join().expect("the run thread").is_err());
@@ -1027,7 +1027,7 @@ fn a_corrupted_prefix_restarts_from_scratch() {
         fixture.state.path(),
         "pack-c",
         &fixture.unit,
-        false,
+        None,
         false,
     )
     .expect("the restarted run");

@@ -12,6 +12,7 @@ mod native;
 mod output;
 mod parse;
 mod plan;
+mod progress;
 mod report;
 mod sftp;
 mod signature;
@@ -21,6 +22,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::error::UksftaError;
@@ -36,8 +39,8 @@ use self::plan::{
     Action, LocalEntry, LocalPack, Plan,
 };
 use self::report::{
-    plan_workers, print_plan, print_report, put_line, upload_batch, upload_dirs, upload_units,
-    UploadUnit,
+    plan_workers, print_plan, print_report, put_line, remaining_units, upload_batch, upload_dirs,
+    upload_units, UploadUnit,
 };
 use self::sftp::ScratchDir;
 use self::sftp::Sftp;
@@ -83,6 +86,8 @@ pub struct ServerOptions {
     pub host_key_policy: Option<String>,
     /// When to show the client's transfer meter.
     pub progress: Progress,
+    /// Write progress as one JSON object per line on standard error.
+    pub progress_json: bool,
     /// A local copy of the launch line.
     pub launch_line: Option<PathBuf>,
     /// server.cfg path on the server.
@@ -117,6 +122,9 @@ pub struct ServerOptions {
 /// Returns `Check` when the pack fails verification, and `Input` or `Parse`
 /// for a connection, usage or parse failure.
 pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
+    // With both JSON modes the human lines would share stderr with the
+    // progress events, so the machine channel wins.
+    QUIET.store(opts.json && opts.progress_json, Ordering::Relaxed);
     if opts.doctor {
         return run_doctor(&opts);
     }
@@ -183,7 +191,7 @@ struct SegmentOutcome {
 /// Where the upload loop reports progress and where the segmented result
 /// lands.
 struct UploadReport<'a> {
-    progress: bool,
+    mode: progress::Mode,
     json: bool,
     segment: &'a mut Option<SegmentOutcome>,
 }
@@ -233,11 +241,16 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
     let scratch = ScratchDir::new("uksfta-server-")?;
     let locked = locked_pbos()?;
     let cross_checks = cross_checks(&local)?;
-    let show_progress = match opts.progress {
+    let requested = match opts.progress {
         Progress::Always => true,
         Progress::Never => false,
         Progress::Auto => opts.jobs == 1 && std::io::stdout().is_terminal(),
     };
+    let mode = progress::resolve(
+        requested,
+        opts.progress_json,
+        std::io::stderr().is_terminal(),
+    );
     let verifier = Verifier {
         client: Sftp::new(&settings),
         settings: &settings,
@@ -332,7 +345,7 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
             opts.retries,
             opts.jobs,
             UploadReport {
-                progress: show_progress,
+                mode,
                 json: opts.json,
                 segment: &mut outcome.segment,
             },
@@ -407,9 +420,16 @@ fn overrides(opts: &ServerOptions) -> Overrides {
     }
 }
 
+/// True when the human lines must stay off stderr.
+static QUIET: AtomicBool = AtomicBool::new(false);
+
 /// A report line: standard output in human mode, standard error with
-/// `--json`, so the JSON object owns standard output.
+/// `--json`, so the JSON object owns standard output. Suppressed when the
+/// progress events own standard error.
 fn say(json: bool, text: &str) {
+    if QUIET.load(Ordering::Relaxed) {
+        return;
+    }
     if json {
         eprintln!("{text}");
     } else {
@@ -418,6 +438,9 @@ fn say(json: bool, text: &str) {
 }
 
 fn write_report(plan: &Plan, json: bool) {
+    if QUIET.load(Ordering::Relaxed) {
+        return;
+    }
     if json {
         let mut err = std::io::stderr().lock();
         print_report(plan, &mut err);
@@ -428,6 +451,9 @@ fn write_report(plan: &Plan, json: bool) {
 }
 
 fn write_plan(plan: &Plan, json: bool) {
+    if QUIET.load(Ordering::Relaxed) {
+        return;
+    }
     if json {
         let mut err = std::io::stderr().lock();
         print_plan(plan, &mut err);
@@ -691,16 +717,48 @@ fn upload_with_retries(
     mut plan: Plan,
     retries: u8,
     jobs: u8,
-    report: UploadReport<'_>,
+    mut report: UploadReport<'_>,
     segment: Option<&SegmentChoice>,
     password_prompt: bool,
 ) -> Result<Plan, UksftaError> {
+    let units = upload_units(&plan);
+    let view = report
+        .mode
+        .is_on()
+        .then(|| progress::UploadProgress::new(&units, report.mode));
+    let outcome = upload_loop(
+        verifier,
+        &mut plan,
+        retries,
+        jobs,
+        &mut report,
+        segment,
+        password_prompt,
+        view.clone(),
+    );
+    if let Some(view) = &view {
+        view.finish();
+    }
+    outcome.map(|()| plan)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upload_loop(
+    verifier: &Verifier<'_>,
+    plan: &mut Plan,
+    retries: u8,
+    jobs: u8,
+    report: &mut UploadReport<'_>,
+    segment: Option<&SegmentChoice>,
+    password_prompt: bool,
+    view: Option<Arc<progress::UploadProgress>>,
+) -> Result<(), UksftaError> {
     let mut skip: HashSet<String> = HashSet::new();
     if let Some(choice) = segment {
         // The native writer opens the temp file inside the pack folder, so
         // the directories must exist first. The batch below repeats the
         // mkdir lines, which a batch client tolerates.
-        match upload_dirs(&plan) {
+        match upload_dirs(plan) {
             Ok(dirs) if !dirs.is_empty() => {
                 if let Err(error) = verifier.client.batch(&dirs) {
                     eprintln!("Warning: cannot create the remote directories: {error}");
@@ -710,6 +768,13 @@ fn upload_with_retries(
             Err(error) => eprintln!("Warning: {error}"),
         }
 
+        if let Some(view) = &view {
+            view.file_started(&choice.unit.remote);
+        }
+        let trace = view.as_ref().map(|view| progress::SegmentedTrace {
+            progress: Arc::clone(view),
+            remote: choice.unit.remote.clone(),
+        });
         let name = remote_name(&choice.unit.remote);
         let started = Instant::now();
         match native::run(
@@ -717,7 +782,7 @@ fn upload_with_retries(
             Path::new("."),
             &verifier.local.id,
             &choice.unit,
-            report.progress,
+            trace,
             password_prompt,
         ) {
             Ok(hash) => {
@@ -731,6 +796,9 @@ fn upload_with_retries(
                         hash.get(..12).unwrap_or(&hash)
                     ),
                 );
+                if let Some(view) = &view {
+                    view.file_done(&choice.unit.remote, Some(&hash));
+                }
                 *report.segment = Some(SegmentOutcome {
                     remote: choice.unit.remote.clone(),
                     sha256: hash,
@@ -744,7 +812,10 @@ fn upload_with_retries(
                 return Err(UksftaError::Auth(message));
             }
             Err(error) => {
-                eprintln!("Warning: segment {name}: {error}");
+                eprintln!("{}", progress::fallback_line(&error));
+                if let Some(view) = &view {
+                    view.file_failed(&choice.unit.remote);
+                }
             }
         }
     }
@@ -752,31 +823,47 @@ fn upload_with_retries(
     let limit = u16::from(retries) + 1;
     let mut attempted = false;
     for attempt in 1..=limit {
-        let batch = upload_batch(&plan, &skip)?;
+        let batch = upload_batch(plan, &skip)?;
         if batch.is_empty() {
             break;
         }
         attempted = true;
-        let units: Vec<UploadUnit> = upload_units(&plan)
-            .into_iter()
-            .filter(|unit| !skip.contains(&unit.remote))
-            .collect();
+        let units: Vec<UploadUnit> = remaining_units(plan, &skip);
         let files = units.len();
         let bytes: u64 = units.iter().map(|unit| unit.size).sum();
         let started = Instant::now();
-        if jobs <= 1 {
-            let sent = if report.progress {
-                verifier.client.batch_progress(&batch)
-            } else {
-                verifier.client.batch(&batch).map(|_| ())
-            };
-            if let Err(e) = sent {
-                eprintln!("Warning: upload attempt {attempt}: {e}");
+        match &view {
+            Some(view) if jobs <= 1 => {
+                for unit in &units {
+                    view.file_started(&unit.remote);
+                    let one = vec![put_line(unit)?];
+                    match verifier.client.batch(&one) {
+                        Ok(_) => {
+                            view.advance(&unit.remote, unit.size);
+                            view.file_done(&unit.remote, None);
+                        }
+                        Err(error) => {
+                            view.file_failed(&unit.remote);
+                            eprintln!("Warning: upload attempt {attempt}: {error}");
+                            break;
+                        }
+                    }
+                }
             }
-        } else {
-            send_parallel(verifier, &plan, jobs, attempt, &skip)?;
+            Some(view) => {
+                send_parallel(verifier, plan, jobs, attempt, &skip, Some(view))?;
+            }
+            None => {
+                if jobs <= 1 {
+                    if let Err(e) = verifier.client.batch(&batch) {
+                        eprintln!("Warning: upload attempt {attempt}: {e}");
+                    }
+                } else {
+                    send_parallel(verifier, plan, jobs, attempt, &skip, None)?;
+                }
+            }
         }
-        plan = verifier.verify()?;
+        *plan = verifier.verify()?;
         let elapsed = started.elapsed();
         say(
             report.json,
@@ -787,16 +874,16 @@ fn upload_with_retries(
                 transfer_rate(bytes, elapsed)
             ),
         );
-        match next_attempt(&plan, attempt, limit) {
+        match next_attempt(plan, attempt, limit) {
             NextAttempt::Stop => break,
             NextAttempt::Retry { wait } => std::thread::sleep(wait),
         }
     }
     if attempted {
         say(report.json, "after upload:");
-        write_report(&plan, report.json);
+        write_report(plan, report.json);
     }
-    Ok(plan)
+    Ok(())
 }
 
 /// Make the directories once, then send one batch per worker. Each worker
@@ -807,6 +894,7 @@ fn send_parallel(
     jobs: u8,
     attempt: u16,
     skip: &HashSet<String>,
+    view: Option<&Arc<progress::UploadProgress>>,
 ) -> Result<(), UksftaError> {
     let dirs = upload_dirs(plan)?;
     if !dirs.is_empty() {
@@ -815,15 +903,12 @@ fn send_parallel(
         }
     }
 
-    let units: Vec<UploadUnit> = upload_units(plan)
-        .into_iter()
-        .filter(|unit| !skip.contains(&unit.remote))
-        .collect();
+    let units: Vec<UploadUnit> = remaining_units(plan, skip);
     let workers = plan_workers(units, jobs);
     let results: Vec<Result<(), UksftaError>> = std::thread::scope(|scope| {
         let handles: Vec<_> = workers
             .iter()
-            .map(|units| scope.spawn(move || upload_worker(verifier.settings, units)))
+            .map(|units| scope.spawn(move || upload_worker(verifier.settings, units, view)))
             .collect();
         handles
             .into_iter()
@@ -848,12 +933,33 @@ fn send_parallel(
 }
 
 /// One worker: a private client and its own `put -p` batch.
-fn upload_worker(settings: &Settings, units: &[UploadUnit]) -> Result<(), UksftaError> {
-    let mut batch = Vec::new();
+fn upload_worker(
+    settings: &Settings,
+    units: &[UploadUnit],
+    view: Option<&Arc<progress::UploadProgress>>,
+) -> Result<(), UksftaError> {
+    let Some(view) = view else {
+        let mut batch = Vec::new();
+        for unit in units {
+            batch.push(put_line(unit)?);
+        }
+        return Sftp::new(settings).batch(&batch).map(|_| ());
+    };
     for unit in units {
-        batch.push(put_line(unit)?);
+        view.file_started(&unit.remote);
+        let sent = Sftp::new(settings).batch(&[put_line(unit)?]).map(|_| ());
+        match sent {
+            Ok(()) => {
+                view.advance(&unit.remote, unit.size);
+                view.file_done(&unit.remote, None);
+            }
+            Err(error) => {
+                view.file_failed(&unit.remote);
+                return Err(error);
+            }
+        }
     }
-    Sftp::new(settings).batch(&batch).map(|_| ())
+    Ok(())
 }
 
 /// Stop when every file is in place, or when no attempt remains.
