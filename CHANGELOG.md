@@ -35,6 +35,10 @@ This project uses [Semantic Versioning](https://semver.org/).
   It runs only with `UKSFTA_SFTP_SHAPED=1` on a kernel with `sch_netem`,
   and skips with a printed reason otherwise.
 
+- The README documents every segmented flag, the read-back hash, the
+  acknowledged prefix and the exit codes. CI builds and tests on Windows,
+  and runs the suite with every feature.
+
 - Opt-in launch-line and `server.cfg` checks. `--launch-line` reads a
   local copy and finds `@<id>` in `-mod` or `-serverMod`. `--server-cfg`
   reads one file over SFTP and checks `verifySignatures` and

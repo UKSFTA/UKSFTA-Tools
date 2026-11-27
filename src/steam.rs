@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 
 use crate::error::UksftaError;
 use crate::util::{extract_quoted, extract_quoted_tokens};
