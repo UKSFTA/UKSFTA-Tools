@@ -16,6 +16,7 @@ mod progress;
 mod report;
 mod sftp;
 mod signature;
+mod summary;
 mod verify;
 
 use std::collections::{HashMap, HashSet};
@@ -102,6 +103,8 @@ pub struct ServerOptions {
     pub password_prompt: bool,
     /// Files at or above this size may be segmented.
     pub segment_min: Option<u64>,
+    /// Scale the segmented connections between one and the maximum.
+    pub segment_adaptive: bool,
     /// Segmented connections.
     pub segment_connections: Option<u8>,
     /// Segmented chunk size.
@@ -153,6 +156,7 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
                 .segment
                 .as_ref()
                 .map(|segment| (segment.remote.as_str(), segment.sha256.as_str())),
+            &outcome.sent,
             &result,
         );
         if let Ok(text) = serde_json::to_string(&report) {
@@ -180,6 +184,7 @@ struct Outcome {
     upload_ms: Option<u64>,
     segment: Option<SegmentOutcome>,
     segment_choice: Option<(String, u8)>,
+    sent: Vec<summary::SentFile>,
 }
 
 /// What the one segmented file produced.
@@ -194,6 +199,7 @@ struct UploadReport<'a> {
     mode: progress::Mode,
     json: bool,
     segment: &'a mut Option<SegmentOutcome>,
+    sent: &'a mut Vec<summary::SentFile>,
 }
 
 const fn yes_no(value: bool) -> &'static str {
@@ -348,6 +354,7 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
                 mode,
                 json: opts.json,
                 segment: &mut outcome.segment,
+                sent: &mut outcome.sent,
             },
             segment.as_ref(),
             opts.password_prompt,
@@ -413,6 +420,7 @@ fn overrides(opts: &ServerOptions) -> Overrides {
             None
         },
         segment_min: opts.segment_min,
+        segment_adaptive: opts.segment_adaptive.then_some(true),
         segment_connections: opts.segment_connections,
         segment_chunk: opts.segment_chunk,
         segment_resume: opts.segment_resume.clone(),
@@ -753,6 +761,7 @@ fn upload_loop(
     password_prompt: bool,
     view: Option<Arc<progress::UploadProgress>>,
 ) -> Result<(), UksftaError> {
+    let upload_started = Instant::now();
     let mut skip: HashSet<String> = HashSet::new();
     if let Some(choice) = segment {
         // The native writer opens the temp file inside the pack folder, so
@@ -799,6 +808,14 @@ fn upload_loop(
                 if let Some(view) = &view {
                     view.file_done(&choice.unit.remote, Some(&hash));
                 }
+                report.sent.push(summary::SentFile::new(
+                    name.to_string(),
+                    choice.unit.remote.clone(),
+                    choice.unit.size,
+                    elapsed.as_secs_f64(),
+                    false,
+                    hash.clone(),
+                ));
                 *report.segment = Some(SegmentOutcome {
                     remote: choice.unit.remote.clone(),
                     sha256: hash,
@@ -865,6 +882,29 @@ fn upload_loop(
         }
         *plan = verifier.verify()?;
         let elapsed = started.elapsed();
+        // A file that is no longer in the plan is on the server. Its seconds
+        // are its share of this attempt's bytes, so the row is marked as an
+        // estimate.
+        let left: HashSet<String> = upload_units(plan)
+            .into_iter()
+            .map(|unit| unit.remote)
+            .collect();
+        let share = if bytes == 0 {
+            0.0
+        } else {
+            elapsed.as_secs_f64() / bytes as f64
+        };
+        for unit in &units {
+            if left.contains(&unit.remote) {
+                continue;
+            }
+            report.sent.push(summary::SentFile::whole(
+                &unit.local,
+                &unit.remote,
+                unit.size,
+                unit.size as f64 * share,
+            ));
+        }
         say(
             report.json,
             &format!(
@@ -882,6 +922,12 @@ fn upload_loop(
     if attempted {
         say(report.json, "after upload:");
         write_report(plan, report.json);
+    }
+    if !report.sent.is_empty() {
+        let seconds = upload_started.elapsed().as_secs_f64();
+        for line in summary::render(report.sent, seconds) {
+            say(report.json, &line);
+        }
     }
     Ok(())
 }

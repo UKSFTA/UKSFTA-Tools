@@ -67,6 +67,7 @@ impl SegmentResume {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Segment {
     pub enabled: bool,
+    pub adaptive: bool,
     pub min_bytes: u64,
     pub connections: u8,
     pub chunk: Option<u32>,
@@ -78,6 +79,7 @@ impl Default for Segment {
     fn default() -> Self {
         Self {
             enabled: false,
+            adaptive: false,
             min_bytes: 64 * 1024 * 1024,
             connections: 4,
             chunk: None,
@@ -176,6 +178,7 @@ pub struct ServerConfig {
     pub launch_line_file: Option<PathBuf>,
     pub server_cfg: Option<String>,
     pub segment: Option<bool>,
+    pub segment_adaptive: Option<bool>,
     pub segment_min: Option<u64>,
     pub segment_connections: Option<u8>,
     pub segment_chunk: Option<u32>,
@@ -197,6 +200,7 @@ pub struct Overrides {
     pub launch_line: Option<PathBuf>,
     pub server_cfg: Option<String>,
     pub segment: Option<bool>,
+    pub segment_adaptive: Option<bool>,
     pub segment_min: Option<u64>,
     pub segment_connections: Option<u8>,
     pub segment_chunk: Option<u32>,
@@ -299,6 +303,10 @@ pub fn resolve(config_path: Option<&Path>, overrides: &Overrides) -> Result<Sett
                     .segment
                     .or(config.segment)
                     .unwrap_or(defaults.enabled),
+                adaptive: overrides
+                    .segment_adaptive
+                    .or(config.segment_adaptive)
+                    .unwrap_or(defaults.adaptive),
                 min_bytes: overrides
                     .segment_min
                     .or(config.segment_min)
@@ -513,6 +521,7 @@ mod tests {
         assert!(!settings.segment.enabled);
         assert_eq!(settings.segment.min_bytes, 64 * 1024 * 1024);
         assert_eq!(settings.segment.connections, 4);
+        assert!(!settings.segment.adaptive);
         assert_eq!(settings.segment.chunk, None);
         assert_eq!(settings.segment.resume, SegmentResume::Auto);
         assert_eq!(settings.segment.reconnects, 3);
@@ -530,10 +539,12 @@ mod tests {
 
         let over = Overrides {
             segment_connections: Some(6),
+            segment_adaptive: Some(true),
             ..Overrides::default()
         };
         let settings = resolve(Some(&path), &over).unwrap();
         assert!(settings.segment.enabled);
+        assert!(settings.segment.adaptive);
         assert_eq!(settings.segment.connections, 6);
         assert_eq!(settings.segment.resume, SegmentResume::Off);
     }

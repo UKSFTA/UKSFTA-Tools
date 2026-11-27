@@ -339,6 +339,10 @@ fn kill_and_resume_publishes_equal_bytes() {
         !errors.contains("restarting"),
         "a valid checkpoint must resume, not restart: {errors}"
     );
+    assert!(
+        errors.contains("segment: resuming at "),
+        "a resumed run must print the marker: {errors}"
+    );
     println!(
         "kill_and_resume: local {} remote {}",
         local_sha256(&setup.pbo),
@@ -728,12 +732,33 @@ fn json_reports_the_published_segmented_file() {
     assert_eq!(remote_sha256(&setup.remote_pbo), hash);
 }
 
-fn temp_count(dir: &str) -> usize {
-    let out = fixture(&["sh", "-c", &format!("ls -1 {dir}")]);
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|line| line.contains(".uksfta-part"))
-        .count()
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn an_adaptive_run_with_eight_connections_publishes_equal_bytes() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::new("adaptive");
+    prepare_remote(&setup);
+
+    let output = setup.run(&[
+        "--segment-adaptive",
+        "--segment-connections",
+        "8",
+        "--segment-reconnects",
+        "1",
+    ]);
+    let errors = stderr(&output);
+    assert!(
+        output.status.success(),
+        "the adaptive upload failed: {errors}"
+    );
+    assert!(
+        !errors.contains("segment: not used"),
+        "the native path must carry the file: {errors}"
+    );
+    assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
 }
 
 #[test]
@@ -770,7 +795,7 @@ fn a_second_run_is_refused_while_the_lock_is_held() {
         if let Some(status) = first.try_wait().expect("try_wait") {
             break status;
         }
-        most_temps = most_temps.max(temp_count(&setup.remote_dir));
+        most_temps = most_temps.max(usize::from(remote_exists(&setup.remote_temp)));
         assert!(Instant::now() < deadline, "the first run did not finish");
         std::thread::sleep(Duration::from_millis(200));
     };
@@ -798,7 +823,11 @@ fn a_second_run_is_refused_while_the_lock_is_held() {
         most_temps <= 1,
         "at most one temp during the run: {most_temps}"
     );
-    assert_eq!(temp_count(&setup.remote_dir), 0, "no temp after the run");
+    assert_eq!(
+        usize::from(remote_exists(&setup.remote_temp)),
+        0,
+        "no temp after the run"
+    );
     assert!(!lock.exists(), "the lock is released");
     assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
 }

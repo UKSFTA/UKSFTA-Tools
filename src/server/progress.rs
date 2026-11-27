@@ -63,11 +63,16 @@ pub fn fallback_line(error: &UksftaError) -> String {
     format!("segment: not used: {kind}: {error}; using the whole-file path")
 }
 
+/// The whole percentage, rounded to the nearest point.
+fn percent_of(done: u64, total: u64) -> u64 {
+    (done.saturating_mul(100).saturating_add(total / 2))
+        .checked_div(total)
+        .map_or(100, |value| value.min(100))
+}
+
 /// One plain line for a non-terminal stream.
 pub fn plain_line(done: u64, total: u64, elapsed: Duration, eta: Option<Duration>) -> String {
-    let percent = (done.saturating_mul(100).saturating_add(total / 2))
-        .checked_div(total)
-        .map_or(100, |value| value.min(100));
+    let percent = percent_of(done, total);
     let seconds = elapsed.as_secs_f64().max(f64::EPSILON);
     let rate = done as f64 / seconds / 1_000_000.0;
     let eta = eta.map_or_else(|| "--:--".to_string(), clock);
@@ -82,6 +87,14 @@ pub fn plain_line(done: u64, total: u64, elapsed: Duration, eta: Option<Duration
 fn clock(duration: Duration) -> String {
     let seconds = duration.as_secs();
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// The resume marker printed before a resumed segmented transfer.
+pub fn resume_line(from: u64, total: u64) -> String {
+    format!(
+        "segment: resuming at {}% ({from} of {total} bytes)",
+        percent_of(from, total)
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -166,6 +179,15 @@ struct FileDoneEvent {
 }
 
 #[derive(Serialize)]
+struct ResumeEvent {
+    schema_version: u8,
+    event: &'static str,
+    file: String,
+    bytes: u64,
+    total: u64,
+}
+
+#[derive(Serialize)]
 struct DoneEvent {
     schema_version: u8,
     event: &'static str,
@@ -210,6 +232,35 @@ pub fn range_retried(bars: &[ProgressBar], worker: usize) {
     if let Some(bar) = bars.get(worker) {
         bar.set_position(0);
         bar.set_message("retry");
+    }
+}
+
+/// The template of a working connection row.
+const CONNECTION_STYLE: &str = "  {spinner} conn {prefix:>2} {bar:24} {bytes:>9}/{total_bytes:<9} \
+                               {bytes_per_sec:>9} ETA {eta_precise} {msg}";
+/// The template of a connection row above the active limit.
+const IDLE_STYLE: &str = "  conn {prefix:>2} {wide_msg}";
+
+fn connection_style(template: &str) -> ProgressStyle {
+    ProgressStyle::with_template(template)
+        .expect("the connection progress template is valid")
+        .progress_chars("=>-")
+}
+
+/// Show or hide one connection row. A hidden row keeps its bar, so a worker
+/// that still holds it cannot panic.
+pub fn connection_active(bars: &[ProgressBar], worker: usize, active: bool) {
+    let Some(bar) = bars.get(worker) else {
+        return;
+    };
+    if active {
+        bar.set_style(connection_style(CONNECTION_STYLE));
+        bar.set_position(0);
+        bar.set_message("waiting");
+    } else {
+        bar.set_style(connection_style(IDLE_STYLE));
+        bar.set_position(0);
+        bar.set_message("idle");
     }
 }
 
@@ -513,6 +564,48 @@ impl UploadProgress {
             .collect()
     }
 
+    /// Print the resume marker and count the bytes already on the server
+    /// toward the total and the file row.
+    pub fn resume(&self, remote: &str, from: u64, total: u64) {
+        match self.mode {
+            Mode::Off => {}
+            Mode::Json => emit(&ResumeEvent {
+                schema_version: 1,
+                event: "resume",
+                file: name_of(remote),
+                bytes: from,
+                total,
+            }),
+            Mode::Plain | Mode::Terminal => eprintln!("{}", resume_line(from, total)),
+        }
+        self.resume_from(remote, from);
+    }
+
+    fn resume_from(&self, remote: &str, from: u64) {
+        let Some(index) = self.index(remote) else {
+            return;
+        };
+        let done = {
+            let mut shared = self
+                .shared
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(row) = shared.rows.get_mut(index) else {
+                return;
+            };
+            row.done = from.min(row.size);
+            let added = row.done;
+            shared.done = shared.done.saturating_add(added);
+            shared.done
+        };
+        if let Some(total_bar) = &self.total_bar {
+            total_bar.set_position(done);
+        }
+        if let Some(bar) = self.rows.get(index) {
+            bar.set_position(from);
+        }
+    }
+
     /// Finish the view. Safe to call more than once.
     pub fn finish(&self) {
         if self.finished.swap(true, Ordering::SeqCst) {
@@ -597,6 +690,15 @@ mod tests {
         assert_eq!(resolve(false, false, true), Mode::Off);
         assert_eq!(resolve(false, true, false), Mode::Json);
         assert_eq!(resolve(true, true, true), Mode::Json);
+    }
+
+    #[test]
+    fn the_resume_marker_names_the_percent_and_the_bytes() {
+        assert_eq!(
+            resume_line(32 * 1024 * 1024, 64 * 1024 * 1024),
+            "segment: resuming at 50% (33554432 of 67108864 bytes)"
+        );
+        assert_eq!(resume_line(1, 3), "segment: resuming at 33% (1 of 3 bytes)");
     }
 
     #[test]

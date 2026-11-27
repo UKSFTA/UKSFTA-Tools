@@ -47,6 +47,7 @@ pub struct ServerJson {
 #[derive(Serialize)]
 pub struct SegmentJson {
     pub enabled: bool,
+    pub adaptive: bool,
     pub min_bytes: u64,
     pub connections: u8,
     pub chunk: Option<u32>,
@@ -63,6 +64,16 @@ pub struct UploadJson {
     pub connections: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mb_per_second: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
 }
 
 impl From<&Settings> for ServerJson {
@@ -77,6 +88,7 @@ impl From<&Settings> for ServerJson {
             requests: settings.transfer.requests,
             segment: settings.segment.enabled.then(|| SegmentJson {
                 enabled: true,
+                adaptive: settings.segment.adaptive,
                 min_bytes: settings.segment.min_bytes,
                 connections: settings.segment.connections,
                 chunk: settings.segment.chunk,
@@ -139,6 +151,7 @@ pub struct TimingsJson {
 }
 
 impl JsonReport {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         settings: Option<&Settings>,
         pack: Option<(String, String)>,
@@ -146,6 +159,7 @@ impl JsonReport {
         timings: TimingsJson,
         segment_choice: Option<(&str, u8)>,
         segment_result: Option<(&str, &str)>,
+        sent: &[super::summary::SentFile],
         result: &Result<(), crate::error::UksftaError>,
     ) -> Self {
         let counts = plan.map_or_else(CountsJson::default, |plan| CountsJson {
@@ -168,6 +182,7 @@ impl JsonReport {
         let uploads = settings
             .filter(|settings| settings.segment.enabled)
             .map(|_| {
+                let measured = |remote: &str| sent.iter().find(|file| file.remote == remote);
                 let mut entries = Vec::new();
                 let mut planned: Vec<String> = Vec::new();
                 if let Some(plan) = plan {
@@ -176,6 +191,7 @@ impl JsonReport {
                             segment_choice.filter(|(remote, _)| *remote == unit.remote.as_str());
                         let published =
                             segment_result.filter(|(remote, _)| *remote == unit.remote.as_str());
+                        let file = measured(&unit.remote);
                         entries.push(UploadJson {
                             name: basename(&unit.remote),
                             mode: if selected.is_some() {
@@ -185,7 +201,14 @@ impl JsonReport {
                             }
                             .to_string(),
                             connections: selected.map(|(_, connections)| connections),
-                            sha256: published.map(|(_, hash)| (*hash).to_string()),
+                            sha256: published
+                                .map(|(_, hash)| (*hash).to_string())
+                                .or_else(|| file.map(|file| file.sha256.clone())),
+                            bytes: Some(unit.size),
+                            seconds: file.map(|file| file.seconds),
+                            mb_per_second: file.and_then(|file| file.rate_mbps),
+                            estimated: file.map(|file| file.estimated),
+                            remote: Some(unit.remote.clone()),
                         });
                         planned.push(unit.remote.clone());
                     }
@@ -195,6 +218,7 @@ impl JsonReport {
                 // longer holds.
                 if let Some((remote, hash)) = segment_result {
                     if !planned.iter().any(|path| path == remote) {
+                        let file = measured(remote);
                         entries.push(UploadJson {
                             name: basename(remote),
                             mode: "segmented".to_string(),
@@ -202,8 +226,39 @@ impl JsonReport {
                                 .filter(|(chosen, _)| *chosen == remote)
                                 .map(|(_, connections)| connections),
                             sha256: Some(hash.to_string()),
+                            bytes: file.map(|file| file.bytes),
+                            seconds: file.map(|file| file.seconds),
+                            mb_per_second: file.and_then(|file| file.rate_mbps),
+                            estimated: file.map(|file| file.estimated),
+                            remote: Some(remote.to_string()),
                         });
                     }
+                }
+                // A sent file leaves the plan once it matches, so the
+                // measured row supplies the entry the plan no longer holds.
+                for file in sent {
+                    if planned.iter().any(|path| path == &file.remote)
+                        || entries
+                            .iter()
+                            .any(|entry| entry.remote.as_deref() == Some(file.remote.as_str()))
+                    {
+                        continue;
+                    }
+                    let segmented =
+                        segment_result.is_some_and(|(remote, _)| remote == file.remote.as_str());
+                    entries.push(UploadJson {
+                        name: basename(&file.remote),
+                        mode: if segmented { "segmented" } else { "whole" }.to_string(),
+                        connections: segment_choice
+                            .filter(|(remote, _)| *remote == file.remote)
+                            .map(|(_, connections)| connections),
+                        sha256: Some(file.sha256.clone()),
+                        bytes: Some(file.bytes),
+                        seconds: Some(file.seconds),
+                        mb_per_second: file.rate_mbps,
+                        estimated: Some(file.estimated),
+                        remote: Some(file.remote.clone()),
+                    });
                 }
                 entries
             });
