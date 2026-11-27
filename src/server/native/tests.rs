@@ -638,6 +638,49 @@ fn a_full_segmented_run_publishes_and_returns_the_hash() {
 
 #[test]
 #[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn an_adaptive_run_with_eight_connections_publishes_the_same_bytes() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    const SIZE: u64 = 64 * 1024 * 1024;
+    let (dir, pinned) = pin(port());
+    let local = local_file(&dir, "adaptive.pbo", SIZE);
+    let mut settings = segmented_settings(pinned, 8, Some(4 * 1024 * 1024));
+    settings.segment.adaptive = true;
+    let base = remote_dir("adaptive");
+    let final_path = format!("{base}/adaptive.pbo");
+    let unit = units(&local, &final_path, SIZE);
+    let state = tempfile::TempDir::new().expect("state dir");
+    {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let session = session(&settings).await;
+            make_dir(&session.sftp, &base).await;
+        });
+    }
+
+    let hash = super::run(&settings, state.path(), "pack-a", &unit, None, false)
+        .expect("the adaptive run");
+    assert_eq!(hash, crate::util::file_sha256(&local).expect("local hash"));
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let session = session(&settings).await;
+        let metadata = session
+            .sftp
+            .fs()
+            .metadata(&final_path)
+            .await
+            .expect("the published file");
+        assert_eq!(metadata.len(), Some(SIZE));
+        let mut fs = session.sftp.fs();
+        let _ = fs.remove_file(&final_path).await;
+    });
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
 fn a_failed_segmented_run_leaves_no_temp_and_no_final() {
     if !live() {
         return;

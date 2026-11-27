@@ -840,15 +840,40 @@ files use the normal upload path. The feature is off by default.
 | --- | --- | --- | --- |
 | `--segmented` | on or off | off | Use the segmented path for one file. |
 | `--segment-min BYTES` | up to 1 TiB | 64 MiB | The smallest file the segmented path takes. |
-| `--segment-connections N` | 1 to 16 | 4 | The connections, and the ranges in flight. |
-| `--segment-chunk BYTES` | 1 MiB to 64 MiB | automatic | The range size. It must be a 4096-byte multiple. |
+| `--segment-connections N` | 1 to 16 | 4 | The connections, and the ranges in flight. With `--segment-adaptive` it is the maximum. |
+| `--segment-adaptive` | on or off | off | Scale the connections between 1 and the maximum. |
+| `--segment-chunk BYTES` | 1 MiB to 64 MiB | automatic | The range size. It must be a 4096-byte multiple. It is fixed for the run. |
 | `--segment-resume POLICY` | auto or off | auto | Continue an earlier interrupted file. |
 | `--segment-reconnects N` | 0 to 10 | 3 | The reconnects for one dead connection. |
 | `--legacy-sftp` | on or off | off | Force the system `sftp` path for one release. |
 
 The command sets the automatic chunk to one eighth of the file divided by
 the connection count. It clamps the value to 1 to 16 MiB and rounds it down
-to a 4096-byte multiple.
+to a 4096-byte multiple. The command chooses the chunk once, at plan time,
+and keeps it for the whole run. The checkpoint indexes and the acknowledged
+prefix depend on fixed range boundaries, so an adaptive run does not change
+the chunk.
+
+`--segment-adaptive` starts at four connections, or the maximum when that is
+smaller. The command starts one worker per allowed connection. Only the
+workers below the active limit take ranges, and the others wait. A monitor
+measures the acknowledged bytes over a window of about five seconds:
+
+- the limit rises by one when the rate improves by at least 10 percent
+  since the previous change, and the window had no retry
+- the limit falls by one after a retry, a connection failure, or a rate
+  drop of at least 20 percent
+- two windows pass after each change, so the limit cannot oscillate
+
+An extra connection that fails with a channel or resource error is read as
+the server's session limit. That connection retires, the connections that
+work carry the file, and the limit does not rise again in that run. The
+upload never fails for a refused extra connection.
+
+The view shows one row per allowed connection. A row above the active limit
+reads `idle` and shows no meter. A row that becomes active reads `waiting`,
+then shows its range. The command keeps an idle row rather than removing
+it, so a worker that still holds its row cannot panic.
 
 The command writes the file to `<name>.uksfta-part`. The final name
 changes only at publish. Each connection opens the temp file for writing
@@ -875,7 +900,20 @@ are present.
 
 Before a resume the command hashes the remote prefix and the local prefix.
 A match continues from the acked prefix. A mismatch discards the temp file
-and the checkpoint, and starts the file again.
+and the checkpoint, and starts the file again. A resumed run prints
+`segment: resuming at <percent>% (<bytes> of <total> bytes)` before the
+first range, and its total bar starts at the acknowledged bytes.
+
+After an upload the command prints a summary table for the files it sent:
+the name, the bytes, the seconds, the rate, the SHA-256 and the remote
+path. The segmented file gives exact seconds, rate and hash. A whole file is
+sent in a batch, so its seconds are its share of the batch time and its
+rate is the batch rate. Both values carry a `~` to mark the estimate. The
+command computes the local SHA-256 for each whole file. A total row gives
+the exact bytes, the elapsed seconds and the average rate. A 0-byte file
+shows `0 B`, `0.0 s` and `-`. The table goes to the human output only. With
+`--json` the same values appear in each `uploads[]` entry as `bytes`,
+`seconds`, `mb_per_second`, `estimated`, `sha256` and `remote`.
 
 The read-back hash and the prefix hash answer the `reput` defect. An
 earlier tool resumed at the remote size. The server held a short file with
@@ -907,7 +945,7 @@ without `--segmented`.
 A failed segment exits 2. The pack checks keep their codes: 1 for a check
 failure and 2 for an input or environment failure. See Exit codes.
 
-A config file may set `segment = true`. `--legacy-sftp` forces the system
+A config file may set `segment = true` and `segment_adaptive = true`. `--legacy-sftp` forces the system
 `sftp` path for that run and conflicts with `--segmented`. The flag is an
 escape hatch for one release.
 

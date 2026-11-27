@@ -2,6 +2,7 @@
 //!
 //! The segmented writer, atomic publish, checkpoints and resume live here.
 
+pub mod adaptive;
 pub mod checkpoint;
 pub mod connect;
 pub mod known_hosts;
@@ -17,6 +18,7 @@ mod tests;
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,7 +33,8 @@ use self::schedule::Scheduler;
 use self::secret::Secret;
 use self::segment::{Chunk, SegmentPlan};
 use super::progress::{
-    clear_bars, range_advanced, range_finished, range_retried, range_started, SegmentedTrace,
+    clear_bars, connection_active, range_advanced, range_finished, range_retried, range_started,
+    SegmentedTrace,
 };
 use crate::error::UksftaError;
 use crate::server::config::Settings;
@@ -58,7 +61,7 @@ pub fn run(
     password_prompt: bool,
 ) -> Result<String, UksftaError> {
     let connections = settings.segment.connections.max(1);
-    let threads = usize::from(connections.min(4)).max(1);
+    let threads = usize::from(connections.min(8)).max(1);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(threads)
         .enable_all()
@@ -116,6 +119,12 @@ async fn transfer(
         Start::Fresh => 0,
         Start::Resume { from } => from,
     };
+    if let Start::Resume { from } = start {
+        match &trace {
+            Some(trace) => trace.progress.resume(&trace.remote, from, unit.size),
+            None => eprintln!("{}", super::progress::resume_line(from, unit.size)),
+        }
+    }
     let job = Job {
         settings,
         client: &client,
@@ -254,25 +263,47 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
         guard.save_now();
     }
 
+    let max_connections = job.settings.segment.connections.max(1);
     let scheduler = Arc::new(Mutex::new(Scheduler::new(&pending)));
     let bars: Vec<ProgressBar> = job.trace.as_ref().map_or_else(Vec::new, |trace| {
         trace
             .progress
-            .connection_bars(&trace.remote, usize::from(job.settings.segment.connections))
+            .connection_bars(&trace.remote, usize::from(max_connections))
+    });
+    for worker in 0..bars.len() {
+        connection_active(&bars, worker, false);
+    }
+
+    let signals = Arc::new(Signals::default());
+    let adaptive = job.settings.segment.adaptive && max_connections > 1;
+    let initial = if adaptive {
+        adaptive::START.min(max_connections)
+    } else {
+        max_connections
+    };
+    let (limit_tx, limit_rx) = tokio::sync::watch::channel(initial);
+    let monitor = adaptive.then(|| {
+        tokio::spawn(monitor_task(
+            max_connections,
+            limit_tx,
+            Arc::clone(&signals),
+        ))
     });
 
     let mut tasks = JoinSet::new();
-    for worker in 0..usize::from(job.settings.segment.connections.max(1)) {
+    for worker in 0..usize::from(max_connections) {
         let settings = job.settings.clone();
         let password = job.password.cloned();
         let scheduler = Arc::clone(&scheduler);
         let acks = Arc::clone(&acks);
+        let signals = Arc::clone(&signals);
         let trace = job.trace.clone();
         let bars = bars.clone();
         let temp = job.temp.to_string();
         let local = job.unit.local.clone();
         let buffer = job.buffer;
         let size = job.unit.size;
+        let mut limit = limit_rx.clone();
         tasks.spawn(async move {
             run_worker(
                 &settings,
@@ -284,7 +315,9 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
                 password,
                 &scheduler,
                 &acks,
+                &signals,
                 &bars,
+                &mut limit,
                 trace.as_ref(),
             )
             .await
@@ -308,6 +341,9 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
                 break;
             }
         }
+    }
+    if let Some(handle) = monitor {
+        handle.abort();
     }
     clear_bars(&bars);
 
@@ -340,6 +376,79 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
     Ok(())
 }
 
+/// What the monitor samples between ticks.
+#[derive(Default)]
+struct Signals {
+    acked: AtomicU64,
+    retries: AtomicU32,
+    failures: AtomicU32,
+    /// Sessions this run holds open, so a refusal is only read as a server
+    /// session limit when at least one connection works.
+    opened: AtomicU32,
+    refused: AtomicBool,
+}
+
+/// How long a worker above the active limit waits before it checks again.
+const TURN_POLL: Duration = Duration::from_millis(100);
+/// The window the monitor measures the acknowledged rate over.
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Measure the acknowledged rate and move the active limit.
+async fn monitor_task(max: u8, sender: tokio::sync::watch::Sender<u8>, signals: Arc<Signals>) {
+    let mut tracker = adaptive::Tracker::new(max);
+    let mut previous = Instant::now();
+    let mut acked = 0;
+    loop {
+        tokio::time::sleep(SAMPLE_INTERVAL).await;
+        let now = Instant::now();
+        let total = signals.acked.load(Ordering::Relaxed);
+        let delta = total.saturating_sub(acked);
+        acked = total;
+        let seconds = now.duration_since(previous).as_secs_f64().max(f64::EPSILON);
+        previous = now;
+        let retries = signals.retries.swap(0, Ordering::Relaxed);
+        let failure = signals.failures.swap(0, Ordering::Relaxed) > 0;
+        if signals.refused.swap(false, Ordering::Relaxed) {
+            tracker.lock_out_raise();
+        }
+        match tracker.sample(delta as f64 / seconds, retries, failure) {
+            adaptive::Action::Raise(next) | adaptive::Action::Lower(next) => {
+                let _ = sender.send(next);
+            }
+            adaptive::Action::Hold => {}
+        }
+    }
+}
+
+/// Wait until this worker is below the active limit. Returns false when the
+/// queue holds no work for it.
+async fn wait_for_turn(
+    limit: &mut tokio::sync::watch::Receiver<u8>,
+    worker: usize,
+    scheduler: &Arc<Mutex<Scheduler>>,
+) -> Result<bool, UksftaError> {
+    loop {
+        if usize::from(*limit.borrow_and_update()) > worker {
+            return Ok(true);
+        }
+        let finished = scheduler
+            .lock()
+            .map_err(|_| UksftaError::Input("the range queue is poisoned".to_string()))?
+            .is_finished();
+        if finished {
+            return Ok(false);
+        }
+        tokio::select! {
+            changed = limit.changed() => {
+                if changed.is_err() {
+                    return Ok(false);
+                }
+            }
+            () = tokio::time::sleep(TURN_POLL) => {}
+        }
+    }
+}
+
 /// One worker: its own connection and handle, its own ranges, its own
 /// reconnects.
 #[allow(clippy::too_many_arguments)]
@@ -353,7 +462,9 @@ async fn run_worker(
     password: Option<Arc<Secret>>,
     scheduler: &Arc<Mutex<Scheduler>>,
     acks: &Arc<Mutex<Acks>>,
+    signals: &Arc<Signals>,
     bars: &[ProgressBar],
+    limit: &mut tokio::sync::watch::Receiver<u8>,
     trace: Option<&SegmentedTrace>,
 ) -> Result<(), UksftaError> {
     let reconnects = settings.segment.reconnects;
@@ -361,11 +472,31 @@ async fn run_worker(
     let mut session: Option<(NativeSession, File)> = None;
 
     loop {
+        connection_active(bars, worker, false);
+        if !wait_for_turn(limit, worker, scheduler).await? {
+            break;
+        }
+        connection_active(bars, worker, true);
+
         if session.is_none() {
             match open_session(settings, temp, password.as_deref()).await {
-                Ok(pair) => session = Some(pair),
+                Ok(pair) => {
+                    signals.opened.fetch_add(1, Ordering::Relaxed);
+                    session = Some(pair);
+                }
                 Err(error) if is_fatal(&error) => return Err(error),
+                Err(error)
+                    if signals.opened.load(Ordering::Relaxed) > 0
+                        && adaptive::is_session_limit(&error) =>
+                {
+                    // The server refused one extra session. The connections
+                    // that work carry on, and the limit stops rising.
+                    signals.refused.store(true, Ordering::Relaxed);
+                    connection_active(bars, worker, false);
+                    return Ok(());
+                }
                 Err(_) => {
+                    signals.failures.fetch_add(1, Ordering::Relaxed);
                     attempts += 1;
                     if attempts > reconnects {
                         mark_dead(scheduler)?;
@@ -406,6 +537,9 @@ async fn run_worker(
             Ok(()) => {
                 range_finished(bars, worker);
                 complete(scheduler, chunk.index)?;
+                signals
+                    .acked
+                    .fetch_add(u64::from(chunk.len), Ordering::Relaxed);
                 let mut guard = acks.lock().map_err(|_| {
                     UksftaError::Input("the checkpoint lock is poisoned".to_string())
                 })?;
@@ -413,11 +547,13 @@ async fn run_worker(
             }
             Err(error) if is_fatal(&error) => {
                 range_retried(bars, worker);
+                signals.retries.fetch_add(1, Ordering::Relaxed);
                 fail(scheduler, chunk.index)?;
                 return Err(error);
             }
             Err(_) => {
                 range_retried(bars, worker);
+                signals.retries.fetch_add(1, Ordering::Relaxed);
                 fail(scheduler, chunk.index)?;
                 session = None;
                 attempts += 1;

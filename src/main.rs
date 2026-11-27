@@ -265,10 +265,13 @@ enum Commands {
         /// Files at or above this size use the segmented path
         #[arg(long, value_name = "BYTES")]
         segment_min: Option<u64>,
-        /// Segmented connections (1 to 16)
+        /// Scale the segmented connections between 1 and the maximum (starts at 4)
+        #[arg(long)]
+        segment_adaptive: bool,
+        /// Segmented connections, or the maximum when adaptive (1 to 16)
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=16))]
         segment_connections: Option<u8>,
-        /// Segmented chunk in bytes (1 MiB to 64 MiB, a 4096-byte multiple)
+        /// Segmented chunk in bytes, fixed for the run (1 MiB to 64 MiB, a 4096-byte multiple)
         #[arg(long, value_name = "BYTES")]
         segment_chunk: Option<u32>,
         /// Resume policy: auto or off
@@ -462,6 +465,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             legacy_sftp,
             password_prompt,
             segment_min,
+            segment_adaptive,
             segment_connections,
             segment_chunk,
             segment_resume,
@@ -505,6 +509,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
                 legacy_sftp,
                 password_prompt,
                 segment_min,
+                segment_adaptive,
                 segment_connections,
                 segment_chunk,
                 segment_resume,

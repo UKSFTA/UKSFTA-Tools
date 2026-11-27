@@ -9,6 +9,17 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `--segment-adaptive` scales the segmented connections between one and
+  `--segment-connections`, which is now the maximum. The run starts at four,
+  changes one connection per sample window, and honours the server's session
+  limit.
+- An interrupted segmented run prints
+  `segment: resuming at <percent>% (<bytes> of <total> bytes)` and starts
+  the total bar at the acknowledged bytes.
+- A summary table after an upload shows the file, bytes, seconds, rate,
+  SHA-256 and remote path, with a total row. Whole-file seconds and rate are
+  marked `~` because they are a byte-share estimate. The same values reach
+  the JSON `uploads[]` entries.
 - One whole-upload progress view: a total bar, one row per planned file
   with `waiting`, `uploading` and `done`, and the segmented file's
   connection rows beneath its own row. A redirect gets one plain line
