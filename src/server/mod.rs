@@ -93,6 +93,8 @@ pub struct ServerOptions {
     pub segmented: bool,
     /// Force the system sftp path for one release.
     pub legacy_sftp: bool,
+    /// Read a password from the controlling terminal for the native path.
+    pub password_prompt: bool,
     /// Files at or above this size may be segmented.
     pub segment_min: Option<u64>,
     /// Segmented connections.
@@ -203,6 +205,9 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
     let settings = config::resolve(opts.config.as_deref(), &overrides(opts))?;
     outcome.settings = Some(settings.clone());
 
+    if opts.password_prompt {
+        native::connect::ensure_terminal()?;
+    }
     hostkey::preflight(&settings)?;
     let launch = settings
         .launch_line
@@ -332,6 +337,7 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
                 segment: &mut outcome.segment,
             },
             segment.as_ref(),
+            opts.password_prompt,
         )?;
         outcome.upload_ms = Some(millis(upload_started.elapsed()));
     }
@@ -687,6 +693,7 @@ fn upload_with_retries(
     jobs: u8,
     report: UploadReport<'_>,
     segment: Option<&SegmentChoice>,
+    password_prompt: bool,
 ) -> Result<Plan, UksftaError> {
     let mut skip: HashSet<String> = HashSet::new();
     if let Some(choice) = segment {
@@ -698,6 +705,7 @@ fn upload_with_retries(
             &verifier.local.id,
             &choice.unit,
             report.progress,
+            password_prompt,
         ) {
             Ok(hash) => {
                 let elapsed = started.elapsed();
@@ -715,6 +723,9 @@ fn upload_with_retries(
                     sha256: hash,
                 });
                 skip.insert(choice.unit.remote.clone());
+            }
+            Err(UksftaError::Auth(message)) if password_prompt => {
+                return Err(UksftaError::Auth(message));
             }
             Err(error) => {
                 eprintln!("Warning: segment {name}: {error}");

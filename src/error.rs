@@ -14,6 +14,10 @@ pub enum UksftaError {
     /// A check that ran and found a problem.
     #[error("{0}")]
     Check(String),
+    /// A credential offered by an explicit prompt was refused. It is fatal
+    /// for the run, so no other credential can replace it silently.
+    #[error("{0}")]
+    Auth(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -22,7 +26,10 @@ impl UksftaError {
     pub fn exit_code(&self) -> i32 {
         match self {
             UksftaError::Check(_) => 1,
-            UksftaError::Input(_) | UksftaError::Parse(_) | UksftaError::Io(_) => 2,
+            UksftaError::Input(_)
+            | UksftaError::Parse(_)
+            | UksftaError::Auth(_)
+            | UksftaError::Io(_) => 2,
         }
     }
 }

@@ -39,6 +39,12 @@ This project uses [Semantic Versioning](https://semver.org/).
   acknowledged prefix and the exit codes. CI builds and tests on Windows,
   and runs the suite with every feature.
 
+- `server --password-prompt` reads one password from the controlling
+  terminal for the segmented path. It takes no value, has no config key
+  or environment variable, makes one attempt and stores nothing. Without
+  a terminal it exits 2 and names the other methods. The bytes are not
+  wiped, and that limit is documented.
+
 - `--legacy-sftp` forces the system `sftp` path for one release and
   conflicts with `--segmented`. A config `segment = true` now takes effect
   without the flag. The JSON report adds `server.segment` and `uploads`,

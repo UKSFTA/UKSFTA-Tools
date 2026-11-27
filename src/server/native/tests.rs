@@ -608,8 +608,8 @@ fn a_full_segmented_run_publishes_and_returns_the_hash() {
         });
     }
 
-    let hash =
-        super::run(&settings, state.path(), "pack-1", &unit, false).expect("the segmented run");
+    let hash = super::run(&settings, state.path(), "pack-1", &unit, false, false)
+        .expect("the segmented run");
     assert_eq!(hash, crate::util::file_sha256(&local).expect("local hash"));
 
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
@@ -659,7 +659,7 @@ fn a_failed_segmented_run_leaves_no_temp_and_no_final() {
         });
     }
 
-    let error = super::run(&settings, state.path(), "pack-2", &unit, false)
+    let error = super::run(&settings, state.path(), "pack-2", &unit, false, false)
         .expect_err("the short read must fail the run");
     assert!(error.to_string().contains("ended early"), "{error}");
 
@@ -800,7 +800,8 @@ fn a_killed_session_reconnects_and_publishes() {
     let settings = fixture.settings.clone();
     let state = fixture.state.path().to_path_buf();
     let unit = fixture.unit.clone();
-    let handle = std::thread::spawn(move || super::run(&settings, &state, "pack-r", &unit, false));
+    let handle =
+        std::thread::spawn(move || super::run(&settings, &state, "pack-r", &unit, false, false));
 
     poll_temp(&fixture.settings, &fixture.temp, 4 * 1024 * 1024);
     kill_sessions();
@@ -844,7 +845,8 @@ fn a_killed_session_with_no_reconnect_fails_and_keeps_the_temp() {
     let settings = fixture.settings.clone();
     let state = fixture.state.path().to_path_buf();
     let unit = fixture.unit.clone();
-    let handle = std::thread::spawn(move || super::run(&settings, &state, "pack-n", &unit, false));
+    let handle =
+        std::thread::spawn(move || super::run(&settings, &state, "pack-n", &unit, false, false));
 
     poll_temp(&fixture.settings, &fixture.temp, 4 * 1024 * 1024);
     kill_sessions();
@@ -874,7 +876,8 @@ fn a_resume_continues_from_the_acked_prefix() {
         return;
     }
     let _serial = live_lock();
-    let fixture = resume_fixture("resume", 0);
+    let mut fixture = resume_fixture("resume", 0);
+    fixture.settings.segment.connections = 1;
     {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         runtime.block_on(async {
@@ -886,7 +889,8 @@ fn a_resume_continues_from_the_acked_prefix() {
     let settings = fixture.settings.clone();
     let state = fixture.state.path().to_path_buf();
     let unit = fixture.unit.clone();
-    let handle = std::thread::spawn(move || super::run(&settings, &state, "pack-a", &unit, false));
+    let handle =
+        std::thread::spawn(move || super::run(&settings, &state, "pack-a", &unit, false, false));
     wait_for_ack(fixture.state.path(), "pack-a", &fixture.final_path);
     kill_sessions();
     assert!(handle.join().expect("the run thread").is_err());
@@ -938,6 +942,7 @@ fn a_resume_continues_from_the_acked_prefix() {
         "pack-a",
         &fixture.unit,
         false,
+        false,
     )
     .expect("the resumed run");
     assert_eq!(
@@ -955,7 +960,10 @@ fn a_corrupted_prefix_restarts_from_scratch() {
         return;
     }
     let _serial = live_lock();
-    let fixture = resume_fixture("corrupt", 0);
+    let mut fixture = resume_fixture("corrupt", 0);
+    // One connection acknowledges one range at a time, so the first ack is
+    // early and the kill always lands mid-transfer.
+    fixture.settings.segment.connections = 1;
     {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         runtime.block_on(async {
@@ -967,14 +975,19 @@ fn a_corrupted_prefix_restarts_from_scratch() {
     let settings = fixture.settings.clone();
     let state = fixture.state.path().to_path_buf();
     let unit = fixture.unit.clone();
-    let handle = std::thread::spawn(move || super::run(&settings, &state, "pack-c", &unit, false));
+    let handle =
+        std::thread::spawn(move || super::run(&settings, &state, "pack-c", &unit, false, false));
     wait_for_ack(fixture.state.path(), "pack-c", &fixture.final_path);
     kill_sessions();
     assert!(handle.join().expect("the run thread").is_err());
-
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     let start = runtime.block_on(async {
         let session = session(&fixture.settings).await;
+        let mut fs = session.sftp.fs();
+        assert!(
+            fs.metadata(&fixture.temp).await.is_ok(),
+            "the interrupted temp must still exist on the server"
+        );
         // Flip one byte inside the acknowledged prefix.
         let mut file = session
             .sftp
@@ -1014,6 +1027,7 @@ fn a_corrupted_prefix_restarts_from_scratch() {
         fixture.state.path(),
         "pack-c",
         &fixture.unit,
+        false,
         false,
     )
     .expect("the restarted run");
@@ -1099,4 +1113,119 @@ async fn a_shortfall_names_the_free_and_needed_bytes() {
     assert!(text.contains(&need.to_string()), "{text}");
     assert!(free.is_some(), "the fixture advertises statvfs");
     drop(dir);
+}
+
+// ---- Password authentication ----------------------------------------------
+
+/// The password lives only in the compose service's environment block.
+fn fixture_password(service: &str) -> String {
+    let out = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-f",
+            "tools/sftp-test-server/docker-compose.yml",
+            "exec",
+            "-T",
+            service,
+            "sh",
+            "-c",
+            "printf %s \"$FIXTURE_PASSWORD\"",
+        ])
+        .output()
+        .expect("docker compose exec");
+    assert!(
+        out.status.success(),
+        "cannot read the fixture password: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+fn failed_password_count(service: &str) -> usize {
+    let out = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-f",
+            "tools/sftp-test-server/docker-compose.yml",
+            "logs",
+            "--no-color",
+            service,
+        ])
+        .output()
+        .expect("docker compose logs");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    text.matches("Failed password for uksfta").count()
+}
+
+fn password_settings(port: u16) -> (Settings, tempfile::TempDir) {
+    let (dir, pinned) = pin(port);
+    (settings(pinned, None, port), dir)
+}
+
+fn secret_from(text: &str) -> super::secret::Secret {
+    let mut reader = std::io::Cursor::new(format!("{text}\n").into_bytes());
+    super::secret::read_password(&mut reader).expect("a secret")
+}
+
+#[tokio::test]
+#[ignore = "needs the Docker password fixture and UKSFTA_SFTP_LIVE=1"]
+async fn a_prompted_password_authenticates() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock_async().await;
+    let password = fixture_password("sftp-password");
+    let (settings, _dir) = password_settings(2224);
+    let secret = secret_from(&password);
+
+    connect::connect_with(&settings, Some(&secret))
+        .await
+        .expect("the fixture password must authenticate");
+}
+
+#[tokio::test]
+#[ignore = "needs the Docker password fixture and UKSFTA_SFTP_LIVE=1"]
+async fn a_wrong_password_is_refused_once() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock_async().await;
+    let (settings, _dir) = password_settings(2224);
+    let before = failed_password_count("sftp-password");
+    let secret = secret_from("not-the-fixture-password");
+
+    let error = match connect::connect_with(&settings, Some(&secret)).await {
+        Ok(_) => panic!("a wrong password must fail"),
+        Err(error) => error,
+    };
+    let text = error.to_string();
+    assert!(text.contains("(password)"), "{text}");
+    assert!(text.contains("remaining methods"), "{text}");
+    assert!(
+        !text.contains("not-the-fixture-password"),
+        "the secret must not be printed"
+    );
+
+    let after = failed_password_count("sftp-password");
+    assert_eq!(after.saturating_sub(before), 1, "exactly one attempt");
+}
+
+#[tokio::test]
+#[ignore = "needs the Docker kbdint fixture and UKSFTA_SFTP_LIVE=1"]
+async fn a_keyboard_interactive_server_accepts_the_password() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock_async().await;
+    let password = fixture_password("sftp-kbdint");
+    let (settings, _dir) = password_settings(2225);
+    let secret = secret_from(&password);
+
+    connect::connect_with(&settings, Some(&secret))
+        .await
+        .expect("the keyboard-interactive fixture must accept the password");
 }

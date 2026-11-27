@@ -16,6 +16,7 @@ html-escape = "0.3"
 indicatif = "0.18"
 openssh-sftp-client = "=0.15.12"
 reqwest = { version = "0.13", features = ["blocking"] }
+rpassword = "7.5.5"
 russh = { version = "=0.65.4", default-features = false, features = ["flate2", "rsa", "ring"] }
 scraper = "0.29"
 serde = { version = "1", features = ["derive"] }

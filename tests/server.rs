@@ -1597,3 +1597,63 @@ fn a_dry_run_marks_the_selected_file_as_segmented() {
     assert!(value["server"].get("segment").is_none());
     assert!(value.get("uploads").is_none());
 }
+
+#[test]
+fn the_password_prompt_refuses_without_a_terminal() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    let output = std::process::Command::new("setsid")
+        .arg("-w")
+        .arg(env!("CARGO_BIN_EXE_uksfta"))
+        .args(["server", "--password-prompt"])
+        .current_dir(fixture.dir.path())
+        .env("UKSFTA_NO_UPDATE_CHECK", "1")
+        .env("UKSFTA_SFTP_BIN", &fixture.stub)
+        .env("UKSFTA_TEST_LOG", &fixture.log)
+        .env("UKSFTA_TEST_STDIN", &fixture.stdin)
+        .env("UKSFTA_TEST_LISTING", &fixture.listing)
+        .env("UKSFTA_TEST_REMOTE", &fixture.remote)
+        .env("UKSFTA_TEST_ROOT", ROOT)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("setsid");
+
+    assert_eq!(output.status.code(), Some(2));
+    let errors = String::from_utf8_lossy(&output.stderr);
+    for name in ["--identity", "ssh-agent", "sftp"] {
+        assert!(
+            errors.contains(name),
+            "the message must name {name}: {errors}"
+        );
+    }
+    assert_eq!(fixture.log(), "", "no sftp invocation is made");
+}
+
+#[test]
+fn the_password_prompt_conflicts_with_the_legacy_switch() {
+    let fixture = Fixture::new(LISTING_MATCH);
+
+    fixture
+        .command()
+        .args(["server", "--password-prompt", "--legacy-sftp"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn a_password_prompt_config_key_is_refused() {
+    let fixture = Fixture::new(LISTING_MATCH);
+    let path = fixture.dir.path().join(".uksfta/server.toml");
+    let mut text = fs::read_to_string(&path).expect("read the config");
+    text.push_str("password_prompt = true\n");
+    fs::write(&path, text).expect("write the config");
+
+    fixture
+        .command()
+        .arg("server")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("password_prompt"));
+}

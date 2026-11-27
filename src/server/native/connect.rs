@@ -13,6 +13,7 @@ use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertific
 use tokio::net::TcpStream;
 
 use super::known_hosts::{self, Verdict};
+use super::secret::Secret;
 use crate::error::UksftaError;
 use crate::server::config::Settings;
 use crate::server::hostkey::{self, HostKeyPolicy};
@@ -140,12 +141,122 @@ pub fn split_destination(destination: &str) -> Result<(String, String), UksftaEr
     Ok((user.to_string(), host.to_string()))
 }
 
+/// Refuse to run a password prompt without a controlling terminal.
+///
+/// # Errors
+/// Returns `Input` naming the two non-interactive methods and the default
+/// path when no terminal can be opened.
+pub fn ensure_terminal() -> Result<(), UksftaError> {
+    #[cfg(unix)]
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty");
+    #[cfg(windows)]
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("CONIN$");
+    #[cfg(not(any(unix, windows)))]
+    let opened: std::io::Result<std::fs::File> = Err(std::io::Error::other("no terminal"));
+
+    opened.map(|_| ()).map_err(|_| {
+        UksftaError::Input(
+            "no controlling terminal for the password prompt. Use --identity PATH, an ssh-agent identity, or the default sftp path, which still prompts."
+                .to_string(),
+        )
+    })
+}
+
+/// The password method this build will use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Password,
+    KeyboardInteractive,
+    None,
+}
+
+/// Prefer a plain password, then keyboard-interactive.
+pub fn choose_method(offered: &russh::MethodSet) -> Method {
+    if offered.contains(&russh::MethodKind::Password) {
+        Method::Password
+    } else if offered.contains(&russh::MethodKind::KeyboardInteractive) {
+        Method::KeyboardInteractive
+    } else {
+        Method::None
+    }
+}
+
+/// Answer exactly one echo-free prompt with the secret.
+///
+/// # Errors
+/// Returns `Input` for any other prompt shape.
+pub fn answer_prompts(
+    response: &russh::client::KeyboardInteractiveAuthResponse,
+    secret: &Secret,
+) -> Result<Vec<String>, UksftaError> {
+    match response {
+        russh::client::KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. }
+            if prompts.len() == 1 && !prompts[0].echo =>
+        {
+            Ok(vec![secret.expose().to_string()])
+        }
+        _ => Err(UksftaError::Auth(
+            "the server asked for something other than a password".to_string(),
+        )),
+    }
+}
+
+fn method_list(set: &russh::MethodSet) -> String {
+    set.iter().map(<&str>::from).collect::<Vec<_>>().join(", ")
+}
+
+fn wrong_password(settings: &Settings, result: &russh::client::AuthResult) -> UksftaError {
+    let remaining = match result {
+        russh::client::AuthResult::Failure {
+            remaining_methods, ..
+        } => method_list(remaining_methods),
+        russh::client::AuthResult::Success => String::new(),
+    };
+    UksftaError::Auth(crate::util::sanitize_for_terminal(&format!(
+        "authentication failed for {} (password); remaining methods: {remaining}",
+        settings.destination
+    )))
+}
+
+fn wrong_password_set(settings: &Settings, remaining: &russh::MethodSet) -> UksftaError {
+    UksftaError::Auth(crate::util::sanitize_for_terminal(&format!(
+        "authentication failed for {} (password); remaining methods: {}",
+        settings.destination,
+        method_list(remaining)
+    )))
+}
+
+/// A transport failure, reported by its display text rather than its debug
+/// form, so no accidental structure can carry a secret.
+fn auth_error(error: russh::Error) -> UksftaError {
+    UksftaError::Input(crate::util::sanitize_for_terminal(&format!(
+        "ssh transport error: {error}"
+    )))
+}
+
 /// Connect, pin the host key, authenticate and open the SFTP subsystem.
 ///
 /// # Errors
 /// Returns `Input` when the destination, the known_hosts file, the key file
 /// or the authentication fails, and names the two supported methods.
 pub async fn connect(settings: &Settings) -> Result<NativeSession, UksftaError> {
+    connect_with(settings, None).await
+}
+
+/// Connect with an optional prompted password.
+///
+/// # Errors
+/// Returns `Input` on the same conditions as [`connect`].
+pub async fn connect_with(
+    settings: &Settings,
+    secret: Option<&Secret>,
+) -> Result<NativeSession, UksftaError> {
     let (user, host) = split_destination(&settings.destination)?;
     let rejection = Arc::new(Mutex::new(None));
     let notice = Arc::new(Mutex::new(None));
@@ -190,7 +301,7 @@ pub async fn connect(settings: &Settings) -> Result<NativeSession, UksftaError> 
             }
         })?;
 
-    authenticate(&mut handle, &user, settings).await?;
+    authenticate(&mut handle, &user, settings, secret).await?;
 
     let channel = handle.channel_open_session().await.map_err(|error| {
         UksftaError::Input(format!(
@@ -234,7 +345,10 @@ async fn authenticate(
     handle: &mut Handle<Handler>,
     user: &str,
     settings: &Settings,
+    secret: Option<&Secret>,
 ) -> Result<(), UksftaError> {
+    let mut remaining: Option<russh::MethodSet> = None;
+
     if let Some(identity) = &settings.identity {
         let key = russh::keys::load_secret_key(identity, None).map_err(|error| {
             UksftaError::Input(format!(
@@ -246,7 +360,7 @@ async fn authenticate(
             handle
                 .best_supported_rsa_hash()
                 .await
-                .map_err(|error| UksftaError::Input(format!("cannot negotiate RSA: {error}")))?
+                .map_err(auth_error)?
                 .flatten()
         } else {
             None
@@ -254,14 +368,89 @@ async fn authenticate(
         let result = handle
             .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
             .await
-            .map_err(|error| UksftaError::Input(format!("key authentication failed: {error}")))?;
+            .map_err(auth_error)?;
         if result.success() {
             return Ok(());
         }
+        if let russh::client::AuthResult::Failure {
+            remaining_methods, ..
+        } = result
+        {
+            remaining = Some(remaining_methods);
+        }
     }
 
-    if agent_authenticate(handle, user).await? {
+    let (agent_ok, agent_remaining) = agent_authenticate(handle, user).await?;
+    if agent_ok {
         return Ok(());
+    }
+    if agent_remaining.is_some() {
+        remaining = agent_remaining;
+    }
+
+    if remaining.is_none() && secret.is_some() {
+        // No key and no agent ran, so the server has not advertised its
+        // methods yet. Ask for the list without a credential; a `Success`
+        // here is not treated as authentication.
+        if let Ok(russh::client::AuthResult::Failure {
+            remaining_methods, ..
+        }) = handle.authenticate_none(user).await
+        {
+            remaining = Some(remaining_methods);
+        }
+    }
+
+    if let Some(secret) = secret {
+        match remaining.as_ref().map_or(Method::Password, choose_method) {
+            Method::Password => {
+                let result = handle
+                    .authenticate_password(user, secret.expose().to_string())
+                    .await
+                    .map_err(auth_error)?;
+                if result.success() {
+                    return Ok(());
+                }
+                return Err(wrong_password(settings, &result));
+            }
+            Method::KeyboardInteractive => {
+                let mut response = handle
+                    .authenticate_keyboard_interactive_start(user, None)
+                    .await
+                    .map_err(auth_error)?;
+                // PAM sends one echo-free prompt, then an informational round
+                // with no prompts. The secret goes out once; empty rounds are
+                // answered with an empty reply.
+                for _ in 0..4 {
+                    match response {
+                        russh::client::KeyboardInteractiveAuthResponse::Success => return Ok(()),
+                        russh::client::KeyboardInteractiveAuthResponse::Failure {
+                            remaining_methods,
+                            ..
+                        } => return Err(wrong_password_set(settings, &remaining_methods)),
+                        russh::client::KeyboardInteractiveAuthResponse::InfoRequest {
+                            prompts,
+                            ..
+                        } if prompts.is_empty() => {
+                            response = handle
+                                .authenticate_keyboard_interactive_respond(Vec::new())
+                                .await
+                                .map_err(auth_error)?;
+                        }
+                        ref info => {
+                            let replies = answer_prompts(info, secret)?;
+                            response = handle
+                                .authenticate_keyboard_interactive_respond(replies)
+                                .await
+                                .map_err(auth_error)?;
+                        }
+                    }
+                }
+                return Err(UksftaError::Auth(
+                    "the server asked for something other than a password".to_string(),
+                ));
+            }
+            Method::None => {}
+        }
     }
 
     Err(UksftaError::Input(format!(
@@ -270,18 +459,23 @@ async fn authenticate(
     )))
 }
 
-#[cfg(unix)]
-async fn agent_authenticate(handle: &mut Handle<Handler>, user: &str) -> Result<bool, UksftaError> {
+async fn agent_authenticate(
+    handle: &mut Handle<Handler>,
+    user: &str,
+) -> Result<(bool, Option<russh::MethodSet>), UksftaError> {
     let Ok(mut agent) = AgentClient::connect_env().await else {
-        return Ok(false);
+        return Ok((false, None));
     };
     agent_identities(handle, user, &mut agent).await
 }
 
 #[cfg(windows)]
-async fn agent_authenticate(handle: &mut Handle<Handler>, user: &str) -> Result<bool, UksftaError> {
+async fn agent_authenticate(
+    handle: &mut Handle<Handler>,
+    user: &str,
+) -> Result<(bool, Option<russh::MethodSet>), UksftaError> {
     let Ok(mut agent) = AgentClient::connect_pageant().await else {
-        return Ok(false);
+        return Ok((false, None));
     };
     agent_identities(handle, user, &mut agent).await
 }
@@ -290,15 +484,15 @@ async fn agent_authenticate(handle: &mut Handle<Handler>, user: &str) -> Result<
 async fn agent_authenticate(
     _handle: &mut Handle<Handler>,
     _user: &str,
-) -> Result<bool, UksftaError> {
-    Ok(false)
+) -> Result<(bool, Option<russh::MethodSet>), UksftaError> {
+    Ok((false, None))
 }
 
 async fn agent_identities<S>(
     handle: &mut Handle<Handler>,
     user: &str,
     agent: &mut AgentClient<S>,
-) -> Result<bool, UksftaError>
+) -> Result<(bool, Option<russh::MethodSet>), UksftaError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
 {
@@ -306,8 +500,9 @@ where
         let _ = agent.bind_session(binding, false).await;
     }
     let Ok(identities) = agent.request_identities().await else {
-        return Ok(false);
+        return Ok((false, None));
     };
+    let mut remaining = None;
     for identity in identities {
         let key: PublicKey = identity.public_key().into_owned();
         let hash = if key.algorithm().is_rsa() {
@@ -324,11 +519,17 @@ where
             .await
         {
             if result.success() {
-                return Ok(true);
+                return Ok((true, None));
+            }
+            if let russh::client::AuthResult::Failure {
+                remaining_methods, ..
+            } = result
+            {
+                remaining = Some(remaining_methods);
             }
         }
     }
-    Ok(false)
+    Ok((false, remaining))
 }
 
 fn algorithm_and_fingerprint(key: &PublicKey) -> String {
@@ -432,5 +633,101 @@ mod tests {
         assert_eq!(config.keepalive_interval, Some(Duration::from_secs(15)));
         assert_eq!(config.keepalive_max, 3);
         assert_eq!(config.inactivity_timeout, Some(Duration::from_secs(30)));
+    }
+}
+
+#[cfg(test)]
+mod password_tests {
+    use super::*;
+    use russh::client::{KeyboardInteractiveAuthResponse, Prompt};
+    use russh::MethodKind;
+
+    fn offered(kinds: &[MethodKind]) -> russh::MethodSet {
+        russh::MethodSet::from(kinds)
+    }
+
+    fn secret() -> Secret {
+        let mut reader = std::io::Cursor::new(b"hunter two\n".to_vec());
+        super::super::secret::read_password(&mut reader).expect("a secret")
+    }
+
+    fn info(prompts: Vec<Prompt>) -> KeyboardInteractiveAuthResponse {
+        KeyboardInteractiveAuthResponse::InfoRequest {
+            name: "password".to_string(),
+            instructions: String::new(),
+            prompts,
+        }
+    }
+
+    #[test]
+    fn the_method_prefers_password_then_keyboard_interactive() {
+        assert_eq!(
+            choose_method(&offered(&[
+                MethodKind::Password,
+                MethodKind::KeyboardInteractive
+            ])),
+            Method::Password
+        );
+        assert_eq!(
+            choose_method(&offered(&[
+                MethodKind::KeyboardInteractive,
+                MethodKind::PublicKey
+            ])),
+            Method::KeyboardInteractive
+        );
+        assert_eq!(
+            choose_method(&offered(&[MethodKind::PublicKey])),
+            Method::None
+        );
+        assert_eq!(choose_method(&offered(&[])), Method::None);
+    }
+
+    #[test]
+    fn one_echo_free_prompt_is_answered_with_the_secret() {
+        let replies = answer_prompts(
+            &info(vec![Prompt {
+                prompt: "Password: ".to_string(),
+                echo: false,
+            }]),
+            &secret(),
+        )
+        .expect("one prompt");
+        assert_eq!(replies, vec!["hunter two".to_string()]);
+    }
+
+    #[test]
+    fn any_other_prompt_shape_is_refused() {
+        let two = info(vec![
+            Prompt {
+                prompt: "one".to_string(),
+                echo: false,
+            },
+            Prompt {
+                prompt: "two".to_string(),
+                echo: false,
+            },
+        ]);
+        let echo = info(vec![Prompt {
+            prompt: "type it".to_string(),
+            echo: true,
+        }]);
+        let none = info(Vec::new());
+        for response in [two, echo, none] {
+            let error = answer_prompts(&response, &secret()).expect_err("refused");
+            assert_eq!(
+                error.to_string(),
+                "the server asked for something other than a password"
+            );
+            assert!(!error.to_string().contains("hunter two"));
+        }
+        for response in [
+            KeyboardInteractiveAuthResponse::Success,
+            KeyboardInteractiveAuthResponse::Failure {
+                remaining_methods: offered(&[MethodKind::Password]),
+                partial_success: false,
+            },
+        ] {
+            assert!(answer_prompts(&response, &secret()).is_err());
+        }
     }
 }

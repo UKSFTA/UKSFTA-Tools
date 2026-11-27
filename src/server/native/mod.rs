@@ -8,6 +8,7 @@ pub mod known_hosts;
 pub mod progress;
 pub mod publish;
 pub mod schedule;
+pub mod secret;
 pub mod segment;
 pub mod verify;
 pub mod writer;
@@ -28,6 +29,7 @@ use self::checkpoint::{Checkpoint, LocalIdentity, Start};
 use self::connect::NativeSession;
 use self::progress::SegmentedProgress;
 use self::schedule::Scheduler;
+use self::secret::Secret;
 use self::segment::{Chunk, SegmentPlan};
 use crate::error::UksftaError;
 use crate::server::config::Settings;
@@ -51,6 +53,7 @@ pub fn run(
     pack_id: &str,
     unit: &UploadUnit,
     show_progress: bool,
+    password_prompt: bool,
 ) -> Result<String, UksftaError> {
     let connections = settings.segment.connections.max(1);
     let threads = usize::from(connections.min(4)).max(1);
@@ -59,7 +62,17 @@ pub fn run(
         .enable_all()
         .build()
         .map_err(UksftaError::Io)?;
-    runtime.block_on(async { transfer(settings, state_root, pack_id, unit, show_progress).await })
+    runtime.block_on(async {
+        transfer(
+            settings,
+            state_root,
+            pack_id,
+            unit,
+            show_progress,
+            password_prompt,
+        )
+        .await
+    })
 }
 
 async fn transfer(
@@ -68,6 +81,7 @@ async fn transfer(
     pack_id: &str,
     unit: &UploadUnit,
     show_progress: bool,
+    password_prompt: bool,
 ) -> Result<String, UksftaError> {
     let plan = SegmentPlan::new(
         unit.size,
@@ -79,7 +93,19 @@ async fn transfer(
     writer::assert_not_loadable(&aside_probe)?;
 
     let _lock = writer::take_run_lock(state_root, pack_id)?;
-    let coordinator = connect::connect(settings).await?;
+    let password = if password_prompt {
+        let (user, host) = connect::split_destination(&settings.destination)?;
+        // An explicit prompt owns the credential: a failure to read it is
+        // fatal, so the run cannot fall back to another credential.
+        match secret::prompt(&host, &user) {
+            Ok(secret) => Some(Arc::new(secret)),
+            Err(UksftaError::Input(message)) => return Err(UksftaError::Auth(message)),
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    let coordinator = connect::connect_with(settings, password.as_deref()).await?;
     let client = coordinator.sftp;
     let buffer = settings.transfer.buffer;
 
@@ -109,6 +135,7 @@ async fn transfer(
         state_root,
         pack_id,
         identity: &identity,
+        password: password.as_ref(),
     };
     finish_job(&job).await
 }
@@ -127,6 +154,7 @@ struct Job<'a> {
     state_root: &'a Path,
     pack_id: &'a str,
     identity: &'a LocalIdentity,
+    password: Option<&'a Arc<Secret>>,
 }
 
 async fn finish_job(job: &Job<'_>) -> Result<String, UksftaError> {
@@ -137,7 +165,7 @@ async fn finish_job(job: &Job<'_>) -> Result<String, UksftaError> {
 
     // The transfer may have replaced every worker connection, so the
     // completion steps use a fresh one.
-    let coordinator = connect::connect(job.settings).await?;
+    let coordinator = connect::connect_with(job.settings, job.password.map(AsRef::as_ref)).await?;
     let client = &coordinator.sftp;
 
     writer::finish(client, job.temp, size).await?;
@@ -242,6 +270,7 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
     let mut tasks = JoinSet::new();
     for worker in 0..usize::from(job.settings.segment.connections.max(1)) {
         let settings = job.settings.clone();
+        let password = job.password.cloned();
         let scheduler = Arc::clone(&scheduler);
         let acks = Arc::clone(&acks);
         let progress = Arc::clone(&progress);
@@ -251,7 +280,8 @@ async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
         let size = job.unit.size;
         tasks.spawn(async move {
             run_worker(
-                &settings, &local, &temp, buffer, size, worker, &scheduler, &acks, &progress,
+                &settings, &local, &temp, buffer, size, worker, password, &scheduler, &acks,
+                &progress,
             )
             .await
         });
@@ -316,6 +346,7 @@ async fn run_worker(
     buffer: u32,
     size: u64,
     worker: usize,
+    password: Option<Arc<Secret>>,
     scheduler: &Arc<Mutex<Scheduler>>,
     acks: &Arc<Mutex<Acks>>,
     progress: &Arc<SegmentedProgress>,
@@ -326,7 +357,7 @@ async fn run_worker(
 
     loop {
         if session.is_none() {
-            match open_session(settings, temp).await {
+            match open_session(settings, temp, password.as_deref()).await {
                 Ok(pair) => session = Some(pair),
                 Err(error) if is_fatal(&error) => return Err(error),
                 Err(_) => {
@@ -394,8 +425,9 @@ async fn run_worker(
 async fn open_session(
     settings: &Settings,
     temp: &str,
+    password: Option<&Secret>,
 ) -> Result<(NativeSession, File), UksftaError> {
-    let session = connect::connect(settings).await?;
+    let session = connect::connect_with(settings, password).await?;
     let file = writer::open_range_writer(&session.sftp, temp).await?;
     Ok((session, file))
 }
@@ -463,7 +495,7 @@ fn backoff(attempt: u8) -> Duration {
 pub fn is_fatal(error: &UksftaError) -> bool {
     match error {
         UksftaError::Io(_) => false,
-        UksftaError::Parse(_) | UksftaError::Check(_) => true,
+        UksftaError::Parse(_) | UksftaError::Check(_) | UksftaError::Auth(_) => true,
         UksftaError::Input(message) => {
             const FATAL: [&str; 9] = [
                 "cannot read ",
