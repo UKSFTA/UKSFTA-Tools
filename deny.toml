@@ -12,6 +12,10 @@ ignore = [
   # exists. chrono is used for timestamps, not to parse network input.
   # Re-check when russh updates russh-util.
   { id = "RUSTSEC-2026-0543", reason = "no safe upgrade in the latest russh; timestamps only" },
+  # console-subscriber pulls humantime, which wraps the unmaintained chrono.
+  # RUSTSEC-2026-0542 has no safe upgrade. The crate runs only behind the
+  # optional console feature and formats timestamps, nothing else.
+  { id = "RUSTSEC-2026-0542", reason = "optional console feature; humantime wraps chrono for timestamps" },
 ]
 
 [bans]

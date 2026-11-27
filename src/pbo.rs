@@ -655,7 +655,7 @@ fn from_entry_data(path: &Path) -> Vec<String> {
 
 /// The first quoted string of a `CBA_fnc_addKeybind` array. The marker
 /// closes the array, so the category is on the same printable line.
-fn cba_keybind_names(text: &str) -> Vec<String> {
+pub(crate) fn cba_keybind_names(text: &str) -> Vec<String> {
     const MARKER: &str = "CBA_fnc_addKeybind";
     let mut names = Vec::new();
     let mut rest = text;
@@ -712,7 +712,7 @@ fn read_capped(path: &Path, limit: u64) -> Option<Vec<u8>> {
 /// Printable runs of at least four bytes, one per line, so the field
 /// scans can work line by line. Braces get their own line: they carry
 /// the nesting the scan needs.
-fn readable_strings(data: &[u8]) -> String {
+pub(crate) fn readable_strings(data: &[u8]) -> String {
     let mut text = String::new();
     let mut run: Vec<u8> = Vec::new();
     for &byte in data {

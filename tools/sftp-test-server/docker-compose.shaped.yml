@@ -6,6 +6,10 @@ services:
   shaped:
     build: .
     image: uksfta-sftp-test:latest
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    volumes:
+      - ./keys:/fixture-keys:ro
+      - ./entrypoint.sh:/entrypoint.sh:ro
     command: ["/usr/sbin/sshd", "-D", "-e", "-p", "2222"]
     cap_add:
       - NET_ADMIN

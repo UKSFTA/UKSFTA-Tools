@@ -8,11 +8,16 @@ host ports 2222 and 2223, so the non-default-port test can use the same
 server.
 
 Generate the throwaway keys first. The `keys/` directory is ignored by git,
-so a fresh clone has none, and the image build needs them:
+so a fresh clone has none:
 
 ```bash
 ./tools/sftp-test-server/setup.sh
 ```
+
+The compose file mounts `keys/` read-only and `entrypoint.sh` installs the
+client and host keys on every container start, with mode `600` and the owner
+sshd expects. A regenerated key pair therefore needs no image rebuild, and
+`down -v` followed by `up -d` authenticates as before.
 
 ```bash
 docker compose -f tools/sftp-test-server/docker-compose.yml up -d --build
@@ -42,6 +47,12 @@ Force-kill a transfer, to test resume:
 docker compose -f tools/sftp-test-server/docker-compose.yml kill sftp
 docker compose -f tools/sftp-test-server/docker-compose.yml up -d
 ```
+
+The kill cases stop the server-side sftp subsystem processes through that
+compose file. When two suites must not share one server, start a second
+fixture and point the kill at it with `UKSFTA_SFTP_COMPOSE`, for example
+`UKSFTA_SFTP_COMPOSE=/path/to/compose.yml`. The file must name its service
+`sftp`.
 
 ## Shaped fixture
 

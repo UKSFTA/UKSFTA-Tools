@@ -71,6 +71,33 @@ seven types above:
 Reference the issue or pull request number in the message where it
 applies. Sign every commit with GPG.
 
+## Performance checks
+
+Run these before a change that touches a hot path: the upload, the verify
+pass, PBO parsing, hashing, or a filesystem walk.
+
+| Check | Command | Finds |
+| --- | --- | --- |
+| Pattern scan | `npx -p @ast-grep/cli sg scan src` | A client or a process built inside a loop, and an uncapped whole-file read |
+| Benchmarks | `cargo bench` | Time and allocation count per call, through divan |
+| Allocation profile | `heaptrack target/release/uksfta server ...` | The call site that allocates |
+| Async tasks | `RUSTFLAGS="--cfg tokio_unstable" cargo run --features console -- server ...` then `tokio-console` | A task that waits on the peer while others sit idle |
+| Binary size | `cargo bloat --release --crates` | The crates that dominate the binary |
+| Monomorphisation | `cargo llvm-lines --release` | Generic code that is copied per type |
+| Unused crates | `cargo machete` | A dependency to remove |
+
+The scan runs in CI. A rule in `.ast-grep/rules` fails the build when it
+matches at warning severity or above. Add a rule when a cost is specific to
+this codebase and a linter cannot see it.
+
+`cargo bench` runs `benches/hot_paths.rs` against a 64 MiB hash sample and a
+4 MiB config-like buffer. Divan reports an allocation count, so a buffer built
+per iteration shows up as a change in that column.
+
+Gungraun, the maintained form of iai-callgrind, counts instructions
+deterministically and suits a CI regression on a pure function. It needs
+Valgrind, so it is not part of this pipeline.
+
 ## Pull requests
 
 The `main` branch is protected. Changes go through a pull request. Every
