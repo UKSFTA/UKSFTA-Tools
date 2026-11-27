@@ -103,7 +103,10 @@ pub fn load_project(root: &Path) -> Result<ProjectConfig, UksftaError> {
 /// project.
 pub fn resolve_path(root: &Path, relative: &str) -> Result<PathBuf, UksftaError> {
     let path = Path::new(relative);
-    if path.is_absolute() {
+    if path
+        .components()
+        .any(|part| matches!(part, Component::Prefix(_) | Component::RootDir))
+    {
         return Err(UksftaError::Parse(format!(
             "publish path must be relative: {relative}"
         )));

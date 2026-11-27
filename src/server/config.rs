@@ -589,14 +589,15 @@ mod tests {
     fn resolve_reads_the_host_key_settings_from_the_file() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("server.toml");
-        fs::write(
-            &path,
-            "destination = \"a@b\"\nroot = \"/x\"\nknown_hosts = \"/tmp/kh\"\nhost_key_policy = \"accept-new\"\n",
-        )
-        .unwrap();
+        let known_hosts = dir.path().join("known_hosts");
+        let text = format!(
+            "destination = \"a@b\"\nroot = \"/x\"\nknown_hosts = {:?}\nhost_key_policy = \"accept-new\"\n",
+            known_hosts.display().to_string()
+        );
+        fs::write(&path, text).unwrap();
 
         let settings = resolve(Some(&path), &Overrides::default()).unwrap();
-        assert_eq!(settings.known_hosts, PathBuf::from("/tmp/kh"));
+        assert_eq!(settings.known_hosts, known_hosts);
         assert_eq!(settings.host_key_policy, HostKeyPolicy::AcceptNew);
     }
 }
