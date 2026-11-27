@@ -131,6 +131,11 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The native transport is faster. A 16 MiB receive window and matching
+  request buffer raise a 977 MB segmented upload from 34.4 s to a 14.7 s
+  median on the local fixture, and the full 15.46 GB pack takes 184.8 s
+  at 83.77 MB/s, from 210.7 s at 75.03 MB/s. The completion read-back
+  reaches 114.83 MB/s on one stream, so it stays single-stream.
 - The minimum supported Rust version is 1.89, for the native transport
   dependencies.
 

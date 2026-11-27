@@ -1038,6 +1038,44 @@ cases. They need `UKSFTA_SFTP_SHAPED=1` and a kernel that provides
 `sch_netem`. Without that kernel they skip with a printed reason. The
 shaped container shapes only its own interface, never the host network.
 
+#### Measured throughput
+
+The figures below come from a local OpenSSH container. They measure the
+client and the server loop on one machine, not a WAN link. The container
+varies between runs, so the table gives the median of five runs.
+
+The 977 MB PBO on the segmented path, 8 connections, 8 MiB ranges,
+`--buffer 261120 --requests 256` and the probe off:
+
+| Version | Time | Rate |
+| --- | --- | --- |
+| 32 KiB block, 64 requests, 2 MiB window | 34.4 s | 29.80 MB/s |
+| 261120-byte block, 256 requests, 16 MiB window | 14.7 s | 66.4 MB/s |
+
+The best run of the second version took 14.4 s at 68.05 MB/s. Every run
+published a file with the same SHA-256. A larger fsync interval gave no
+reliable gain, so the default stays at every fourth range.
+
+The full 15.46 GB pack, 114 PBOs, 8 jobs, probe on:
+
+| Version | Time | Rate |
+| --- | --- | --- |
+| Probe era | 210.7 s | 75.03 MB/s |
+| Current transport | 184.8 s | 83.77 MB/s |
+
+The probe chose the segmented path for the 977 MB PBO and published it in
+16.4 s at 59.47 MB/s.
+
+The completion read-back reached 114.83 MB/s on one stream. A parallel
+read-back needs to beat that by 20 percent, so the command keeps the
+single-stream hash. A separate process that reopened the file read it at
+15 to 16 MB/s. That number does not match the in-run figure and has no
+cause yet. The in-run figure is the read-back the transfer performs.
+
+On the real server link the limit is the link. One stream gives 1.68 MB/s
+and two streams give 1.80 MB/s, so the larger block and the extra
+connections change little there. They help a fast or high-latency link.
+
 #### Password prompt
 
 `--password-prompt` reads one password from the controlling terminal for
