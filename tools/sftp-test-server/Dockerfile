@@ -12,6 +12,7 @@ RUN useradd --create-home --shell /bin/bash uksfta \
 
 COPY sshd_config /etc/ssh/sshd_config
 COPY netem.sh /netem.sh
+COPY shape.sh /shape.sh
 COPY keys/id_ed25519_host /etc/ssh/id_ed25519_host
 COPY keys/id_ed25519_host.pub /etc/ssh/id_ed25519_host.pub
 COPY keys/authorized_keys /home/uksfta/.ssh/authorized_keys

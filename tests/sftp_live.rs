@@ -3,6 +3,8 @@
 //! fixture plus `UKSFTA_SFTP_LIVE=1`.
 #![cfg(unix)]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
@@ -47,10 +49,16 @@ struct Setup {
     remote_pbo: String,
     remote_temp: String,
     known_hosts: PathBuf,
+    host: String,
+    port: u16,
 }
 
 impl Setup {
     fn new(tag: &str) -> Self {
+        Self::at(tag, "127.0.0.1", 2222)
+    }
+
+    fn at(tag: &str, host: &str, port: u16) -> Self {
         let repo = tempfile::TempDir::new().expect("a repository");
         let release = repo.path().join(".hemttout/release");
         let addons = release.join("addons");
@@ -65,7 +73,7 @@ impl Setup {
         write_pattern(&pbo, SIZE);
 
         let known_hosts = repo.path().join("known_hosts");
-        std::fs::write(&known_hosts, format!("[127.0.0.1]:2222 {}\n", host_key()))
+        std::fs::write(&known_hosts, format!("[{host}]:{port} {}\n", host_key()))
             .expect("known_hosts");
 
         let remote_dir = format!("{ROOT}/@{PACK_ID}/addons");
@@ -81,6 +89,8 @@ impl Setup {
             remote_temp: format!("{remote_dir}/{name}.uksfta-part"),
             remote_dir,
             known_hosts,
+            host: host.to_string(),
+            port,
         }
     }
 
@@ -93,9 +103,9 @@ impl Setup {
                 "--upload",
                 "--segmented",
                 "--destination",
-                "uksfta@127.0.0.1",
+                &format!("uksfta@{}", self.host),
                 "--port",
-                "2222",
+                &self.port.to_string(),
                 "--root",
                 ROOT,
                 "--identity",
@@ -430,4 +440,222 @@ fn a_failed_run_never_publishes() {
         "the temp file is kept for the next run"
     );
     println!("no_publish: {} is absent", setup.remote_pbo);
+}
+
+// ---- Shaped bridge cases ---------------------------------------------------
+
+fn shaped_prepare(shaped: &common::Shaped, setup: &Setup) {
+    let out = shaped.exec(&["mkdir", "-p", &setup.remote_dir]);
+    assert!(out.status.success(), "cannot create the remote directory");
+    let _ = shaped.exec(&["rm", "-f", &setup.remote_pbo, &setup.remote_temp]);
+}
+
+fn shaped_len(shaped: &common::Shaped, path: &str) -> Option<u64> {
+    let out = shaped.exec(&["stat", "-c", "%s", path]);
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+fn shaped_exists(shaped: &common::Shaped, path: &str) -> bool {
+    shaped.exec(&["test", "-e", path]).status.success()
+}
+
+fn shaped_sha(shaped: &common::Shaped, path: &str) -> String {
+    let out = shaped.exec(&["sha256sum", path]);
+    assert!(out.status.success(), "sha256sum failed for {path}");
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .expect("a digest")
+        .to_string()
+}
+
+/// Wait for the shaped temp to reach `at_least`.
+fn wait_for_shaped_temp(shaped: &common::Shaped, setup: &Setup, at_least: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut seen = false;
+    while Instant::now() < deadline {
+        match shaped_len(shaped, &setup.remote_temp) {
+            Some(len) => {
+                seen = true;
+                if len >= at_least {
+                    return true;
+                }
+            }
+            None if seen => return false,
+            None => {}
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Start the shaped fixture, or print the skip reason and return `None`.
+fn shaped_fixture() -> Option<common::Shaped> {
+    if !common::shaped_enabled() {
+        return None;
+    }
+    match common::Shaped::start() {
+        Ok(shaped) => Some(shaped),
+        Err(reason) => {
+            eprintln!("skipped: the shaped bridge fixture is unusable: {reason}");
+            None
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs the shaped bridge fixture, UKSFTA_SFTP_LIVE=1 and UKSFTA_SFTP_SHAPED=1"]
+fn a_shaped_kill_leaves_no_final_file_and_resumes() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let Some(shaped) = shaped_fixture() else {
+        return;
+    };
+    shaped.apply();
+    let setup = Setup::at("shaped_kill", &shaped.ip, common::PORT);
+    shaped_prepare(&shaped, &setup);
+    let expected = local_sha256(&setup.pbo);
+
+    let mut child = setup.spawn(&["--segment-reconnects", "0", "--segment-connections", "1"]);
+    assert!(
+        wait_for_shaped_temp(&shaped, &setup, SIZE * 3 / 10),
+        "the shaped transfer did not reach 30%"
+    );
+    let killed = shaped.exec(&["pkill", "-f", "sftp-server"]);
+    assert!(
+        killed.status.success(),
+        "cannot kill the session: {}",
+        String::from_utf8_lossy(&killed.stderr).trim()
+    );
+    let status = child.wait().expect("wait for the killed run");
+
+    println!(
+        "shaped_kill: exit={:?} final={} temp={}",
+        status.code(),
+        shaped_exists(&shaped, &setup.remote_pbo),
+        shaped_exists(&shaped, &setup.remote_temp)
+    );
+    assert_eq!(status.code(), Some(2), "a killed session exits 2");
+    assert!(
+        !shaped_exists(&shaped, &setup.remote_pbo),
+        "a killed run must not publish the final name"
+    );
+    assert!(
+        shaped_exists(&shaped, &setup.remote_temp),
+        "the temp file is kept for the resume"
+    );
+
+    shaped.clear();
+    assert!(
+        shaped.qdisc_cleared(),
+        "the qdisc was cleared after the case"
+    );
+    let output = setup.run(&["--segment-reconnects", "2"]);
+    let errors = stderr(&output);
+    assert!(output.status.success(), "the resume failed: {errors}");
+    assert_eq!(shaped_sha(&shaped, &setup.remote_pbo), expected);
+}
+
+#[test]
+#[ignore = "needs the shaped bridge fixture, UKSFTA_SFTP_LIVE=1 and UKSFTA_SFTP_SHAPED=1"]
+fn a_shaped_loss_burst_completes_or_fails_cleanly() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let Some(shaped) = shaped_fixture() else {
+        return;
+    };
+    shaped.apply();
+    let setup = Setup::at("shaped_loss", &shaped.ip, common::PORT);
+    shaped_prepare(&shaped, &setup);
+    let expected = local_sha256(&setup.pbo);
+
+    let mut child = setup.spawn(&["--segment-reconnects", "3", "--segment-connections", "4"]);
+    assert!(
+        wait_for_shaped_temp(&shaped, &setup, 4 * 1024 * 1024),
+        "the shaped transfer did not start"
+    );
+    shaped.loss(100);
+    std::thread::sleep(Duration::from_secs(5));
+    shaped.apply();
+    let status = child.wait().expect("wait for the loss run");
+
+    let published = shaped_exists(&shaped, &setup.remote_pbo);
+    println!("shaped_loss: exit={:?} final={published}", status.code());
+    match status.code() {
+        Some(0) => assert!(published, "a successful run must publish the file"),
+        Some(2) => {}
+        other => panic!("unexpected exit: {other:?}"),
+    }
+    if published {
+        assert_eq!(
+            shaped_sha(&shaped, &setup.remote_pbo),
+            expected,
+            "a published file must match the local file"
+        );
+    }
+    shaped.clear();
+    assert!(
+        shaped.qdisc_cleared(),
+        "the qdisc was cleared after the case"
+    );
+}
+
+#[test]
+#[ignore = "needs the shaped bridge fixture, UKSFTA_SFTP_LIVE=1 and UKSFTA_SFTP_SHAPED=1"]
+fn three_shaped_kills_then_a_clean_resume() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let Some(shaped) = shaped_fixture() else {
+        return;
+    };
+    shaped.apply();
+    let setup = Setup::at("shaped_three", &shaped.ip, common::PORT);
+    shaped_prepare(&shaped, &setup);
+    let expected = local_sha256(&setup.pbo);
+
+    for percent in [10u64, 40, 70] {
+        let mut child = setup.spawn(&["--segment-reconnects", "0", "--segment-connections", "1"]);
+        assert!(
+            wait_for_shaped_temp(&shaped, &setup, SIZE * percent / 100),
+            "the shaped transfer did not reach {percent}%"
+        );
+        let killed = shaped.exec(&["pkill", "-f", "sftp-server"]);
+        assert!(
+            killed.status.success(),
+            "cannot kill the session at {percent}%"
+        );
+        let status = child.wait().expect("wait for the killed run");
+        assert_eq!(status.code(), Some(2), "a killed run exits 2 at {percent}%");
+        assert!(
+            !shaped_exists(&shaped, &setup.remote_pbo),
+            "nothing is published at {percent}%"
+        );
+        println!("shaped_three: killed at {percent}%");
+    }
+
+    shaped.clear();
+    assert!(
+        shaped.qdisc_cleared(),
+        "the qdisc was cleared after the case"
+    );
+    let output = setup.run(&["--segment-reconnects", "2"]);
+    let errors = stderr(&output);
+    assert!(output.status.success(), "the clean resume failed: {errors}");
+    assert_eq!(shaped_sha(&shaped, &setup.remote_pbo), expected);
+
+    let listing = shaped.exec(&["ls", "-1", &setup.remote_dir]);
+    let text = String::from_utf8_lossy(&listing.stdout);
+    assert!(
+        !text.contains(".uksfta-part-") && !text.contains(".uksfta-old-"),
+        "no temp residue must remain: {text}"
+    );
 }

@@ -43,12 +43,38 @@ docker compose -f tools/sftp-test-server/docker-compose.yml kill sftp
 docker compose -f tools/sftp-test-server/docker-compose.yml up -d
 ```
 
-Apply the shaped link for the netem tests:
+## Shaped fixture
+
+The shaped tests use a second compose file on a private bridge network. It
+publishes no ports and shapes only the container's own `eth0`, so the host
+network is never touched. `shape.sh` refuses to run outside a container, and
+`netem.sh` is disabled.
 
 ```bash
-docker compose -f tools/sftp-test-server/docker-compose.yml exec sftp \
-  sh /netem.sh
+docker build --network=host -t uksfta-sftp-test tools/sftp-test-server
+docker compose -f tools/sftp-test-server/docker-compose.shaped.yml up -d --no-build
+docker compose -f tools/sftp-test-server/docker-compose.shaped.yml exec -T shaped \
+  sh /shape.sh apply
+docker compose -f tools/sftp-test-server/docker-compose.shaped.yml exec -T shaped \
+  sh /shape.sh clear
+docker compose -f tools/sftp-test-server/docker-compose.shaped.yml down -v
 ```
+
+The shape is `tc qdisc replace dev eth0 root netem delay 60ms 10ms rate
+40mbit`. The tests find the container address with `docker inspect`, connect
+to `<address>:2222`, and write a temporary `known_hosts` entry.
+
+`sch_netem` must exist in the running kernel. On a kernel without it, `tc`
+answers `Specified qdisc kind is unknown`, and the shaped tests skip with that
+reason instead of failing. They report:
+
+```text
+skipped: the shaped bridge fixture is unusable: cannot shape the container
+link: Error: Specified qdisc kind is unknown.
+```
+
+Do not load modules or run `tc` on the host to work around this. Run the
+shaped suites on a host whose kernel provides `sch_netem`.
 
 ## Live tests
 
@@ -56,6 +82,19 @@ Start the server, then:
 
 ```bash
 UKSFTA_SFTP_LIVE=1 cargo test --locked -- --ignored native::tests
+UKSFTA_SFTP_LIVE=1 cargo test --locked --test sftp_live -- --ignored
 ```
 
 Without `UKSFTA_SFTP_LIVE=1` every live test is ignored.
+
+The shaped cases need the bridge fixture and shaping:
+
+```bash
+UKSFTA_SFTP_LIVE=1 UKSFTA_SFTP_SHAPED=1 \
+  cargo test --locked --test throughput_live -- --ignored --nocapture
+UKSFTA_SFTP_LIVE=1 UKSFTA_SFTP_SHAPED=1 \
+  cargo test --locked --test sftp_live -- --ignored
+```
+
+Run the two shaped commands one after the other. They share one container and
+one shaped link.

@@ -30,6 +30,11 @@ This project uses [Semantic Versioning](https://semver.org/).
 - Stale segmented temporary files more than a day old, and temporary
   files with no checkpoint, are removed with a warning.
 
+- A shaped-link test harness compares a segmented upload with one stream,
+  and covers a killed session, a loss burst and three interrupted resumes.
+  It runs only with `UKSFTA_SFTP_SHAPED=1` on a kernel with `sch_netem`,
+  and skips with a printed reason otherwise.
+
 - Opt-in launch-line and `server.cfg` checks. `--launch-line` reads a
   local copy and finds `@<id>` in `-mod` or `-serverMod`. `--server-cfg`
   reads one file over SFTP and checks `verifySignatures` and
