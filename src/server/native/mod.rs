@@ -42,6 +42,9 @@ use crate::server::config::Settings;
 use crate::server::limit::RateLimiter;
 use crate::server::report::UploadUnit;
 
+/// The native write block. The native path always uses the server's maximum
+/// SFTP packet, so the system client's safer 32 KiB default does not cap it.
+pub const NATIVE_BUFFER: u32 = 261_120;
 /// The longest wait between a failed range and its retry.
 const MAX_BACKOFF: Duration = Duration::from_secs(8);
 /// How often the acknowledged prefix reaches the checkpoint file.
@@ -150,7 +153,7 @@ async fn transfer(
     }
     let coordinator = connect::connect_with(settings, password.as_deref()).await?;
     let client = coordinator.sftp;
-    let buffer = settings.transfer.buffer;
+    let buffer = settings.transfer.buffer.max(NATIVE_BUFFER);
 
     let (start, temp) = checkpoint::decide(&client, state_root, pack_id, unit, settings).await?;
     writer::assert_not_loadable(&temp)?;

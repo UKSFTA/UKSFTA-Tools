@@ -886,6 +886,13 @@ the equal-SHA-256 rule do not change.
 The read-back hash uses its own 261120-byte buffer, not the 32 KiB
 transfer buffer. The limit does not apply to the read-back.
 
+The native transport sets a 16 MiB receive window and a 261120-byte packet
+cap, and sizes its request buffer from `--requests`. The native path always
+writes in 261120-byte blocks, whatever `--buffer` says, because that is the
+server's maximum packet. `--buffer` keeps its safer 32 KiB default for the
+system `sftp` path. The probe's native cases use the same block, so its
+numbers match the real transfer.
+
 A segmented run reports `max`, `start` and `peak` connection counts in its
 published line. Every adaptive change prints one line, such as
 `segment: connections 4 -> 5`, and only changes are logged.

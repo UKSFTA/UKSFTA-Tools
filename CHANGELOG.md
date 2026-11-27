@@ -9,6 +9,10 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The native transport uses a 16 MiB receive window, a 261120-byte packet
+  cap and a request buffer sized from `--requests`. The native write block
+  is 261120 bytes regardless of `--buffer`, which keeps its default for the
+  system path.
 - `--password-prompt` asks once, before the probe and the transfer. The
   progress view is hidden while the prompt runs. The system probe never
   prompts, and a probe auth failure that uses the typed password is fatal.
