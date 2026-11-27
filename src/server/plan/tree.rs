@@ -160,6 +160,7 @@ pub fn inside(pack_dir: &str, rel: &str) -> Result<String, UksftaError> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn write(path: &Path, bytes: &[u8]) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -167,6 +168,7 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_walk_keeps_the_tree_and_counts_the_exclusions() {
         let root = tempfile::TempDir::new().unwrap();
@@ -204,6 +206,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlink_is_never_followed() {
         let root = tempfile::TempDir::new().unwrap();

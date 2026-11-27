@@ -595,6 +595,10 @@ The command also passes `UpdateHostKeys=no`, so a known key is not
 replaced without a decision. A host key failure names the destination,
 the key file and the remedy.
 
+The native segmented path reads the same file. It checks the key before
+authentication. It refuses an `@cert-authority` line and an `@revoked`
+line, so those lines stop both paths.
+
 ### Launch line and server.cfg checks
 
 Both checks are opt-in. They print one line per check on standard error
@@ -816,46 +820,89 @@ acknowledged.
 
 #### Segmented upload
 
-`--segmented` sends one large file over several connections. It picks the
-largest planned upload at or above `--segment-min` (default 64 MiB) and
-splits it into 1 to 16 MiB ranges across `--segment-connections` (default
-4). The file is written to `<name>.uksfta-part`, read back and hashed,
-then published with an atomic rename. The other files use the normal
-upload path.
+`--segmented` sends one large file over several connections. The command
+picks the largest planned upload at or above `--segment-min`. The other
+files use the normal upload path. The feature is off by default.
+
+| Flag | Range | Default | Effect |
+| --- | --- | --- | --- |
+| `--segmented` | on or off | off | Use the segmented path for one file. |
+| `--segment-min BYTES` | up to 1 TiB | 64 MiB | The smallest file the segmented path takes. |
+| `--segment-connections N` | 1 to 16 | 4 | The connections, and the ranges in flight. |
+| `--segment-chunk BYTES` | 1 MiB to 64 MiB | automatic | The range size. It must be a 4096-byte multiple. |
+| `--segment-resume POLICY` | auto or off | auto | Continue an earlier interrupted file. |
+| `--segment-reconnects N` | 0 to 10 | 3 | The reconnects for one dead connection. |
+
+The command sets the automatic chunk to one eighth of the file divided by
+the connection count. It clamps the value to 1 to 16 MiB and rounds it down
+to a 4096-byte multiple.
+
+The command writes the file to `<name>.uksfta-part`. The final name
+changes only at publish. Each connection opens the temp file for writing
+and seeks to its own range. No connection appends.
+
+After the last range, the command downloads the whole temp file and hashes
+it with SHA-256. It compares that hash with the local file before it
+publishes. There is no flag to skip this read-back.
+
+Publish runs one atomic rename. It uses `posix-rename@openssh.com` when the
+server advertises it. Otherwise it moves an old final file aside, renames
+the temp file, and removes the old file. A rename that cannot run publishes
+nothing and exits 2.
+
+An acknowledged range is a range whose write the server accepted and,
+when the server advertises `fsync@openssh.com`, whose data reached the
+disk. The checkpoint under `.uksfta/upload/<pack-id>/` records the
+acknowledged prefix.
+
+The acknowledged prefix is the number of bytes from offset zero that every
+range below it has written and acknowledged. The command never trusts the
+remote size. A size says how long a file is. It does not say which bytes
+are present.
+
+Before a resume the command hashes the remote prefix and the local prefix.
+A match continues from the acked prefix. A mismatch discards the temp file
+and the checkpoint, and starts the file again.
+
+The read-back hash and the prefix hash answer the `reput` defect. An
+earlier tool resumed at the remote size. The server held a short file with
+a hole, so the result had the correct length and wrong bytes. A prefix hash
+rejects that file.
+
+The worker retries a failed range after 1 s, 2 s, 4 s, then 8 s. When a
+connection dies, the command replaces only that connection and sends only
+its in-flight range again. `--segment-reconnects` sets how many times the
+command replaces one dead connection. When every connection has given up,
+the run exits 2.
+
+A failed run keeps the temp file and the checkpoint. The next run resumes
+from the acked prefix. `--segment-resume off` discards any checkpoint and
+starts the file again.
+
+Before the first write the command asks for the free space. It needs twice
+the file size. A shortfall names the free bytes and the needed bytes, and
+exits 2. A server that cannot report free space gives one warning.
+
+The command removes a stale temp file with a warning when it has no
+checkpoint, or when it is more than a day old. It removes at most eight per
+run. It never removes the current temp file.
 
 This mode needs a key file or an agent. It does not prompt for a password.
-Use it on a link that is faster than one connection.
+A server that accepts only a password must use the default `sftp` path,
+without `--segmented`.
 
-A failed range is retried with a wait of 1 s, 2 s, 4 s, then 8 s. When a
-connection dies, only that connection is replaced and only its in-flight
-range is sent again. `--segment-reconnects` sets the replacements per
-connection (default 3, range 0 to 10). When every connection has given
-up, the run exits 2.
-
-A checkpoint under `.uksfta/upload/<pack-id>/` records the ranges the
-server acknowledged, with the size, modification time and SHA-256 of the
-local file. A range is recorded only after its write is acknowledged, and
-after an fsync when the server advertises `fsync@openssh.com`. A failed
-run keeps the temporary file and the checkpoint. The next run continues
-from the acknowledged prefix, but it first hashes that prefix on both
-sides and compares them. The remote size is never trusted. A mismatch, a
-changed local file or an older checkpoint restarts the file from zero and
-prints the reason.
-
-`--segment-resume auto|off` selects this behaviour. `auto` is the default.
-`off` discards any checkpoint and starts the file again.
-
-A stale temporary file with no checkpoint, or one more than a day old, is
-removed with a warning, at most eight per run. The current temporary file
-is never removed.
+A failed segment exits 2. The pack checks keep their codes: 1 for a check
+failure and 2 for an input or environment failure. See Exit codes.
 
 `tests/throughput_live.rs` measures the segmented path against one stream
-on a shaped bridge link (60 ms delay, 40 Mbit). It uploads a 128 MiB file
-twice and prints `single`, `segmented` and `ratio`. `tests/sftp_live.rs`
-adds shaped kill, loss-burst and repeated-resume cases. They need
-`UKSFTA_SFTP_SHAPED=1` and a kernel that provides `sch_netem`; without it
-they skip with a printed reason. The shaped container shapes only its own
-interface, never the host network.
+on a shaped bridge link. The link delays 60 ms and limits the rate to
+40 Mbit. The test uploads a 128 MiB file twice and prints `single`,
+`segmented` and `ratio`.
+
+`tests/sftp_live.rs` adds shaped kill, loss-burst and repeated-resume
+cases. They need `UKSFTA_SFTP_SHAPED=1` and a kernel that provides
+`sch_netem`. Without that kernel they skip with a printed reason. The
+shaped container shapes only its own interface, never the host network.
 
 The client also sends `ServerAliveInterval=15`, `ServerAliveCountMax=3`
 and `ConnectTimeout=15`, so a dead link fails in seconds.
