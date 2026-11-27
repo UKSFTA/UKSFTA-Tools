@@ -361,13 +361,14 @@ async fn write_probe(
     len: u32,
     buffer: u32,
 ) -> Result<(), UksftaError> {
-    let mut file = writer::open_range_writer(sftp, remote).await?;
+    let open = writer::open_range_writer(sftp, remote).await?;
+    let mut file = writer::RangeWriter::from_handle(open);
     let chunk = Chunk {
         index: 0,
         start,
         len,
     };
-    let written = writer::write_range(&mut file, &chunk, local, buffer, None, &mut |_| {}).await;
+    let written = file.write(&chunk, local, buffer, None, &mut |_| {}).await;
     let _ = file.close().await;
     written
 }

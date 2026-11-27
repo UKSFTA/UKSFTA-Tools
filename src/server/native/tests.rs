@@ -386,11 +386,12 @@ async fn four_connections_write_a_sixteen_mebibyte_file() {
         let local = local.clone();
         tasks.spawn(async move {
             let session = session(&settings).await;
-            let mut file = super::writer::open_range_writer(&session.sftp, &remote).await?;
+            let mut file = super::writer::RangeWriter::open(&session.sftp, &remote, 4).await?;
+            assert_eq!(file.depth(), 4, "four writes per connection");
             loop {
                 let next = scheduler.lock().expect("scheduler").take();
                 let Some(chunk) = next else { break };
-                super::writer::write_range(&mut file, &chunk, &local, 32_768, None, &mut |_| {})
+                file.write(&chunk, &local, 32_768, None, &mut |_| {})
                     .await?;
                 scheduler.lock().expect("scheduler").complete(chunk.index);
             }
@@ -434,16 +435,18 @@ async fn a_short_local_file_is_refused_by_name() {
     super::writer::create_temp(&session.sftp, &remote)
         .await
         .expect("create");
-    let mut file = super::writer::open_range_writer(&session.sftp, &remote)
+    let file = super::writer::open_range_writer(&session.sftp, &remote)
         .await
         .expect("handle");
+    let mut writer = super::writer::RangeWriter::from_handle(file);
 
     let chunk = super::segment::Chunk {
         index: 0,
         start: 0,
         len: 4096,
     };
-    let error = super::writer::write_range(&mut file, &chunk, &local, 4096, None, &mut |_| {})
+    let error = writer
+        .write(&chunk, &local, 4096, None, &mut |_| {})
         .await
         .expect_err("the local file is short");
     let text = error.to_string();
@@ -476,20 +479,15 @@ async fn a_missing_range_makes_finish_refuse_and_publish_never_run() {
 
     // Write only the first half of the file.
     let plan = super::segment::SegmentPlan::new(SIZE, 1, Some(1024 * 1024)).expect("plan");
-    let mut file = super::writer::open_range_writer(&session.sftp, &temp)
+    let file = super::writer::open_range_writer(&session.sftp, &temp)
         .await
         .expect("handle");
-    super::writer::write_range(
-        &mut file,
-        &plan.chunks[0],
-        &local,
-        32_768,
-        None,
-        &mut |_| {},
-    )
-    .await
-    .expect("the first range");
-    file.close().await.expect("close");
+    let mut writer = super::writer::RangeWriter::from_handle(file);
+    writer
+        .write(&plan.chunks[0], &local, 32_768, None, &mut |_| {})
+        .await
+        .expect("the first range");
+    writer.close().await.expect("close");
 
     let error = super::writer::finish(&session.sftp, &temp, SIZE)
         .await
@@ -663,18 +661,20 @@ async fn the_readback_buffer_rate_is_measurable() {
     super::writer::create_temp(&session.sftp, &temp)
         .await
         .expect("the temp file");
-    let mut file = super::writer::open_range_writer(&session.sftp, &temp)
+    let file = super::writer::open_range_writer(&session.sftp, &temp)
         .await
         .expect("the writer");
+    let mut writer = super::writer::RangeWriter::from_handle(file);
     let chunk = super::segment::Chunk {
         index: 0,
         start: 0,
         len: SIZE as u32,
     };
-    super::writer::write_range(&mut file, &chunk, &local, 32_768, None, &mut |_| {})
+    writer
+        .write(&chunk, &local, 32_768, None, &mut |_| {})
         .await
         .expect("the write");
-    file.close().await.expect("close");
+    writer.close().await.expect("close");
 
     let started = std::time::Instant::now();
     super::verify::hash_remote(&session.sftp, &temp, SIZE, 32_768)
@@ -1063,12 +1063,15 @@ fn a_resume_continues_from_the_acked_prefix() {
             checkpoint.acked_prefix <= temp_size,
             "the prefix never exceeds the bytes on the server"
         );
+        let identity =
+            super::checkpoint::IdentityJob::start(&fixture.unit.local).expect("identity");
         let decision = super::checkpoint::decide(
             &session.sftp,
             fixture.state.path(),
             "pack-a",
             &fixture.unit,
             &fixture.settings,
+            &identity,
         )
         .await
         .expect("decide");
@@ -1147,12 +1150,15 @@ fn a_corrupted_prefix_restarts_from_scratch() {
         file.write(&[0xff]).await.expect("write the corrupt byte");
         file.close().await.expect("close");
 
+        let identity =
+            super::checkpoint::IdentityJob::start(&fixture.unit.local).expect("identity");
         let (start, _) = super::checkpoint::decide(
             &session.sftp,
             fixture.state.path(),
             "pack-c",
             &fixture.unit,
             &fixture.settings,
+            &identity,
         )
         .await
         .expect("decide");
