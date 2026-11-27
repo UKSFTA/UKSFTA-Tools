@@ -43,6 +43,12 @@ docker compose -f tools/sftp-test-server/docker-compose.yml kill sftp
 docker compose -f tools/sftp-test-server/docker-compose.yml up -d
 ```
 
+The kill cases stop the server-side sftp subsystem processes through that
+compose file. When two suites must not share one server, start a second
+fixture and point the kill at it with `UKSFTA_SFTP_COMPOSE`, for example
+`UKSFTA_SFTP_COMPOSE=/path/to/compose.yml`. The file must name its service
+`sftp`.
+
 ## Shaped fixture
 
 The shaped tests use a second compose file on a private bridge network. It
