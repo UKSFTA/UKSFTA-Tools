@@ -29,6 +29,14 @@ const DIR_BATCH: usize = 32;
 /// The deepest directory level listed below the pack root.
 const MAX_DEPTH: usize = 8;
 
+/// The reads that need only the listing: the remote key authorities, the
+/// deep hash results, and every warning they raise.
+struct Fetched {
+    authorities: HashSet<String>,
+    deep: HashMap<String, bool>,
+    warnings: Vec<String>,
+}
+
 /// The inputs that stay fixed for one command run.
 pub struct Verifier<'a> {
     pub client: Sftp,
@@ -45,7 +53,8 @@ pub struct Verifier<'a> {
 /// The time spent in the read-only phases, in milliseconds.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VerifyTiming {
-    /// Listing, `meta.cpp`/`mod.cpp`, and the remote keys.
+    /// Listing and the identity files. With `--deep` the key read shares the
+    /// deep batch, so it is counted in `deep_ms` instead.
     pub connect_ms: u64,
     /// The deep download and hash, when it ran.
     pub deep_ms: Option<u64>,
@@ -59,31 +68,35 @@ impl Verifier<'_> {
 
     /// Run the read-only phases and report how long they took.
     pub fn verify_timed(&self) -> Result<(Plan, VerifyTiming), UksftaError> {
-        let connect_started = Instant::now();
+        let listing_started = Instant::now();
         let dir = mod_dir(&self.settings.root, &self.local.id);
         let mut remote = self.list(&dir)?;
-        self.fetch_meta(&dir, &mut remote)?;
-        let (remote_key_authorities, mut warnings) = self.fetch_remote_keys(&dir, &remote)?;
-        let connect_ms = millis(connect_started.elapsed());
+        self.read_meta(&mut remote);
+        let listing_ms = millis(listing_started.elapsed());
 
-        let deep_started = Instant::now();
-        let deep = if self.deep {
-            self.deep_hashes(&dir, &remote)?
+        let fetch_started = Instant::now();
+        let fetched = self.fetch_keys_and_deep(&dir, &remote)?;
+        let fetch_ms = millis(fetch_started.elapsed());
+        // The key read shares the deep batch, so with `--deep` its time is
+        // the deep phase's.
+        let connect_ms = if self.deep {
+            listing_ms
         } else {
-            HashMap::new()
+            listing_ms + fetch_ms
         };
-        let deep_ms = self.deep.then(|| millis(deep_started.elapsed()));
+        let deep_ms = self.deep.then_some(fetch_ms);
 
+        let mut warnings = fetched.warnings;
         let mut plan = build_plan(&PlanInput {
             local: self.local,
             remote_dir: &dir,
             remote: &remote,
             meta_upload: Some(&self.meta_upload),
-            deep: &deep,
+            deep: &fetched.deep,
             locked: self.locked,
             local_signature_authorities: &self.local.signature_authorities,
             local_key_authorities: &self.local.key_authorities,
-            remote_key_authorities: &remote_key_authorities,
+            remote_key_authorities: &fetched.authorities,
             force_prune: self.force_prune,
             require_signatures: self.require_signatures,
         });
@@ -97,13 +110,10 @@ impl Verifier<'_> {
         ))
     }
 
-    /// One batch downloads every remote `keys/*.bikey` and reads its
-    /// authority. A failure is a warning, so the remote set stays unknown.
-    fn fetch_remote_keys(
-        &self,
-        dir: &str,
-        remote: &RemotePack,
-    ) -> Result<(HashSet<String>, Vec<String>), UksftaError> {
+    /// One batch fetches the remote keys and, when the deep check runs, every
+    /// remote PBO that has a local match. Both reads need only the listing,
+    /// so they share one child.
+    fn fetch_keys_and_deep(&self, dir: &str, remote: &RemotePack) -> Result<Fetched, UksftaError> {
         let mut warnings = Vec::new();
         let mut names: Vec<&str> = remote.keys().map(|entry| basename(&entry.rel)).collect();
         names.sort_unstable();
@@ -114,14 +124,11 @@ impl Verifier<'_> {
             ));
             names.truncate(MAX_REMOTE_KEYS);
         }
-        if names.is_empty() {
-            return Ok((HashSet::new(), warnings));
-        }
 
         let out_dir = self.scratch.join("remote-keys");
         fs::create_dir_all(&out_dir).map_err(UksftaError::Io)?;
         let mut lines = Vec::new();
-        let mut targets = Vec::new();
+        let mut keys = Vec::new();
         for name in names {
             let rel = format!("keys/{name}");
             let target = out_dir.join(name);
@@ -130,15 +137,58 @@ impl Verifier<'_> {
                 quote(&join_remote(dir, &rel))?,
                 quote(&target.display().to_string())?
             ));
-            targets.push((name.to_string(), target));
+            keys.push((name.to_string(), target));
         }
-        if let Err(e) = self.client.batch(&lines) {
+
+        let deep_dir = self.scratch.join("deep");
+        let mut targets = Vec::new();
+        if self.deep {
+            fs::create_dir_all(&deep_dir).map_err(UksftaError::Io)?;
+            let remote_by_name: HashMap<String, &RemoteEntry> = remote
+                .files
+                .iter()
+                .map(|entry| (entry.rel.to_ascii_lowercase(), entry))
+                .collect();
+            for pbo in self.local.pbos() {
+                let key = pbo.rel.to_ascii_lowercase();
+                let Some(remote_file) = remote_by_name.get(&key) else {
+                    continue;
+                };
+                let target = deep_dir.join(format!("{}.pbo", key.replace('/', "_")));
+                lines.push(format!(
+                    "-get {} {}",
+                    quote(&join_remote(dir, &remote_file.rel))?,
+                    quote(&target.display().to_string())?
+                ));
+                targets.push((key, pbo.path.clone(), target));
+            }
+        }
+
+        if lines.is_empty() {
+            return Ok(Fetched {
+                authorities: HashSet::new(),
+                deep: HashMap::new(),
+                warnings,
+            });
+        }
+        if self.deep {
+            // The deep download must succeed, so its failure ends the phase.
+            // On that path the key warning is moot.
+            if let Err(e) = self.client.batch(&lines) {
+                warnings.push(format!("keys/: cannot download the remote keys: {e}"));
+                return Err(e);
+            }
+        } else if let Err(e) = self.client.batch(&lines) {
             warnings.push(format!("keys/: cannot download the remote keys: {e}"));
-            return Ok((HashSet::new(), warnings));
+            return Ok(Fetched {
+                authorities: HashSet::new(),
+                deep: HashMap::new(),
+                warnings,
+            });
         }
 
         let mut authorities = HashSet::new();
-        for (name, path) in targets {
+        for (name, path) in keys {
             match signature::read_key_file(&path) {
                 Ok(key) => {
                     authorities.insert(key.name);
@@ -146,17 +196,36 @@ impl Verifier<'_> {
                 Err(e) => warnings.push(format!("keys/{name}: {e}")),
             }
         }
-        Ok((authorities, warnings))
+
+        let mut deep = HashMap::new();
+        for (key, local, downloaded) in targets {
+            let same = match (file_sha256(&local), file_sha256(&downloaded)) {
+                (Some(a), Some(b)) => a == b,
+                _ => {
+                    eprintln!("Warning: {key}: cannot hash the downloaded PBO");
+                    false
+                }
+            };
+            let _ = fs::remove_file(&downloaded);
+            deep.insert(key, same);
+        }
+
+        Ok(Fetched {
+            authorities,
+            deep,
+            warnings,
+        })
     }
 
     /// List the pack root, then every directory below it in bounded batches.
     fn list(&self, dir: &str) -> Result<RemotePack, UksftaError> {
-        let lines = vec![
+        let mut lines = vec![
             format!("cd {}", quote(&self.settings.root)?),
             format!("-cd {}", quote(dir)?),
             "pwd".to_string(),
             "ls -l".to_string(),
         ];
+        lines.extend(self.meta_lines(dir)?);
         let blocks = parse::parse_blocks(&self.client.batch(&lines)?);
         let Some(root_block) = parse::find_block(&blocks, dir) else {
             return Ok(RemotePack::default());
@@ -256,17 +325,15 @@ impl Verifier<'_> {
         Ok(())
     }
 
-    /// One batch fetches `meta.cpp` and `mod.cpp`. `-get` keeps a missing
-    /// file from aborting the phase.
-    fn fetch_meta(&self, dir: &str, remote: &mut RemotePack) -> Result<(), UksftaError> {
-        if !remote.exists {
-            return Ok(());
-        }
+    /// One batch fetches `meta.cpp` and `mod.cpp` beside the root listing.
+    /// `-get` keeps a missing file from aborting the phase, so the fetch does
+    /// not wait for the listing to say whether the file is there.
+    fn meta_lines(&self, dir: &str) -> Result<Vec<String>, UksftaError> {
         let meta_path = self.scratch.join("remote-meta.cpp");
         let mod_path = self.scratch.join("remote-mod.cpp");
         let _ = fs::remove_file(&meta_path);
         let _ = fs::remove_file(&mod_path);
-        let lines = vec![
+        Ok(vec![
             format!(
                 "-get {} {}",
                 quote(&join_remote(dir, "meta.cpp"))?,
@@ -277,9 +344,13 @@ impl Verifier<'_> {
                 quote(&join_remote(dir, "mod.cpp"))?,
                 quote(&mod_path.display().to_string())?
             ),
-        ];
-        self.client.batch(&lines)?;
+        ])
+    }
 
+    /// Read the two identity files that the root listing fetched.
+    fn read_meta(&self, remote: &mut RemotePack) {
+        let meta_path = self.scratch.join("remote-meta.cpp");
+        let mod_path = self.scratch.join("remote-mod.cpp");
         if let Ok(text) = fs::read_to_string(&meta_path) {
             let meta = parse::parse_meta_cpp(&text);
             remote.meta_id = meta.publishedid;
@@ -288,57 +359,6 @@ impl Verifier<'_> {
             .ok()
             .filter(|meta| meta.is_file())
             .map(|meta| meta.len());
-        Ok(())
-    }
-
-    /// One batch downloads every remote PBO that has a local match, then
-    /// hashes both copies.
-    fn deep_hashes(
-        &self,
-        dir: &str,
-        remote: &RemotePack,
-    ) -> Result<HashMap<String, bool>, UksftaError> {
-        let remote_by_name: HashMap<String, &RemoteEntry> = remote
-            .files
-            .iter()
-            .map(|entry| (entry.rel.to_ascii_lowercase(), entry))
-            .collect();
-        let out_dir = self.scratch.join("deep");
-        fs::create_dir_all(&out_dir).map_err(UksftaError::Io)?;
-
-        let mut lines = Vec::new();
-        let mut targets = Vec::new();
-        for pbo in self.local.pbos() {
-            let key = pbo.rel.to_ascii_lowercase();
-            let Some(remote_file) = remote_by_name.get(&key) else {
-                continue;
-            };
-            let target = out_dir.join(format!("{}.pbo", key.replace('/', "_")));
-            lines.push(format!(
-                "-get {} {}",
-                quote(&join_remote(dir, &remote_file.rel))?,
-                quote(&target.display().to_string())?
-            ));
-            targets.push((key, pbo.path.clone(), target));
-        }
-        if lines.is_empty() {
-            return Ok(HashMap::new());
-        }
-        self.client.batch(&lines)?;
-
-        let mut results = HashMap::new();
-        for (key, local, downloaded) in targets {
-            let same = match (file_sha256(&local), file_sha256(&downloaded)) {
-                (Some(a), Some(b)) => a == b,
-                _ => {
-                    eprintln!("Warning: {key}: cannot hash the downloaded PBO");
-                    false
-                }
-            };
-            let _ = fs::remove_file(&downloaded);
-            results.insert(key, same);
-        }
-        Ok(results)
     }
 }
 

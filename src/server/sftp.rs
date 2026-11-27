@@ -6,7 +6,7 @@
 //! prompt appears at most once per phase.
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -144,6 +144,23 @@ impl Sftp {
     /// Returns `Input` when the client cannot start, cannot take the
     /// commands, or exits non-zero.
     pub fn batch(&self, lines: &[String]) -> Result<String, UksftaError> {
+        self.batch_tracked(lines, |_| {})
+    }
+
+    /// Send one phase of commands, passing each output line to `on_line` as
+    /// it arrives. The whole output is still returned for the caller.
+    ///
+    /// A long phase uses this to report progress while the client runs, so
+    /// one child can cover many files.
+    ///
+    /// # Errors
+    /// Returns `Input` when the client cannot start, cannot take the
+    /// commands, cannot be read, or exits non-zero.
+    pub fn batch_tracked(
+        &self,
+        lines: &[String],
+        mut on_line: impl FnMut(&str),
+    ) -> Result<String, UksftaError> {
         if lines.is_empty() {
             return Ok(String::new());
         }
@@ -152,13 +169,37 @@ impl Sftp {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = self.spawn(command)?;
         self.send(&mut child, lines)?;
-        let output = child.wait_with_output().map_err(|e| {
+
+        // Standard error is drained on its own thread. A chatty failure must
+        // not fill the pipe while the caller reads standard output.
+        let stderr = child.stderr.take();
+        let drain = std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(mut stderr) = stderr {
+                let _ = stderr.read_to_string(&mut text);
+            }
+            text
+        });
+
+        let mut stdout = String::new();
+        let reader = child.stdout.take().ok_or_else(|| {
+            UksftaError::Input(format!("cannot read the output of {}", self.binary))
+        })?;
+        for line in BufReader::new(reader).lines() {
+            let line = line.map_err(|e| {
+                UksftaError::Input(format!("cannot read the output of {}: {e}", self.binary))
+            })?;
+            on_line(&line);
+            stdout.push_str(&line);
+            stdout.push('\n');
+        }
+
+        let status = child.wait().map_err(|e| {
             UksftaError::Input(format!("cannot read the output of {}: {e}", self.binary))
         })?;
+        let stderr = drain.join().unwrap_or_default();
 
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if !status.success() {
             if let Some(text) =
                 hostkey::describe_failure(&stderr, &self.destination, &self.known_hosts)
             {

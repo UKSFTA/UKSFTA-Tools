@@ -8,6 +8,15 @@ use crate::util::extract_quoted;
 
 const PWD_PREFIX: &str = "Remote working directory:";
 
+/// A `pwd` after each `put` marks that file complete. `sftp -b` prints no
+/// transfer meter, so this is the only per-file signal the client gives.
+pub const MARKER_COMMAND: &str = "pwd";
+
+/// True for the output line that one marker writes.
+pub fn is_completion_marker(line: &str) -> bool {
+    line.trim_start().starts_with(PWD_PREFIX)
+}
+
 /// One `ls -l` line. The file name keeps its spaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
