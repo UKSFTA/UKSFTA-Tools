@@ -72,9 +72,9 @@ pub fn take_run_lock(state_root: &Path, pack_id: &str) -> Result<RunLock, Uksfta
         Ok(()) => Ok(RunLock { path }),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             if !lock_is_stale(&path) {
-                return Err(UksftaError::Input(
-                    "another upload is running for this pack".to_string(),
-                ));
+                return Err(UksftaError::Locked(format!(
+                    "another upload is running for this pack {pack_id}; no change was made"
+                )));
             }
             eprintln!(
                 "Warning: removing a stale upload lock at {}",

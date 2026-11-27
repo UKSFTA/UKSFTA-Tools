@@ -55,10 +55,18 @@ struct Setup {
 
 impl Setup {
     fn new(tag: &str) -> Self {
-        Self::at(tag, "127.0.0.1", 2222)
+        Self::with_size(tag, SIZE)
+    }
+
+    fn with_size(tag: &str, size: u64) -> Self {
+        Self::at_size(tag, "127.0.0.1", 2222, size)
     }
 
     fn at(tag: &str, host: &str, port: u16) -> Self {
+        Self::at_size(tag, host, port, SIZE)
+    }
+
+    fn at_size(tag: &str, host: &str, port: u16, size: u64) -> Self {
         let repo = tempfile::TempDir::new().expect("a repository");
         let release = repo.path().join(".hemttout/release");
         let addons = release.join("addons");
@@ -70,7 +78,7 @@ impl Setup {
         .expect("meta.cpp");
 
         let pbo = addons.join(format!("live_{tag}.pbo"));
-        write_pattern(&pbo, SIZE);
+        write_pattern(&pbo, size);
 
         let known_hosts = repo.path().join("known_hosts");
         std::fs::write(&known_hosts, format!("[{host}]:{port} {}\n", host_key()))
@@ -658,4 +666,139 @@ fn three_shaped_kills_then_a_clean_resume() {
         !text.contains(".uksfta-part-") && !text.contains(".uksfta-old-"),
         "no temp residue must remain: {text}"
     );
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_first_segmented_upload_creates_the_pack_folder() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::new("first");
+    let pack_root = format!("{ROOT}/@{PACK_ID}");
+    let removed = fixture(&["rm", "-rf", &pack_root]);
+    assert!(removed.status.success(), "cannot remove the pack folder");
+    assert!(!remote_exists(&pack_root), "the pack folder must be absent");
+
+    let output = setup.run(&["--segment-reconnects", "1"]);
+    let errors = stderr(&output);
+    assert!(output.status.success(), "the first upload failed: {errors}");
+    assert!(
+        !errors.contains("Warning: segment"),
+        "the native path must not fall back: {errors}"
+    );
+    assert!(remote_exists(&pack_root), "the pack folder is created");
+    assert!(
+        remote_exists(&format!("{pack_root}/addons")),
+        "addons is created"
+    );
+    assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn json_reports_the_published_segmented_file() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::with_size("json", 8 * 1024 * 1024);
+    prepare_remote(&setup);
+
+    let output = setup.run(&["--json", "--segment-reconnects", "1"]);
+    assert!(
+        output.status.success(),
+        "the upload failed: {}",
+        stderr(&output)
+    );
+    let text = String::from_utf8(output.stdout).expect("utf-8 output");
+    let value: serde_json::Value = serde_json::from_str(text.trim()).expect("valid JSON");
+
+    let uploads = value["uploads"].as_array().expect("an upload list");
+    assert_eq!(uploads.len(), 1, "one published upload: {value}");
+    assert_eq!(uploads[0]["mode"], "segmented");
+    assert_eq!(uploads[0]["connections"], 4);
+    let hash = local_sha256(&setup.pbo);
+    assert_eq!(
+        uploads[0]["sha256"], hash,
+        "the reported hash is the local hash"
+    );
+    assert!(remote_exists(&setup.remote_pbo), "the file is published");
+    assert_eq!(remote_sha256(&setup.remote_pbo), hash);
+}
+
+fn temp_count(dir: &str) -> usize {
+    let out = fixture(&["sh", "-c", &format!("ls -1 {dir}")]);
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| line.contains(".uksfta-part"))
+        .count()
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_second_run_is_refused_while_the_lock_is_held() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::with_size("lock", 64 * 1024 * 1024);
+    prepare_remote(&setup);
+
+    let lock = setup
+        .repo
+        .path()
+        .join(".uksfta/upload")
+        .join(PACK_ID)
+        .join("run.lock");
+    let mut first = setup.spawn(&["--segment-reconnects", "1"]);
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while !lock.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the first run did not take the lock"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let second = setup.run(&["--segment-reconnects", "1"]);
+    let second_errors = stderr(&second);
+
+    let mut most_temps = 0usize;
+    let first_status = loop {
+        if let Some(status) = first.try_wait().expect("try_wait") {
+            break status;
+        }
+        most_temps = most_temps.max(temp_count(&setup.remote_dir));
+        assert!(Instant::now() < deadline, "the first run did not finish");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+
+    assert_eq!(first_status.code(), Some(0), "the holder finishes");
+    assert_eq!(
+        second.status.code(),
+        Some(2),
+        "the second run is refused: {second_errors}"
+    );
+    assert!(
+        second_errors.contains("another upload is running"),
+        "the message says why: {second_errors}"
+    );
+    assert!(
+        second_errors.contains(PACK_ID),
+        "the message names the pack: {second_errors}"
+    );
+    let second_out = String::from_utf8_lossy(&second.stdout);
+    assert!(
+        !second_out.contains("attempt 1:"),
+        "the refused run sends nothing: {second_out}"
+    );
+    assert!(
+        most_temps <= 1,
+        "at most one temp during the run: {most_temps}"
+    );
+    assert_eq!(temp_count(&setup.remote_dir), 0, "no temp after the run");
+    assert!(!lock.exists(), "the lock is released");
+    assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
 }

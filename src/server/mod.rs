@@ -697,6 +697,19 @@ fn upload_with_retries(
 ) -> Result<Plan, UksftaError> {
     let mut skip: HashSet<String> = HashSet::new();
     if let Some(choice) = segment {
+        // The native writer opens the temp file inside the pack folder, so
+        // the directories must exist first. The batch below repeats the
+        // mkdir lines, which a batch client tolerates.
+        match upload_dirs(&plan) {
+            Ok(dirs) if !dirs.is_empty() => {
+                if let Err(error) = verifier.client.batch(&dirs) {
+                    eprintln!("Warning: cannot create the remote directories: {error}");
+                }
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("Warning: {error}"),
+        }
+
         let name = remote_name(&choice.unit.remote);
         let started = Instant::now();
         match native::run(
@@ -723,6 +736,9 @@ fn upload_with_retries(
                     sha256: hash,
                 });
                 skip.insert(choice.unit.remote.clone());
+            }
+            Err(UksftaError::Locked(message)) => {
+                return Err(UksftaError::Locked(message));
             }
             Err(UksftaError::Auth(message)) if password_prompt => {
                 return Err(UksftaError::Auth(message));

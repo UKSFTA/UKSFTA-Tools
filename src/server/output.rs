@@ -168,33 +168,44 @@ impl JsonReport {
         let uploads = settings
             .filter(|settings| settings.segment.enabled)
             .map(|_| {
-                plan.map_or_else(Vec::new, |plan| {
-                    upload_units(plan)
-                        .into_iter()
-                        .map(|unit| {
-                            let selected = segment_choice
-                                .filter(|(remote, _)| *remote == unit.remote.as_str());
-                            let published = segment_result
-                                .filter(|(remote, _)| *remote == unit.remote.as_str());
-                            UploadJson {
-                                name: unit
-                                    .remote
-                                    .rsplit('/')
-                                    .next()
-                                    .unwrap_or(&unit.remote)
-                                    .to_string(),
-                                mode: if selected.is_some() {
-                                    "segmented"
-                                } else {
-                                    "whole"
-                                }
-                                .to_string(),
-                                connections: selected.map(|(_, connections)| connections),
-                                sha256: published.map(|(_, hash)| (*hash).to_string()),
+                let mut entries = Vec::new();
+                let mut planned: Vec<String> = Vec::new();
+                if let Some(plan) = plan {
+                    for unit in upload_units(plan) {
+                        let selected =
+                            segment_choice.filter(|(remote, _)| *remote == unit.remote.as_str());
+                        let published =
+                            segment_result.filter(|(remote, _)| *remote == unit.remote.as_str());
+                        entries.push(UploadJson {
+                            name: basename(&unit.remote),
+                            mode: if selected.is_some() {
+                                "segmented"
+                            } else {
+                                "whole"
                             }
-                        })
-                        .collect()
-                })
+                            .to_string(),
+                            connections: selected.map(|(_, connections)| connections),
+                            sha256: published.map(|(_, hash)| (*hash).to_string()),
+                        });
+                        planned.push(unit.remote.clone());
+                    }
+                }
+                // A published segmented file leaves the plan once its hash
+                // matches, so the result supplies the entry the plan no
+                // longer holds.
+                if let Some((remote, hash)) = segment_result {
+                    if !planned.iter().any(|path| path == remote) {
+                        entries.push(UploadJson {
+                            name: basename(remote),
+                            mode: "segmented".to_string(),
+                            connections: segment_choice
+                                .filter(|(chosen, _)| *chosen == remote)
+                                .map(|(_, connections)| connections),
+                            sha256: Some(hash.to_string()),
+                        });
+                    }
+                }
+                entries
             });
         let status = plan.map(|plan| plan.status().as_str().to_string());
         let result_name = match result {
@@ -216,6 +227,10 @@ impl JsonReport {
             error: result.as_ref().err().map(ToString::to_string),
         }
     }
+}
+
+fn basename(remote: &str) -> String {
+    remote.rsplit('/').next().unwrap_or(remote).to_string()
 }
 
 fn finding_json(finding: &Finding) -> FindingJson {
