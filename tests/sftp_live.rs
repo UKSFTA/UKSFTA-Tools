@@ -777,6 +777,20 @@ fn json_reports_the_published_segmented_file() {
     let setup = Setup::with_size("json", 8 * 1024 * 1024);
     prepare_remote(&setup);
 
+    // A missing remote meta.cpp is repaired as a second upload unit. Seed a
+    // matching copy so this case reports the segmented PBO alone.
+    let local_meta = setup.repo.path().join("meta.cpp");
+    let meta = std::fs::read(&local_meta).expect("the local meta.cpp");
+    let seed = format!("cat > {ROOT}/@{PACK_ID}/meta.cpp");
+    let seeded = fixture_input(&["sh", "-c", &seed], &meta);
+    assert!(seeded.status.success(), "cannot seed the remote meta.cpp");
+    let remote_meta = format!("{ROOT}/@{PACK_ID}/meta.cpp");
+    assert_eq!(
+        remote_sha256(&remote_meta),
+        local_sha256(&local_meta),
+        "the seeded meta.cpp must match the local copy"
+    );
+
     let output = setup.run(&["--json", "--segment-reconnects", "1"]);
     assert!(
         output.status.success(),
@@ -788,6 +802,7 @@ fn json_reports_the_published_segmented_file() {
 
     let uploads = value["uploads"].as_array().expect("an upload list");
     assert_eq!(uploads.len(), 1, "one published upload: {value}");
+    assert_eq!(uploads[0]["name"], "live_json.pbo", "only the PBO: {value}");
     assert_eq!(uploads[0]["mode"], "segmented");
     assert_eq!(uploads[0]["connections"], 4);
     let hash = local_sha256(&setup.pbo);

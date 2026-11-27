@@ -864,13 +864,19 @@ fn wait_for_ack(state: &Path, pack_id: &str, remote: &str) -> super::checkpoint:
     }
 }
 
+/// The compose file that holds the fixture the kill targets.
+fn compose_file() -> String {
+    std::env::var("UKSFTA_SFTP_COMPOSE")
+        .unwrap_or_else(|_| "tools/sftp-test-server/docker-compose.yml".to_string())
+}
+
 /// Kill every server-side sftp subsystem process.
 fn kill_sessions() {
     let status = std::process::Command::new("docker")
         .args([
             "compose",
             "-f",
-            "tools/sftp-test-server/docker-compose.yml",
+            &compose_file(),
             "exec",
             "-T",
             "sftp",
@@ -926,7 +932,14 @@ fn a_killed_session_reconnects_and_publishes() {
         return;
     }
     let _serial = live_lock();
-    let fixture = resume_fixture("reconnect", 2);
+    let mut fixture = resume_fixture("reconnect", 2);
+    // The kill travels through `docker compose exec`, which can take a second,
+    // and the checkpoint lags the acknowledged prefix by up to a second. Pace
+    // the upload so the kill lands while ranges are still in flight. An
+    // unpaced 96 MiB transfer finishes first, and the kill then lands on the
+    // fresh completion connection, which fails for a reason this test does not
+    // intend to exercise.
+    fixture.settings.transfer.limit = Some(RESUME_SIZE / 6);
     {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         runtime.block_on(async {
@@ -946,6 +959,16 @@ fn a_killed_session_reconnects_and_publishes() {
         "pack-r",
         &fixture.unit.remote,
         4 * 1024 * 1024,
+    );
+    let before_kill = super::checkpoint::load(&super::checkpoint::path_for(
+        fixture.state.path(),
+        "pack-r",
+        &fixture.unit.remote,
+    ))
+    .expect("the checkpoint before the kill");
+    assert!(
+        before_kill.acked_prefix < RESUME_SIZE,
+        "the kill must land while ranges are still in flight"
     );
     kill_sessions();
     let result = handle.join().expect("the run thread");
