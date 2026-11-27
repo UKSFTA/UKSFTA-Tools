@@ -16,8 +16,19 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 - `--segmented` sends one large upload over several connections, verifies
   the temporary file by SHA-256 and publishes it with an atomic rename.
-  It is off by default, needs key or agent authentication, and does not
-  resume yet.
+  It is off by default and needs key or agent authentication.
+
+- A segmented upload resumes from a checkpoint of the acknowledged
+  ranges. The checkpoint holds the local size, modification time and
+  SHA-256. The remote prefix is hashed and compared before it is
+  continued, and the remote size is never trusted. `--segment-resume
+  auto|off` selects the behaviour.
+
+- `--segment-reconnects` replaces a dead segmented connection and resends
+  only its in-flight range, with waits of 1 s, 2 s, 4 s and 8 s.
+
+- Stale segmented temporary files more than a day old, and temporary
+  files with no checkpoint, are removed with a warning.
 
 - Opt-in launch-line and `server.cfg` checks. `--launch-line` reads a
   local copy and finds `@<id>` in `-mod` or `-serverMod`. `--server-cfg`
@@ -44,8 +55,7 @@ This project uses [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - The minimum supported Rust version is 1.89, for the native transport
-  dependencies. The native transport is present but not active yet;
-  `--segmented` exits 2 until the segmented upload lands.
+  dependencies.
 
 ### Security
 

@@ -1,12 +1,13 @@
 //! The native SSH/SFTP transport and segmented upload.
 //!
-//! The segmented writer, atomic publish and progress live here. Resume and
-//! checkpoints arrive in Wave 3.
+//! The segmented writer, atomic publish, checkpoints and resume live here.
 
+pub mod checkpoint;
 pub mod connect;
 pub mod known_hosts;
 pub mod progress;
 pub mod publish;
+pub mod schedule;
 pub mod segment;
 pub mod verify;
 pub mod writer;
@@ -14,24 +15,36 @@ pub mod writer;
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use openssh_sftp_client::file::File;
 use openssh_sftp_client::Sftp;
 use tokio::task::JoinSet;
 
+use self::checkpoint::{Checkpoint, LocalIdentity, Start};
+use self::connect::NativeSession;
 use self::progress::SegmentedProgress;
-use self::segment::SegmentPlan;
+use self::schedule::Scheduler;
+use self::segment::{Chunk, SegmentPlan};
 use crate::error::UksftaError;
 use crate::server::config::Settings;
 use crate::server::report::UploadUnit;
+
+/// The longest wait between a failed range and its retry.
+const MAX_BACKOFF: Duration = Duration::from_secs(8);
+/// How often the acknowledged prefix reaches the checkpoint file.
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Upload one file over several connections, verify it and publish it.
 /// Returns the verified SHA-256 of the file.
 ///
 /// # Errors
 /// Returns `Input` when the plan, a write, the length check, the read-back
-/// hash or the publish fails. The temp file is removed on every failure.
+/// hash or the publish fails. A failed run keeps the temp file and the
+/// checkpoint, so the next run can resume.
 pub fn run(
     settings: &Settings,
     state_root: &Path,
@@ -62,81 +75,189 @@ async fn transfer(
         settings.segment.chunk,
     )?;
     let run_id = writer::run_id();
-    let temp = writer::plan_temp_name(&unit.remote);
-    writer::assert_not_loadable(&temp)?;
     let aside_probe = writer::plan_aside_name(&unit.remote, &run_id);
     writer::assert_not_loadable(&aside_probe)?;
 
     let _lock = writer::take_run_lock(state_root, pack_id)?;
     let coordinator = connect::connect(settings).await?;
     let client = coordinator.sftp;
-
-    let result = transfer_inner(
-        settings,
-        &client,
-        unit,
-        &plan,
-        &temp,
-        &run_id,
-        show_progress,
-    )
-    .await;
-    if result.is_err() {
-        let mut fs = client.fs();
-        let _ = fs.remove_file(&temp).await;
-    }
-    result
-}
-
-async fn transfer_inner(
-    settings: &Settings,
-    client: &Sftp,
-    unit: &UploadUnit,
-    plan: &SegmentPlan,
-    temp: &str,
-    run_id: &str,
-    show_progress: bool,
-) -> Result<String, UksftaError> {
-    writer::create_temp(client, temp).await?;
-    let queue = writer::queue(&plan.chunks);
-    let progress = SegmentedProgress::new(
-        unit.size,
-        usize::from(settings.segment.connections),
-        show_progress,
-    );
     let buffer = settings.transfer.buffer;
 
+    let (start, temp) =
+        checkpoint::decide(&client, state_root, pack_id, unit, settings, buffer).await?;
+    writer::assert_not_loadable(&temp)?;
+
+    let directory = remote_dir(&unit.remote);
+    writer::clean_orphans(&client, directory, Some(&temp)).await?;
+    writer::check_space(&client, directory, unit.size.saturating_mul(2)).await?;
+
+    let identity = LocalIdentity::read(&unit.local)?;
+    let from = match start {
+        Start::Fresh => 0,
+        Start::Resume { from } => from,
+    };
+    let job = Job {
+        settings,
+        client: &client,
+        unit,
+        plan: &plan,
+        temp: &temp,
+        run_id: &run_id,
+        from,
+        buffer,
+        show_progress,
+        state_root,
+        pack_id,
+        identity: &identity,
+    };
+    finish_job(&job).await
+}
+
+/// Everything one segmented transfer needs.
+struct Job<'a> {
+    settings: &'a Settings,
+    client: &'a Sftp,
+    unit: &'a UploadUnit,
+    plan: &'a SegmentPlan,
+    temp: &'a str,
+    run_id: &'a str,
+    from: u64,
+    buffer: u32,
+    show_progress: bool,
+    state_root: &'a Path,
+    pack_id: &'a str,
+    identity: &'a LocalIdentity,
+}
+
+async fn finish_job(job: &Job<'_>) -> Result<String, UksftaError> {
+    let size = job.unit.size;
+    if job.from < size {
+        send_ranges(job).await?;
+    }
+
+    // The transfer may have replaced every worker connection, so the
+    // completion steps use a fresh one.
+    let coordinator = connect::connect(job.settings).await?;
+    let client = &coordinator.sftp;
+
+    writer::finish(client, job.temp, size).await?;
+
+    let hash = verify::hash_remote(client, job.temp, size, job.buffer).await?;
+    if hash != job.identity.sha256 {
+        return Err(UksftaError::Input(
+            "the server received different bytes; nothing was published".to_string(),
+        ));
+    }
+
+    let mtime = std::fs::metadata(&job.unit.local)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_secs());
+    publish::publish(client, job.temp, &job.unit.remote, job.run_id, mtime).await?;
+    let _ = std::fs::remove_file(checkpoint::path_for(
+        job.state_root,
+        job.pack_id,
+        &job.unit.remote,
+    ));
+    Ok(hash)
+}
+
+/// The acknowledged ranges of one run, and the file that records them.
+struct Acks {
+    checkpoint: Checkpoint,
+    path: std::path::PathBuf,
+    done: BTreeSet<u32>,
+    last_saved: Instant,
+}
+
+impl Acks {
+    /// Record one acknowledged range. The first ack is saved at once, so an
+    /// early interruption still leaves a usable checkpoint; after that the
+    /// file is written at most once a second.
+    fn ack(&mut self, index: u32, size: u64) {
+        self.done.insert(index);
+        checkpoint::recompute_prefix(&mut self.checkpoint, &self.done, size);
+        if self.done.len() > 1 && self.last_saved.elapsed() < CHECKPOINT_INTERVAL {
+            return;
+        }
+        self.last_saved = Instant::now();
+        if let Err(error) = checkpoint::save(&self.path, &self.checkpoint) {
+            eprintln!("Warning: cannot save the checkpoint: {error}");
+        }
+    }
+
+    fn save_now(&mut self) {
+        self.last_saved = Instant::now();
+        if let Err(error) = checkpoint::save(&self.path, &self.checkpoint) {
+            eprintln!("Warning: cannot save the checkpoint: {error}");
+        }
+    }
+}
+
+/// Send every range at or above `job.from` on the configured connections.
+async fn send_ranges(job: &Job<'_>) -> Result<(), UksftaError> {
+    if job.from == 0 {
+        writer::create_temp(job.client, job.temp).await?;
+    } else {
+        writer::open_range_writer(job.client, job.temp)
+            .await
+            .map(drop)?;
+    }
+
+    let pending: Vec<Chunk> = job
+        .plan
+        .chunks
+        .iter()
+        .copied()
+        .filter(|chunk| chunk.start >= job.from)
+        .collect();
+    let acks = Arc::new(Mutex::new(Acks {
+        checkpoint: checkpoint::fresh(&job.unit.remote, job.temp, job.plan.chunk, job.identity),
+        path: checkpoint::path_for(job.state_root, job.pack_id, &job.unit.remote),
+        done: BTreeSet::from_iter(
+            job.plan
+                .chunks
+                .iter()
+                .filter(|chunk| chunk.start + u64::from(chunk.len) <= job.from)
+                .map(|chunk| chunk.index),
+        ),
+        last_saved: Instant::now(),
+    }));
+    {
+        let mut guard = acks
+            .lock()
+            .map_err(|_| UksftaError::Input("the checkpoint lock is poisoned".to_string()))?;
+        guard.checkpoint.acked_prefix = job.from;
+        guard.save_now();
+    }
+
+    let scheduler = Arc::new(Mutex::new(Scheduler::new(&pending)));
+    let progress = SegmentedProgress::new(
+        job.unit.size,
+        usize::from(job.settings.segment.connections),
+        job.show_progress,
+    );
+
     let mut tasks = JoinSet::new();
-    for worker in 0..usize::from(settings.segment.connections.max(1)) {
-        let settings = settings.clone();
-        let queue = Arc::clone(&queue);
+    for worker in 0..usize::from(job.settings.segment.connections.max(1)) {
+        let settings = job.settings.clone();
+        let scheduler = Arc::clone(&scheduler);
+        let acks = Arc::clone(&acks);
         let progress = Arc::clone(&progress);
-        let temp = temp.to_string();
-        let local = unit.local.clone();
+        let temp = job.temp.to_string();
+        let local = job.unit.local.clone();
+        let buffer = job.buffer;
+        let size = job.unit.size;
         tasks.spawn(async move {
-            let session = connect::connect(&settings).await?;
-            let mut file = writer::open_range_writer(&session.sftp, &temp).await?;
-            loop {
-                let next = {
-                    let mut guard = queue.lock().map_err(|_| {
-                        UksftaError::Input("the range queue is poisoned".to_string())
-                    })?;
-                    guard.pop_front()
-                };
-                let Some(chunk) = next else {
-                    break;
-                };
-                let mut advance = |bytes: u64| progress.advance(worker, bytes);
-                writer::write_range(&mut file, &chunk, &local, buffer, &mut advance).await?;
-            }
-            file.close()
-                .await
-                .map_err(|error| UksftaError::Input(format!("sftp: {error}")))?;
-            Ok::<(), UksftaError>(())
+            run_worker(
+                &settings, &local, &temp, buffer, size, worker, &scheduler, &acks, &progress,
+            )
+            .await
         });
     }
 
-    let mut failure = None;
+    let mut failure: Option<UksftaError> = None;
     while let Some(joined) = tasks.join_next().await {
         match joined {
             Ok(Ok(())) => {}
@@ -154,32 +275,244 @@ async fn transfer_inner(
             }
         }
     }
-    if let Some(error) = failure {
-        progress.finish();
-        return Err(error);
-    }
     progress.finish();
 
-    writer::finish(client, temp, unit.size).await?;
-
-    let hash = verify::hash_remote(client, temp, unit.size, buffer).await?;
-    let local = crate::util::file_sha256(&unit.local).ok_or_else(|| {
-        UksftaError::Input(format!(
-            "cannot hash the local file {}",
-            unit.local.display()
-        ))
-    })?;
-    if hash != local {
-        return Err(UksftaError::Input(
-            "the server received different bytes; nothing was published".to_string(),
-        ));
+    if let Some(error) = failure {
+        return Err(error);
     }
 
-    let mtime = std::fs::metadata(&unit.local)
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|elapsed| elapsed.as_secs());
-    publish::publish(client, temp, &unit.remote, run_id, mtime).await?;
-    Ok(hash)
+    let (finished, remaining, dead, done) = scheduler
+        .lock()
+        .map_err(|_| UksftaError::Input("the range queue is poisoned".to_string()))
+        .map(|guard| {
+            (
+                guard.is_finished(),
+                guard.remaining(),
+                guard.dead_workers(),
+                guard.done().clone(),
+            )
+        })?;
+    if !finished {
+        return Err(UksftaError::Input(format!(
+            "no connection could finish the upload: {remaining} range(s) left, {dead} connection(s) gave up"
+        )));
+    }
+
+    let mut guard = acks
+        .lock()
+        .map_err(|_| UksftaError::Input("the checkpoint lock is poisoned".to_string()))?;
+    checkpoint::recompute_prefix(&mut guard.checkpoint, &done, job.unit.size);
+    guard.save_now();
+    Ok(())
+}
+
+/// One worker: its own connection and handle, its own ranges, its own
+/// reconnects.
+#[allow(clippy::too_many_arguments)]
+async fn run_worker(
+    settings: &Settings,
+    local: &Path,
+    temp: &str,
+    buffer: u32,
+    size: u64,
+    worker: usize,
+    scheduler: &Arc<Mutex<Scheduler>>,
+    acks: &Arc<Mutex<Acks>>,
+    progress: &Arc<SegmentedProgress>,
+) -> Result<(), UksftaError> {
+    let reconnects = settings.segment.reconnects;
+    let mut attempts: u8 = 0;
+    let mut session: Option<(NativeSession, File)> = None;
+
+    loop {
+        if session.is_none() {
+            match open_session(settings, temp).await {
+                Ok(pair) => session = Some(pair),
+                Err(error) if is_fatal(&error) => return Err(error),
+                Err(_) => {
+                    attempts += 1;
+                    if attempts > reconnects {
+                        mark_dead(scheduler)?;
+                        return Ok(());
+                    }
+                    tokio::time::sleep(backoff(attempts)).await;
+                    continue;
+                }
+            }
+        }
+
+        let next = take(scheduler)?;
+        let Some(chunk) = next else {
+            break;
+        };
+
+        let (current, file) = session
+            .as_mut()
+            .ok_or_else(|| UksftaError::Input("a segmented worker lost its handle".to_string()))?;
+        let mut advance = |bytes: u64| progress.advance(worker, bytes);
+        let written = writer::write_range(file, &chunk, local, buffer, &mut advance).await;
+        let synced = match written {
+            Ok(()) if current.sftp.support_fsync() => file
+                .sync_all()
+                .await
+                .map_err(|error| UksftaError::Input(format!("sftp: {error}"))),
+            Ok(()) => Ok(()),
+            Err(error) => Err(error),
+        };
+
+        match synced {
+            Ok(()) => {
+                complete(scheduler, chunk.index)?;
+                let mut guard = acks.lock().map_err(|_| {
+                    UksftaError::Input("the checkpoint lock is poisoned".to_string())
+                })?;
+                guard.ack(chunk.index, size);
+            }
+            Err(error) if is_fatal(&error) => {
+                fail(scheduler, chunk.index)?;
+                return Err(error);
+            }
+            Err(_) => {
+                fail(scheduler, chunk.index)?;
+                session = None;
+                attempts += 1;
+                if attempts > reconnects {
+                    mark_dead(scheduler)?;
+                    return Ok(());
+                }
+                tokio::time::sleep(backoff(attempts)).await;
+            }
+        }
+    }
+
+    if let Some((_, file)) = session {
+        let _ = file.close().await;
+    }
+    Ok(())
+}
+
+async fn open_session(
+    settings: &Settings,
+    temp: &str,
+) -> Result<(NativeSession, File), UksftaError> {
+    let session = connect::connect(settings).await?;
+    let file = writer::open_range_writer(&session.sftp, temp).await?;
+    Ok((session, file))
+}
+
+fn take(scheduler: &Arc<Mutex<Scheduler>>) -> Result<Option<Chunk>, UksftaError> {
+    scheduler
+        .lock()
+        .map_err(|_| UksftaError::Input("the range queue is poisoned".to_string()))
+        .map(|mut guard| guard.take())
+}
+
+fn complete(scheduler: &Arc<Mutex<Scheduler>>, index: u32) -> Result<(), UksftaError> {
+    scheduler
+        .lock()
+        .map_err(|_| UksftaError::Input("the range queue is poisoned".to_string()))
+        .map(|mut guard| guard.complete(index))
+}
+
+fn fail(scheduler: &Arc<Mutex<Scheduler>>, index: u32) -> Result<(), UksftaError> {
+    scheduler
+        .lock()
+        .map_err(|_| UksftaError::Input("the range queue is poisoned".to_string()))
+        .map(|mut guard| guard.fail(index))
+}
+
+fn mark_dead(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), UksftaError> {
+    scheduler
+        .lock()
+        .map_err(|_| UksftaError::Input("the range queue is poisoned".to_string()))
+        .map(|mut guard| guard.mark_worker_dead())
+}
+
+/// The wait before retry `attempt` (1 based): 1 s, 2 s, 4 s, then 8 s.
+fn backoff(attempt: u8) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(3);
+    Duration::from_secs(1u64 << exponent).min(MAX_BACKOFF)
+}
+
+/// A failure a retry cannot fix: the local file, the key, or the host.
+pub fn is_fatal(error: &UksftaError) -> bool {
+    match error {
+        UksftaError::Io(_) => false,
+        UksftaError::Parse(_) | UksftaError::Check(_) => true,
+        UksftaError::Input(message) => {
+            const FATAL: [&str; 9] = [
+                "cannot read ",
+                "cannot seek ",
+                "the local file ended early",
+                "the server accepted no bytes",
+                "refusing a temporary name",
+                "known_hosts",
+                "host key",
+                "authentication",
+                "ssh-agent",
+            ];
+            FATAL.iter().any(|marker| message.contains(marker))
+        }
+    }
+}
+
+/// The directory part of a remote path.
+pub fn remote_dir(remote: &str) -> &str {
+    match remote.rfind('/') {
+        Some(index) if index > 0 => &remote[..index],
+        Some(_) => "/",
+        None => ".",
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[test]
+    fn the_backoff_doubles_and_stops_at_the_cap() {
+        assert_eq!(backoff(1), Duration::from_secs(1));
+        assert_eq!(backoff(2), Duration::from_secs(2));
+        assert_eq!(backoff(3), Duration::from_secs(4));
+        assert_eq!(backoff(4), Duration::from_secs(8));
+        assert_eq!(backoff(9), MAX_BACKOFF);
+    }
+
+    #[test]
+    fn local_and_identity_failures_are_fatal() {
+        for message in [
+            "cannot read /local/big.pbo: no such file",
+            "cannot seek /local/big.pbo",
+            "the local file ended early: /local/big.pbo",
+            "the server accepted no bytes",
+            "refusing a temporary name that Arma would load: a.pbo",
+            "the host key is not in known_hosts",
+            "the host key changed",
+            "authentication failed",
+            "no key file or ssh-agent identity",
+        ] {
+            assert!(
+                is_fatal(&UksftaError::Input(message.to_string())),
+                "{message}"
+            );
+        }
+        for message in [
+            "sftp: Sftp server reported error kind NoSuchFile",
+            "cannot connect to host: connection reset",
+            "a segmented worker lost its handle",
+        ] {
+            assert!(
+                !is_fatal(&UksftaError::Input(message.to_string())),
+                "{message}"
+            );
+        }
+        assert!(!is_fatal(&UksftaError::Io(std::io::Error::other("pipe"))));
+    }
+
+    #[test]
+    fn the_remote_directory_is_the_parent() {
+        assert_eq!(remote_dir("/srv/a/b.pbo"), "/srv/a");
+        assert_eq!(remote_dir("/b.pbo"), "/");
+        assert_eq!(remote_dir("b.pbo"), ".");
+    }
 }

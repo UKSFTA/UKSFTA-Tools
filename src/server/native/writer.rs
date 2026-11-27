@@ -1,10 +1,8 @@
 //! The temp file, its write-only handles, range writes and the run lock.
 
-use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openssh_sftp_client::file::File;
@@ -73,12 +71,7 @@ pub fn take_run_lock(state_root: &Path, pack_id: &str) -> Result<RunLock, Uksfta
     match create_lock(&path) {
         Ok(()) => Ok(RunLock { path }),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let stale = fs::metadata(&path)
-                .and_then(|meta| meta.modified())
-                .ok()
-                .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-                .is_some_and(|age| age > Duration::from_secs(6 * 60 * 60));
-            if !stale {
+            if !lock_is_stale(&path) {
                 return Err(UksftaError::Input(
                     "another upload is running for this pack".to_string(),
                 ));
@@ -93,6 +86,44 @@ pub fn take_run_lock(state_root: &Path, pack_id: &str) -> Result<RunLock, Uksfta
         }
         Err(error) => Err(UksftaError::Io(error)),
     }
+}
+
+/// A lock is stale when its owner is gone or it is older than six hours.
+fn lock_is_stale(path: &Path) -> bool {
+    if let Some(pid) = lock_pid(path) {
+        if pid != i64::from(std::process::id()) && !process_alive(pid) {
+            return true;
+        }
+    }
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| age > Duration::from_secs(6 * 60 * 60))
+}
+
+/// The process id the lock file records, when it is readable.
+fn lock_pid(path: &Path) -> Option<i64> {
+    let text = fs::read_to_string(path).ok()?;
+    text.split_whitespace().next()?.parse().ok()
+}
+
+#[cfg(unix)]
+fn process_alive(pid: i64) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 checks for existence and sends nothing.
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: i64) -> bool {
+    true
 }
 
 fn create_lock(path: &Path) -> std::io::Result<()> {
@@ -228,13 +259,109 @@ pub async fn finish(sftp: &Sftp, path: &str, size: u64) -> Result<(), UksftaErro
     Ok(())
 }
 
-/// A shared queue of ranges for the workers.
-pub fn queue(chunks: &[Chunk]) -> Arc<Mutex<VecDeque<Chunk>>> {
-    Arc::new(Mutex::new(chunks.iter().copied().collect()))
-}
-
 fn sftp_error(error: openssh_sftp_client::Error) -> UksftaError {
     UksftaError::Input(format!("sftp: {error}"))
+}
+
+/// The largest number of orphan temps one run removes.
+pub const MAX_ORPHANS: usize = 8;
+/// The age after which an orphan temp is removed.
+pub const ORPHAN_AGE_SECS: u64 = 24 * 60 * 60;
+
+/// Remove stale temp and aside files from the pack directory. Only regular
+/// files that carry a temp marker and are at least a day old are removed.
+///
+/// # Errors
+/// Returns `Input` when the directory cannot be opened.
+pub async fn clean_orphans(
+    sftp: &Sftp,
+    dir: &str,
+    keep: Option<&str>,
+) -> Result<Vec<String>, UksftaError> {
+    use tokio_stream::StreamExt;
+
+    let mut fs = sftp.fs();
+    let listing = match fs.open_dir(dir).await {
+        Ok(listing) => listing,
+        Err(error) => {
+            eprintln!("Warning: cannot list {dir} for orphan temps: {error}");
+            return Ok(Vec::new());
+        }
+    };
+    let entries = listing.read_dir();
+    let mut entries = std::pin::pin!(entries);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let mut removed = Vec::new();
+    while removed.len() < MAX_ORPHANS {
+        let Some(entry) = entries.next().await else {
+            break;
+        };
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let name = entry.filename().to_string_lossy().into_owned();
+        if !is_temp_name(&name) || keep == Some(name.as_str()) {
+            continue;
+        }
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let metadata = entry.metadata();
+        let Some(modified) = metadata
+            .modified()
+            .map(openssh_sftp_client::UnixTimeStamp::into_raw)
+        else {
+            continue;
+        };
+        if now.saturating_sub(u64::from(modified)) < ORPHAN_AGE_SECS {
+            continue;
+        }
+        let path = join_name(dir, &name);
+        if fs.remove_file(&path).await.is_ok() {
+            eprintln!("Warning: removed the orphan temp {path}");
+            removed.push(path);
+        }
+    }
+    Ok(removed)
+}
+
+/// The names this command leaves behind between runs.
+fn is_temp_name(name: &str) -> bool {
+    name.contains(".uksfta-part-") || name.contains(".uksfta-old-")
+}
+
+/// Ask for the free space in the target directory. `None` means the server
+/// cannot say, which is one warning, not a failure.
+///
+/// # Errors
+/// Returns `Input` when the free space is known to be short of `need`.
+pub async fn check_space(sftp: &Sftp, dir: &str, need: u64) -> Result<Option<u64>, UksftaError> {
+    if !sftp.support_statvfs() {
+        eprintln!("Warning: the server cannot report free space; the upload continues");
+        return Ok(None);
+    }
+    let mut fs = sftp.fs();
+    if fs.metadata(dir).await.is_err() {
+        eprintln!("Warning: {dir} does not exist yet; the upload creates it");
+        return Ok(None);
+    }
+    let stat = fs.statvfs(dir).await.map_err(|error| {
+        UksftaError::Input(format!("cannot ask for free space at {dir}: {error}"))
+    })?;
+    let free = stat.bavail.saturating_mul(stat.frsize);
+    if free < need {
+        return Err(UksftaError::Input(format!(
+            "the server holds {free} free bytes but the upload needs {need}"
+        )));
+    }
+    Ok(Some(free))
+}
+
+fn join_name(dir: &str, name: &str) -> String {
+    format!("{}/{}", dir.trim_end_matches('/'), name)
 }
 
 #[cfg(test)]
@@ -276,20 +403,17 @@ mod tests {
     }
 
     #[test]
-    fn the_queue_holds_every_range_once() {
-        let chunks = vec![
-            Chunk {
-                index: 0,
-                start: 0,
-                len: 4096,
-            },
-            Chunk {
-                index: 1,
-                start: 4096,
-                len: 4096,
-            },
-        ];
-        let queue = queue(&chunks);
-        assert_eq!(queue.lock().unwrap().len(), 2);
+    fn only_temp_markers_are_orphans() {
+        assert!(is_temp_name("x.pbo.uksfta-part-old"));
+        assert!(is_temp_name("x.pbo.uksfta-old-0123456789abcdef"));
+        assert!(!is_temp_name("x.pbo.uksfta-part"), "the live temp is kept");
+        assert!(!is_temp_name("x.pbo"));
+        assert!(!is_temp_name("x.pbo.bisign"));
+    }
+
+    #[test]
+    fn an_orphan_path_joins_the_directory_once() {
+        assert_eq!(join_name("/srv/a", "x.part"), "/srv/a/x.part");
+        assert_eq!(join_name("/srv/a/", "x.part"), "/srv/a/x.part");
     }
 }
