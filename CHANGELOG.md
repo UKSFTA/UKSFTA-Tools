@@ -9,6 +9,12 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `--password-prompt` asks once, before the probe and the transfer. The
+  progress view is hidden while the prompt runs. The system probe never
+  prompts, and a probe auth failure that uses the typed password is fatal.
+- The system probe models the `--jobs` path with up to four parallel 1 MiB
+  uploads and reports the aggregate rate and job count. `segment_probe`
+  gains `system_jobs`.
 - A link probe chooses the whole-file path when it is faster. It runs for a
   segmented file of 256 MiB or more, moves 4 MiB four times, and prints the
   estimates and the decision. `--segment-probe` is on by default and

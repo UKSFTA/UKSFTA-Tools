@@ -616,7 +616,7 @@ fn a_full_segmented_run_publishes_and_returns_the_hash() {
         });
     }
 
-    let hash = super::run(&settings, state.path(), "pack-1", &unit, None, false)
+    let hash = super::run(&settings, state.path(), "pack-1", &unit, None, None)
         .expect("the segmented run");
     assert_eq!(hash, crate::util::file_sha256(&local).expect("local hash"));
 
@@ -762,8 +762,8 @@ fn an_adaptive_run_with_eight_connections_publishes_the_same_bytes() {
         });
     }
 
-    let hash = super::run(&settings, state.path(), "pack-a", &unit, None, false)
-        .expect("the adaptive run");
+    let hash =
+        super::run(&settings, state.path(), "pack-a", &unit, None, None).expect("the adaptive run");
     assert_eq!(hash, crate::util::file_sha256(&local).expect("local hash"));
 
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
@@ -804,7 +804,7 @@ fn a_failed_segmented_run_leaves_no_temp_and_no_final() {
         });
     }
 
-    let error = super::run(&settings, state.path(), "pack-2", &unit, None, false)
+    let error = super::run(&settings, state.path(), "pack-2", &unit, None, None)
         .expect_err("the short read must fail the run");
     assert!(error.to_string().contains("ended early"), "{error}");
 
@@ -939,7 +939,7 @@ fn a_killed_session_reconnects_and_publishes() {
     let state = fixture.state.path().to_path_buf();
     let unit = fixture.unit.clone();
     let handle =
-        std::thread::spawn(move || super::run(&settings, &state, "pack-r", &unit, None, false));
+        std::thread::spawn(move || super::run(&settings, &state, "pack-r", &unit, None, None));
 
     poll_acked(
         fixture.state.path(),
@@ -989,7 +989,7 @@ fn a_killed_session_with_no_reconnect_fails_and_keeps_the_temp() {
     let state = fixture.state.path().to_path_buf();
     let unit = fixture.unit.clone();
     let handle =
-        std::thread::spawn(move || super::run(&settings, &state, "pack-n", &unit, None, false));
+        std::thread::spawn(move || super::run(&settings, &state, "pack-n", &unit, None, None));
 
     poll_acked(
         fixture.state.path(),
@@ -1038,7 +1038,7 @@ fn a_resume_continues_from_the_acked_prefix() {
     let state = fixture.state.path().to_path_buf();
     let unit = fixture.unit.clone();
     let handle =
-        std::thread::spawn(move || super::run(&settings, &state, "pack-a", &unit, None, false));
+        std::thread::spawn(move || super::run(&settings, &state, "pack-a", &unit, None, None));
     wait_for_ack(fixture.state.path(), "pack-a", &fixture.final_path);
     kill_sessions();
     assert!(handle.join().expect("the run thread").is_err());
@@ -1089,7 +1089,7 @@ fn a_resume_continues_from_the_acked_prefix() {
         "pack-a",
         &fixture.unit,
         None,
-        false,
+        None,
     )
     .expect("the resumed run");
     assert_eq!(
@@ -1123,7 +1123,7 @@ fn a_corrupted_prefix_restarts_from_scratch() {
     let state = fixture.state.path().to_path_buf();
     let unit = fixture.unit.clone();
     let handle =
-        std::thread::spawn(move || super::run(&settings, &state, "pack-c", &unit, None, false));
+        std::thread::spawn(move || super::run(&settings, &state, "pack-c", &unit, None, None));
     wait_for_ack(fixture.state.path(), "pack-c", &fixture.final_path);
     kill_sessions();
     assert!(handle.join().expect("the run thread").is_err());
@@ -1174,7 +1174,7 @@ fn a_corrupted_prefix_restarts_from_scratch() {
         "pack-c",
         &fixture.unit,
         None,
-        false,
+        None,
     )
     .expect("the restarted run");
     assert_eq!(

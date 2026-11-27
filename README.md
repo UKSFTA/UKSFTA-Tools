@@ -859,17 +859,22 @@ prefix depend on fixed range boundaries, so an adaptive run does not change
 the chunk.
 
 For a file of 256 MiB or more, the command probes the link first. It moves
-4 MiB four times in the pack folder with hidden `.uksfta-probe-*` names: a
-system `sftp` upload, a native write on one connection, a native write on
-two connections, and a native read-back. It then estimates both paths and
-keeps the whole-file path when the segmented estimate is not at least 10
-percent better. The decision line names both estimates, and the rates line
-names the four measured rates. A probe that cannot run gives one warning
-and keeps the segmented path. The probe never publishes, never uses a name
-Arma loads, and removes its files on every exit path. A hard kill can leave
-the three files; the next probe overwrites and removes them. The probe
-needs a key or an agent, so `--password-prompt` keeps the segmented path.
-`--no-segment-probe` turns it off.
+small files in the pack folder with hidden `.uksfta-probe-*` names: three
+1 MiB uploads on the system `sftp` path, one per job up to four, a native
+write of 4 MiB on one connection, a native write of 4 MiB on two
+connections, and a native read-back of 4 MiB. The system rate is the
+aggregate of the parallel uploads over the wall time, so it models the
+`--jobs` path. The command estimates both paths and keeps the whole-file
+path when the segmented estimate is not at least 10 percent better. The
+decision line names the job count, the aggregate rate and both estimates.
+A probe that cannot run keeps the segmented path with one warning. The
+system probe never prompts: if it cannot authenticate, the command reports
+that and keeps the segmented path, and the native measurements use the
+password you typed. `--password-prompt` asks once, before the probe and the
+transfer, while the progress view is hidden. The probe never publishes,
+never uses a name Arma loads, and removes its files on every exit path. A
+hard kill can leave the probe files; the next probe overwrites and removes
+them. `--no-segment-probe` turns it off.
 
 Fsync now runs every fourth completed range by default
 (`--segment-fsync-every`). The checkpoint can therefore record a range that
