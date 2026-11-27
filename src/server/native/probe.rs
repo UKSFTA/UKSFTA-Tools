@@ -324,7 +324,7 @@ async fn measure_native(
             local,
             0,
             PROBE_BYTES as u32,
-            settings.transfer.buffer,
+            settings.transfer.buffer.max(super::NATIVE_BUFFER),
         )
         .await
     })
@@ -342,7 +342,7 @@ async fn measure_native_two(
     writer::create_temp(&session.sftp, remote).await?;
     let second = connect::connect_with(settings, password.map(AsRef::as_ref)).await?;
     let half = (PROBE_BYTES / 2) as u32;
-    let buffer = settings.transfer.buffer;
+    let buffer = settings.transfer.buffer.max(super::NATIVE_BUFFER);
     let (elapsed, ()) = timed(async {
         let left = write_probe(&session.sftp, remote, local, 0, half, buffer);
         let right = write_probe(&second.sftp, remote, local, u64::from(half), half, buffer);
