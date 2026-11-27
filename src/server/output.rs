@@ -19,6 +19,8 @@ pub struct JsonReport {
     pub findings: Vec<FindingJson>,
     pub actions: Vec<ActionJson>,
     pub timings: TimingsJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_probe: Option<ProbeJson>,
     pub result: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -74,6 +76,42 @@ pub struct UploadJson {
     pub estimated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connections_max: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connections_start: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connections_peak: Option<u8>,
+}
+
+/// The link probe and the path it chose.
+#[derive(Serialize)]
+pub struct ProbeJson {
+    pub system_mbps: f64,
+    pub native_one_mbps: f64,
+    pub native_two_mbps: f64,
+    pub read_mbps: f64,
+    pub whole_seconds: f64,
+    pub segmented_seconds: f64,
+    pub decision: String,
+}
+
+impl From<&super::native::probe::Decision> for ProbeJson {
+    fn from(decision: &super::native::probe::Decision) -> Self {
+        Self {
+            system_mbps: decision.probe.system_mbps,
+            native_one_mbps: decision.probe.native_one_mbps,
+            native_two_mbps: decision.probe.native_two_mbps,
+            read_mbps: decision.probe.read_mbps,
+            whole_seconds: decision.whole_seconds,
+            segmented_seconds: decision.segmented_seconds,
+            decision: if decision.segmented {
+                "segmented".to_string()
+            } else {
+                "whole".to_string()
+            },
+        }
+    }
 }
 
 impl From<&Settings> for ServerJson {
@@ -159,6 +197,8 @@ impl JsonReport {
         timings: TimingsJson,
         segment_choice: Option<(&str, u8)>,
         segment_result: Option<(&str, &str)>,
+        segment_counts: Option<(u8, u8, u8)>,
+        segment_probe: Option<&super::native::probe::Decision>,
         sent: &[super::summary::SentFile],
         result: &Result<(), crate::error::UksftaError>,
     ) -> Self {
@@ -192,6 +232,11 @@ impl JsonReport {
                         let published =
                             segment_result.filter(|(remote, _)| *remote == unit.remote.as_str());
                         let file = measured(&unit.remote);
+                        let counts = if selected.is_some() {
+                            segment_counts
+                        } else {
+                            None
+                        };
                         entries.push(UploadJson {
                             name: basename(&unit.remote),
                             mode: if selected.is_some() {
@@ -209,6 +254,9 @@ impl JsonReport {
                             mb_per_second: file.and_then(|file| file.rate_mbps),
                             estimated: file.map(|file| file.estimated),
                             remote: Some(unit.remote.clone()),
+                            connections_max: counts.map(|c| c.0),
+                            connections_start: counts.map(|c| c.1),
+                            connections_peak: counts.map(|c| c.2),
                         });
                         planned.push(unit.remote.clone());
                     }
@@ -231,6 +279,9 @@ impl JsonReport {
                             mb_per_second: file.and_then(|file| file.rate_mbps),
                             estimated: file.map(|file| file.estimated),
                             remote: Some(remote.to_string()),
+                            connections_max: segment_counts.map(|c| c.0),
+                            connections_start: segment_counts.map(|c| c.1),
+                            connections_peak: segment_counts.map(|c| c.2),
                         });
                     }
                 }
@@ -258,6 +309,9 @@ impl JsonReport {
                         mb_per_second: file.rate_mbps,
                         estimated: Some(file.estimated),
                         remote: Some(file.remote.clone()),
+                        connections_max: None,
+                        connections_start: None,
+                        connections_peak: None,
                     });
                 }
                 entries
@@ -278,6 +332,7 @@ impl JsonReport {
             findings,
             actions,
             timings,
+            segment_probe: segment_probe.map(ProbeJson::from),
             result: result_name.to_string(),
             error: result.as_ref().err().map(ToString::to_string),
         }

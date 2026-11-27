@@ -11,6 +11,11 @@ use tokio::io::{AsyncSeekExt, SeekFrom};
 
 use crate::error::UksftaError;
 
+/// The buffer the completion read-back hash uses. It is deliberately not
+/// the transfer buffer: the read-back is one stream and benefits from a
+/// large request.
+pub const READBACK_BUFFER: u32 = 261_120;
+
 /// Hash the whole remote file and fail when its length differs.
 ///
 /// # Errors

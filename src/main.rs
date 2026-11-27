@@ -268,6 +268,15 @@ enum Commands {
         /// Scale the segmented connections between 1 and the maximum (starts at 4)
         #[arg(long)]
         segment_adaptive: bool,
+        /// Probe the link before segmenting a file of 256 MiB or more (default on)
+        #[arg(long, group = "probe_mode")]
+        segment_probe: bool,
+        /// Do not probe the link before segmenting
+        #[arg(long, group = "probe_mode")]
+        no_segment_probe: bool,
+        /// Fsync every N completed ranges in the segmented path (1 to 64)
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=64))]
+        segment_fsync_every: Option<u8>,
         /// Preallocate the segmented temp file to its full size (default on)
         #[arg(long, group = "preallocate_mode")]
         preallocate: bool,
@@ -478,6 +487,9 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             password_prompt,
             segment_min,
             segment_adaptive,
+            segment_probe,
+            no_segment_probe,
+            segment_fsync_every,
             preallocate,
             no_preallocate,
             limit,
@@ -526,6 +538,14 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
                 password_prompt,
                 segment_min,
                 segment_adaptive,
+                segment_probe: if segment_probe {
+                    Some(true)
+                } else if no_segment_probe {
+                    Some(false)
+                } else {
+                    None
+                },
+                segment_fsync_every,
                 preallocate: if preallocate {
                     Some(true)
                 } else if no_preallocate {

@@ -68,6 +68,8 @@ impl SegmentResume {
 pub struct Segment {
     pub enabled: bool,
     pub adaptive: bool,
+    pub probe: bool,
+    pub fsync_every: u8,
     pub preallocate: bool,
     pub min_bytes: u64,
     pub connections: u8,
@@ -81,6 +83,8 @@ impl Default for Segment {
         Self {
             enabled: false,
             adaptive: false,
+            probe: true,
+            fsync_every: 4,
             preallocate: true,
             min_bytes: 64 * 1024 * 1024,
             connections: 4,
@@ -108,6 +112,12 @@ impl Segment {
                     "segment chunk must be {MIN_SEGMENT_CHUNK}..={MAX_SEGMENT_CHUNK} bytes and a 4096-byte multiple: {chunk}"
                 )));
             }
+        }
+        if !(1..=64).contains(&self.fsync_every) {
+            return Err(UksftaError::Input(format!(
+                "segment fsync every must be 1..=64: {}",
+                self.fsync_every
+            )));
         }
         if self.min_bytes > MAX_SEGMENT_MIN {
             return Err(UksftaError::Input(format!(
@@ -184,6 +194,8 @@ pub struct ServerConfig {
     pub server_cfg: Option<String>,
     pub segment: Option<bool>,
     pub segment_adaptive: Option<bool>,
+    pub segment_probe: Option<bool>,
+    pub segment_fsync_every: Option<u8>,
     pub segment_preallocate: Option<bool>,
     pub segment_min: Option<u64>,
     pub segment_connections: Option<u8>,
@@ -212,6 +224,8 @@ pub struct Overrides {
     pub segment_chunk: Option<u32>,
     pub segment_resume: Option<String>,
     pub segment_reconnects: Option<u8>,
+    pub probe: Option<bool>,
+    pub fsync_every: Option<u8>,
     pub preallocate: Option<bool>,
     pub limit: Option<String>,
 }
@@ -319,6 +333,14 @@ pub fn resolve(config_path: Option<&Path>, overrides: &Overrides) -> Result<Sett
                     .segment_adaptive
                     .or(config.segment_adaptive)
                     .unwrap_or(defaults.adaptive),
+                probe: overrides
+                    .probe
+                    .or(config.segment_probe)
+                    .unwrap_or(defaults.probe),
+                fsync_every: overrides
+                    .fsync_every
+                    .or(config.segment_fsync_every)
+                    .unwrap_or(defaults.fsync_every),
                 preallocate: overrides
                     .preallocate
                     .or(config.segment_preallocate)
@@ -542,6 +564,8 @@ mod tests {
         assert_eq!(settings.segment.min_bytes, 64 * 1024 * 1024);
         assert_eq!(settings.segment.connections, 4);
         assert!(!settings.segment.adaptive);
+        assert!(settings.segment.probe);
+        assert_eq!(settings.segment.fsync_every, 4);
         assert!(settings.segment.preallocate);
         assert_eq!(settings.transfer.limit, None);
         assert_eq!(settings.segment.chunk, None);
@@ -569,6 +593,30 @@ mod tests {
         assert!(settings.segment.adaptive);
         assert_eq!(settings.segment.connections, 6);
         assert_eq!(settings.segment.resume, SegmentResume::Off);
+    }
+
+    #[test]
+    fn the_probe_and_fsync_flags_reach_the_settings() {
+        let mut over = overrides("a@b", "/x");
+        over.probe = Some(false);
+        over.fsync_every = Some(8);
+        let settings = resolve(None, &over).unwrap();
+        assert!(!settings.segment.probe);
+        assert_eq!(settings.segment.fsync_every, 8);
+    }
+
+    #[test]
+    fn a_bad_fsync_rate_is_refused() {
+        for value in [0, 65] {
+            assert!(matches!(
+                Segment {
+                    fsync_every: value,
+                    ..Segment::default()
+                }
+                .validate(),
+                Err(UksftaError::Input(_))
+            ));
+        }
     }
 
     #[test]
