@@ -495,7 +495,10 @@ fn backoff(attempt: u8) -> Duration {
 pub fn is_fatal(error: &UksftaError) -> bool {
     match error {
         UksftaError::Io(_) => false,
-        UksftaError::Parse(_) | UksftaError::Check(_) | UksftaError::Auth(_) => true,
+        UksftaError::Parse(_)
+        | UksftaError::Check(_)
+        | UksftaError::Auth(_)
+        | UksftaError::Locked(_) => true,
         UksftaError::Input(message) => {
             const FATAL: [&str; 9] = [
                 "cannot read ",

@@ -18,6 +18,10 @@ pub enum UksftaError {
     /// for the run, so no other credential can replace it silently.
     #[error("{0}")]
     Auth(String),
+    /// Another upload holds the pack lock. It is fatal, because a second
+    /// sender must not write the same file concurrently.
+    #[error("{0}")]
+    Locked(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -29,6 +33,7 @@ impl UksftaError {
             UksftaError::Input(_)
             | UksftaError::Parse(_)
             | UksftaError::Auth(_)
+            | UksftaError::Locked(_)
             | UksftaError::Io(_) => 2,
         }
     }
