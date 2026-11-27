@@ -9,6 +9,15 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `--limit` caps the upload rate on both paths. A `K`, `M` or `G` suffix is
+  1024-based. The segmented path uses one shared limiter for every
+  connection, and the system `sftp` path passes `-l` in Kbit/s.
+- `--preallocate` sets the segmented temp file to its full length before
+  the first range and is on by default. `--no-preallocate` turns it off. A
+  server without the request gives one warning and the upload continues.
+- `--notify` sends one desktop notification when the run finishes. The body
+  names the pack, the result, the file count, the bytes and the elapsed
+  seconds.
 - `--segment-adaptive` scales the segmented connections between one and
   `--segment-connections`, which is now the maximum. The run starts at four,
   changes one connection per sample window, and honours the server's session

@@ -68,6 +68,7 @@ impl SegmentResume {
 pub struct Segment {
     pub enabled: bool,
     pub adaptive: bool,
+    pub preallocate: bool,
     pub min_bytes: u64,
     pub connections: u8,
     pub chunk: Option<u32>,
@@ -80,6 +81,7 @@ impl Default for Segment {
         Self {
             enabled: false,
             adaptive: false,
+            preallocate: true,
             min_bytes: 64 * 1024 * 1024,
             connections: 4,
             chunk: None,
@@ -131,6 +133,8 @@ pub struct Transfer {
     pub buffer: u32,
     /// The `-R` value: outstanding requests.
     pub requests: u16,
+    /// The upload rate in bytes per second, when one is set.
+    pub limit: Option<u64>,
 }
 
 impl Default for Transfer {
@@ -138,6 +142,7 @@ impl Default for Transfer {
         Self {
             buffer: 32_768,
             requests: 64,
+            limit: None,
         }
     }
 }
@@ -179,6 +184,7 @@ pub struct ServerConfig {
     pub server_cfg: Option<String>,
     pub segment: Option<bool>,
     pub segment_adaptive: Option<bool>,
+    pub segment_preallocate: Option<bool>,
     pub segment_min: Option<u64>,
     pub segment_connections: Option<u8>,
     pub segment_chunk: Option<u32>,
@@ -206,6 +212,8 @@ pub struct Overrides {
     pub segment_chunk: Option<u32>,
     pub segment_resume: Option<String>,
     pub segment_reconnects: Option<u8>,
+    pub preallocate: Option<bool>,
+    pub limit: Option<String>,
 }
 
 /// Resolved connection settings with every field present.
@@ -274,6 +282,10 @@ pub fn resolve(config_path: Option<&Path>, overrides: &Overrides) -> Result<Sett
     let transfer = Transfer {
         buffer: overrides.buffer.unwrap_or(defaults.buffer),
         requests: overrides.requests.unwrap_or(defaults.requests),
+        limit: match overrides.limit.as_deref() {
+            Some(text) => Some(super::limit::parse_rate(text)?),
+            None => None,
+        },
     }
     .validate()?;
 
@@ -307,6 +319,10 @@ pub fn resolve(config_path: Option<&Path>, overrides: &Overrides) -> Result<Sett
                     .segment_adaptive
                     .or(config.segment_adaptive)
                     .unwrap_or(defaults.adaptive),
+                preallocate: overrides
+                    .preallocate
+                    .or(config.segment_preallocate)
+                    .unwrap_or(defaults.preallocate),
                 min_bytes: overrides
                     .segment_min
                     .or(config.segment_min)
@@ -476,13 +492,15 @@ mod tests {
     fn transfer_validation_accepts_the_range_edges() {
         assert!(Transfer {
             buffer: MIN_BUFFER,
-            requests: MIN_REQUESTS
+            requests: MIN_REQUESTS,
+            ..Transfer::default()
         }
         .validate()
         .is_ok());
         assert!(Transfer {
             buffer: MAX_BUFFER,
-            requests: MAX_REQUESTS
+            requests: MAX_REQUESTS,
+            ..Transfer::default()
         }
         .validate()
         .is_ok());
@@ -494,6 +512,7 @@ mod tests {
             let err = Transfer {
                 buffer,
                 requests: 64,
+                ..Transfer::default()
             }
             .validate()
             .unwrap_err();
@@ -507,6 +526,7 @@ mod tests {
             let err = Transfer {
                 buffer: 32_768,
                 requests,
+                ..Transfer::default()
             }
             .validate()
             .unwrap_err();
@@ -522,6 +542,8 @@ mod tests {
         assert_eq!(settings.segment.min_bytes, 64 * 1024 * 1024);
         assert_eq!(settings.segment.connections, 4);
         assert!(!settings.segment.adaptive);
+        assert!(settings.segment.preallocate);
+        assert_eq!(settings.transfer.limit, None);
         assert_eq!(settings.segment.chunk, None);
         assert_eq!(settings.segment.resume, SegmentResume::Auto);
         assert_eq!(settings.segment.reconnects, 3);
@@ -547,6 +569,23 @@ mod tests {
         assert!(settings.segment.adaptive);
         assert_eq!(settings.segment.connections, 6);
         assert_eq!(settings.segment.resume, SegmentResume::Off);
+    }
+
+    #[test]
+    fn the_limit_and_preallocation_flags_reach_the_settings() {
+        let mut over = overrides("a@b", "/x");
+        over.preallocate = Some(false);
+        over.limit = Some("1.5M".to_string());
+        let settings = resolve(None, &over).unwrap();
+        assert!(!settings.segment.preallocate);
+        assert_eq!(settings.transfer.limit, Some(1_572_864));
+    }
+
+    #[test]
+    fn a_bad_limit_is_refused() {
+        let mut over = overrides("a@b", "/x");
+        over.limit = Some("fast".to_string());
+        assert!(matches!(resolve(None, &over), Err(UksftaError::Input(_))));
     }
 
     #[test]

@@ -8,7 +8,9 @@ mod config;
 mod doctor;
 mod hostkey;
 mod launch;
+mod limit;
 mod native;
+mod notify;
 mod output;
 mod parse;
 mod plan;
@@ -105,6 +107,10 @@ pub struct ServerOptions {
     pub segment_min: Option<u64>,
     /// Scale the segmented connections between one and the maximum.
     pub segment_adaptive: bool,
+    /// Preallocate the segmented temp file.
+    pub preallocate: Option<bool>,
+    /// The upload rate limit text.
+    pub limit: Option<String>,
     /// Segmented connections.
     pub segment_connections: Option<u8>,
     /// Segmented chunk size.
@@ -113,6 +119,8 @@ pub struct ServerOptions {
     pub segment_resume: Option<String>,
     /// Reconnects per segmented run.
     pub segment_reconnects: Option<u8>,
+    /// Send one desktop notification when the run finishes.
+    pub notify: bool,
     /// Write one JSON object to standard output.
     pub json: bool,
     /// Run the read-only preflight instead of the checks.
@@ -169,6 +177,18 @@ pub fn run(opts: ServerOptions) -> Result<(), UksftaError> {
             outcome.deep_ms.unwrap_or(0),
             outcome.upload_ms.unwrap_or(0)
         );
+    }
+    if opts.notify && !opts.dry_run {
+        notify::send(&notify::Finished {
+            pack: outcome
+                .pack
+                .as_ref()
+                .map(|(id, name)| (id.as_str(), name.as_str())),
+            result: &result,
+            files: outcome.sent.len(),
+            bytes: outcome.sent.iter().map(|file| file.bytes).sum(),
+            seconds: started.elapsed().as_secs_f64(),
+        });
     }
     result
 }
@@ -421,6 +441,8 @@ fn overrides(opts: &ServerOptions) -> Overrides {
         },
         segment_min: opts.segment_min,
         segment_adaptive: opts.segment_adaptive.then_some(true),
+        preallocate: opts.preallocate,
+        limit: opts.limit.clone(),
         segment_connections: opts.segment_connections,
         segment_chunk: opts.segment_chunk,
         segment_resume: opts.segment_resume.clone(),

@@ -32,6 +32,59 @@ const MODLIST: &str = r#"<html><body><table>
 </tr>
 </table></body></html>"#;
 
+#[cfg(unix)]
+fn notify_stub(dir: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let stub = dir.join("notify.sh");
+    write(
+        &stub,
+        b"#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$UKSFTA_NOTIFY_OUT\"\nprintf '%s\\n' \"$2\" >> \"$UKSFTA_NOTIFY_OUT\"\n",
+    );
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("make the stub runnable");
+    stub
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_run_notifies_only_with_the_flag() {
+    let dir = TempDir::new().expect("temp dir");
+    let stub = notify_stub(dir.path());
+    let out = dir.path().join("notify.out");
+
+    uksfta(dir.path())
+        .arg("server")
+        .env("UKSFTA_NOTIFY_BIN", &stub)
+        .env("UKSFTA_NOTIFY_OUT", &out)
+        .assert()
+        .code(2);
+    assert!(!out.exists(), "no notification without --notify");
+
+    uksfta(dir.path())
+        .args(["server", "--notify"])
+        .env("UKSFTA_NOTIFY_BIN", &stub)
+        .env("UKSFTA_NOTIFY_OUT", &out)
+        .assert()
+        .code(2);
+    let text = fs::read_to_string(&out).expect("the notification body");
+    assert!(text.starts_with("uksfta\n"), "{text}");
+    assert!(text.contains("failed:"), "{text}");
+}
+
+#[test]
+fn server_help_lists_the_limit_and_notification_flags() {
+    let dir = TempDir::new().expect("temp dir");
+
+    uksfta(dir.path())
+        .args(["server", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--limit"))
+        .stdout(predicate::str::contains("--preallocate"))
+        .stdout(predicate::str::contains("--no-preallocate"))
+        .stdout(predicate::str::contains("--notify"));
+}
+
 #[test]
 fn help_exits_zero_and_lists_the_commands() {
     let dir = TempDir::new().expect("temp dir");

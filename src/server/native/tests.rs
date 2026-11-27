@@ -390,7 +390,8 @@ async fn four_connections_write_a_sixteen_mebibyte_file() {
             loop {
                 let next = scheduler.lock().expect("scheduler").take();
                 let Some(chunk) = next else { break };
-                super::writer::write_range(&mut file, &chunk, &local, 32_768, &mut |_| {}).await?;
+                super::writer::write_range(&mut file, &chunk, &local, 32_768, None, &mut |_| {})
+                    .await?;
                 scheduler.lock().expect("scheduler").complete(chunk.index);
             }
             file.close()
@@ -442,7 +443,7 @@ async fn a_short_local_file_is_refused_by_name() {
         start: 0,
         len: 4096,
     };
-    let error = super::writer::write_range(&mut file, &chunk, &local, 4096, &mut |_| {})
+    let error = super::writer::write_range(&mut file, &chunk, &local, 4096, None, &mut |_| {})
         .await
         .expect_err("the local file is short");
     let text = error.to_string();
@@ -478,9 +479,16 @@ async fn a_missing_range_makes_finish_refuse_and_publish_never_run() {
     let mut file = super::writer::open_range_writer(&session.sftp, &temp)
         .await
         .expect("handle");
-    super::writer::write_range(&mut file, &plan.chunks[0], &local, 32_768, &mut |_| {})
-        .await
-        .expect("the first range");
+    super::writer::write_range(
+        &mut file,
+        &plan.chunks[0],
+        &local,
+        32_768,
+        None,
+        &mut |_| {},
+    )
+    .await
+    .expect("the first range");
     file.close().await.expect("close");
 
     let error = super::writer::finish(&session.sftp, &temp, SIZE)
@@ -636,6 +644,47 @@ fn a_full_segmented_run_publishes_and_returns_the_hash() {
     });
 }
 
+#[tokio::test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+async fn preallocation_sets_the_temp_length_before_the_first_write() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock_async().await;
+    const SIZE: u64 = 4 * 1024 * 1024;
+    let (dir, pinned) = pin(port());
+    let local = local_file(&dir, "pre.pbo", SIZE);
+    let settings = segmented_settings(pinned, 2, None);
+    let base = remote_dir("prealloc");
+    let temp = format!("{base}/pre.pbo.uksfta-part");
+    let session = session(&settings).await;
+    make_dir(&session.sftp, &base).await;
+
+    super::writer::create_temp(&session.sftp, &temp)
+        .await
+        .expect("the temp file");
+    assert_eq!(
+        session.sftp.fs().metadata(&temp).await.unwrap().len(),
+        Some(0),
+        "the temp starts empty"
+    );
+
+    let outcome = super::writer::preallocate(&session.sftp, &temp, SIZE)
+        .await
+        .expect("preallocate");
+    let len = session.sftp.fs().metadata(&temp).await.unwrap().len();
+    match outcome {
+        super::writer::Preallocated::Full => assert_eq!(len, Some(SIZE)),
+        super::writer::Preallocated::Unsupported => {
+            assert_eq!(len, Some(0), "an unsupported server leaves the temp empty");
+        }
+    }
+
+    let mut fs = session.sftp.fs();
+    let _ = fs.remove_file(&temp).await;
+    let _ = local;
+}
+
 #[test]
 #[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
 fn an_adaptive_run_with_eight_connections_publishes_the_same_bytes() {
@@ -725,30 +774,23 @@ fn a_failed_segmented_run_leaves_no_temp_and_no_final() {
 // ---- Checkpoints, resume and retries ---------------------------------------
 
 /// Poll the remote temp until it reaches `at_least`, or it disappears.
-fn poll_temp(settings: &Settings, path: &str, at_least: u64) {
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
-    runtime.block_on(async {
-        let session = session(settings).await;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-        let mut seen = false;
-        loop {
-            match session.sftp.fs().metadata(path).await {
-                Ok(meta) => {
-                    seen = true;
-                    if meta.len().unwrap_or(0) >= at_least {
-                        return;
-                    }
-                }
-                // The temp only disappears when the run finished.
-                Err(_) if seen => return,
-                Err(_) => {}
-            }
-            if tokio::time::Instant::now() > deadline {
+/// Wait until the checkpoint records some acknowledged bytes. The temp
+/// length cannot say how far the transfer got, because preallocation sets
+/// it to the full size before the first write.
+fn poll_acked(state: &Path, pack_id: &str, remote: &str, at_least: u64) {
+    let path = super::checkpoint::path_for(state, pack_id, remote);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if let Some(checkpoint) = super::checkpoint::load(&path) {
+            if checkpoint.acked_prefix >= at_least {
                 return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-    });
+        if std::time::Instant::now() > deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 /// Wait until a checkpoint records at least one acknowledged range.
@@ -846,7 +888,12 @@ fn a_killed_session_reconnects_and_publishes() {
     let handle =
         std::thread::spawn(move || super::run(&settings, &state, "pack-r", &unit, None, false));
 
-    poll_temp(&fixture.settings, &fixture.temp, 4 * 1024 * 1024);
+    poll_acked(
+        fixture.state.path(),
+        "pack-r",
+        &fixture.unit.remote,
+        4 * 1024 * 1024,
+    );
     kill_sessions();
     let result = handle.join().expect("the run thread");
 
@@ -891,7 +938,12 @@ fn a_killed_session_with_no_reconnect_fails_and_keeps_the_temp() {
     let handle =
         std::thread::spawn(move || super::run(&settings, &state, "pack-n", &unit, None, false));
 
-    poll_temp(&fixture.settings, &fixture.temp, 4 * 1024 * 1024);
+    poll_acked(
+        fixture.state.path(),
+        "pack-n",
+        &fixture.unit.remote,
+        4 * 1024 * 1024,
+    );
     kill_sessions();
     let result = handle.join().expect("the run thread");
     assert!(result.is_err(), "a dead session with no reconnect fails");

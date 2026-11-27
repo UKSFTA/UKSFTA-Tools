@@ -268,6 +268,15 @@ enum Commands {
         /// Scale the segmented connections between 1 and the maximum (starts at 4)
         #[arg(long)]
         segment_adaptive: bool,
+        /// Preallocate the segmented temp file to its full size (default on)
+        #[arg(long, group = "preallocate_mode")]
+        preallocate: bool,
+        /// Do not preallocate the segmented temp file
+        #[arg(long, group = "preallocate_mode")]
+        no_preallocate: bool,
+        /// Cap the upload rate: bytes per second, or a K, M or G suffix
+        #[arg(long, value_name = "BYTES")]
+        limit: Option<String>,
         /// Segmented connections, or the maximum when adaptive (1 to 16)
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=16))]
         segment_connections: Option<u8>,
@@ -280,6 +289,9 @@ enum Commands {
         /// Reconnects per segmented run (0 to 10)
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=10))]
         segment_reconnects: Option<u8>,
+        /// Send one desktop notification when the run finishes
+        #[arg(long)]
+        notify: bool,
         /// Write one JSON object to standard output
         #[arg(long)]
         json: bool,
@@ -466,10 +478,14 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             password_prompt,
             segment_min,
             segment_adaptive,
+            preallocate,
+            no_preallocate,
+            limit,
             segment_connections,
             segment_chunk,
             segment_resume,
             segment_reconnects,
+            notify,
             json,
             doctor,
         } => {
@@ -510,10 +526,19 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
                 password_prompt,
                 segment_min,
                 segment_adaptive,
+                preallocate: if preallocate {
+                    Some(true)
+                } else if no_preallocate {
+                    Some(false)
+                } else {
+                    None
+                },
+                limit,
                 segment_connections,
                 segment_chunk,
                 segment_resume,
                 segment_reconnects,
+                notify,
                 json,
                 doctor,
             })?

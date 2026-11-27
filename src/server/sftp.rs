@@ -70,6 +70,10 @@ impl Sftp {
             "-B".to_string(),
             self.transfer.buffer.to_string(),
         ]);
+        if let Some(rate) = self.transfer.limit {
+            args.push("-l".to_string());
+            args.push(limit_kbit(rate).to_string());
+        }
         for option in LIVENESS {
             args.push("-o".to_string());
             args.push(option.to_string());
@@ -154,6 +158,13 @@ impl Sftp {
         }
         Ok(stdout)
     }
+}
+
+/// The `-l` value. The sftp man page counts Kbit/s, so bytes become
+/// kilobits rounded up.
+pub fn limit_kbit(bytes_per_second: u64) -> u64 {
+    let kbit = (u128::from(bytes_per_second) * 8).div_ceil(1000);
+    u64::try_from(kbit).unwrap_or(u64::MAX)
 }
 
 /// The last non-empty line of client output, stripped of terminal escapes.
@@ -254,6 +265,26 @@ mod tests {
     }
 
     #[test]
+    fn a_limit_becomes_the_client_kbit_argument() {
+        let transfer = Transfer {
+            limit: Some(5 * 1024 * 1024),
+            ..Transfer::default()
+        };
+        let args = client(transfer).args();
+        let value = args
+            .iter()
+            .position(|arg| arg == "-l")
+            .map(|index| args[index + 1].as_str());
+        assert_eq!(value, Some("41944"));
+        assert_eq!(limit_kbit(512_000), 4096);
+        assert_eq!(limit_kbit(1), 1, "the value rounds up");
+        assert!(!client(Transfer::default())
+            .args()
+            .iter()
+            .any(|arg| arg == "-l"));
+    }
+
+    #[test]
     fn the_error_log_level_replaces_quiet_on_every_run() {
         let args = client(Transfer::default()).args();
 
@@ -301,6 +332,7 @@ mod tests {
         let args = client(Transfer {
             buffer: 261_120,
             requests: 128,
+            ..Transfer::default()
         })
         .args();
 
