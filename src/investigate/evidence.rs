@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use super::normalise::normalise;
 use super::plan::CorpusStats;
-use crate::pbo::pbo_stored_sources_capped;
+use crate::pbo::PboContent;
 
 /// Strings kept per PBO.
 const MAX_STRINGS_PER_PBO: usize = 20_000;
@@ -98,7 +98,20 @@ struct RawString {
 
 /// Harvest every PBO in `addons_dir`, then score with learned document
 /// frequencies.
+// The online path feeds `PoolBuilder` one PBO at a time so one read
+// serves the pool and the identity extractor; this wrapper serves the
+// tests that harvest one directory.
+#[cfg(test)]
 pub(crate) fn build_evidence_pool(addons_dir: &Path) -> EvidencePool {
+    let mut builder = PoolBuilder::new();
+    for path in pool_files(addons_dir) {
+        builder.add(&PboContent::read(&path));
+    }
+    builder.finish()
+}
+
+/// The PBOs the pool covers: the files directly in `addons_dir`, sorted.
+pub(crate) fn pool_files(addons_dir: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = match std::fs::read_dir(addons_dir) {
         Ok(entries) => entries
             .flatten()
@@ -108,23 +121,37 @@ pub(crate) fn build_evidence_pool(addons_dir: &Path) -> EvidencePool {
         Err(_) => Vec::new(),
     };
     paths.sort();
+    paths
+}
 
-    let mut harvested: Vec<RawString> = Vec::new();
-    let mut phrase_docs: BTreeMap<String, usize> = BTreeMap::new();
-    let mut token_docs: BTreeMap<String, usize> = BTreeMap::new();
-    let mut docs = 0usize;
-    let mut truncated = false;
+/// Document frequencies over one PBO at a time, so the caller holds one
+/// PBO's content rather than the whole pack's.
+pub(crate) struct PoolBuilder {
+    harvested: Vec<RawString>,
+    phrase_docs: BTreeMap<String, usize>,
+    token_docs: BTreeMap<String, usize>,
+    docs: usize,
+    truncated: bool,
+}
 
-    'pbo: for path in paths {
-        let pbo = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let (sources, cut) = pbo_stored_sources_capped(&path);
-        truncated |= cut;
-        docs += 1;
+impl PoolBuilder {
+    pub(crate) fn new() -> Self {
+        Self {
+            harvested: Vec::new(),
+            phrase_docs: BTreeMap::new(),
+            token_docs: BTreeMap::new(),
+            docs: 0,
+            truncated: false,
+        }
+    }
 
-        let (strings, labels) = harvest_sources(&pbo, &sources, &mut truncated);
+    /// Harvest one PBO, in the order the caller presents them.
+    pub(crate) fn add(&mut self, content: &PboContent) {
+        let pbo = content.name.clone();
+        self.truncated |= content.truncated;
+        self.docs += 1;
+
+        let (strings, labels) = harvest_sources(&pbo, &content.sources, &mut self.truncated);
         let mut seen_phrases = BTreeMap::new();
         let mut seen_tokens = BTreeMap::new();
 
@@ -134,85 +161,96 @@ pub(crate) fn build_evidence_pool(addons_dir: &Path) -> EvidencePool {
                 continue;
             }
             if seen_phrases.insert(key.clone(), ()).is_none() {
-                *phrase_docs.entry(key).or_insert(0) += 1;
+                *self.phrase_docs.entry(key).or_insert(0) += 1;
             }
             for token in &item.tokens {
                 if seen_tokens.insert(token.clone(), ()).is_none() {
-                    if let Some(count) = token_docs.get_mut(token) {
+                    if let Some(count) = self.token_docs.get_mut(token) {
                         *count += 1;
-                    } else if token_docs.len() < MAX_POOL_TOKENS {
-                        token_docs.insert(token.clone(), 1);
+                    } else if self.token_docs.len() < MAX_POOL_TOKENS {
+                        self.token_docs.insert(token.clone(), 1);
                     } else {
-                        truncated = true;
+                        self.truncated = true;
                     }
                 }
             }
-            if harvested.len() >= MAX_POOL_STRINGS {
-                truncated = true;
-                break 'pbo;
+            if self.harvested.len() >= MAX_POOL_STRINGS {
+                self.truncated = true;
+                return;
             }
-            harvested.push(item);
+            self.harvested.push(item);
         }
 
         for label in labels {
             let key = label_key(&pbo, &label);
-            if token_docs.contains_key(&key) {
+            if self.token_docs.contains_key(&key) {
                 continue;
             }
-            if token_docs.len() < MAX_POOL_TOKENS {
-                token_docs.insert(key, 1);
+            if self.token_docs.len() < MAX_POOL_TOKENS {
+                self.token_docs.insert(key, 1);
             } else {
-                truncated = true;
+                self.truncated = true;
             }
         }
     }
 
-    let strings: Vec<EvidenceString> = harvested
-        .into_iter()
-        .map(|item| {
-            let key = normalise(&item.text).text;
-            let pbo_df = phrase_docs.get(&key).copied().unwrap_or(1);
-            let token_df = item
-                .tokens
-                .iter()
-                .filter_map(|token| token_docs.get(token))
-                .copied()
-                .min()
-                .unwrap_or(pbo_df);
-            EvidenceString {
-                pbo: item.pbo,
-                text: item.text,
-                kind: item.kind,
-                token_df,
-                pbo_df,
-            }
-        })
-        .collect();
+    /// Score every harvested string with the learned frequencies.
+    pub(crate) fn finish(self) -> EvidencePool {
+        let Self {
+            harvested,
+            phrase_docs,
+            token_docs,
+            docs,
+            truncated,
+        } = self;
 
-    let corpus = CorpusStats {
-        df: token_docs.into_iter().collect(),
-        docs,
-    };
-    let mut scored: Vec<(f64, EvidenceString)> = strings
-        .into_iter()
-        .map(|item| {
-            let key = normalise(&item.text).text;
-            let is_label = corpus.df.contains_key(&label_key(&item.pbo, &key));
-            let score = evidence_score(&item, corpus.docs, is_label, false);
-            (score, item)
-        })
-        .collect();
-    scored.sort_by(|(a_score, a), (b_score, b)| {
-        a.pbo
-            .cmp(&b.pbo)
-            .then_with(|| score_order(*a_score, a, *b_score, b))
-    });
-    let strings = scored.into_iter().map(|(_, item)| item).collect();
+        let strings: Vec<EvidenceString> = harvested
+            .into_iter()
+            .map(|item| {
+                let key = normalise(&item.text).text;
+                let pbo_df = phrase_docs.get(&key).copied().unwrap_or(1);
+                let token_df = item
+                    .tokens
+                    .iter()
+                    .filter_map(|token| token_docs.get(token))
+                    .copied()
+                    .min()
+                    .unwrap_or(pbo_df);
+                EvidenceString {
+                    pbo: item.pbo,
+                    text: item.text,
+                    kind: item.kind,
+                    token_df,
+                    pbo_df,
+                }
+            })
+            .collect();
 
-    EvidencePool {
-        strings,
-        corpus,
-        truncated,
+        let corpus = CorpusStats {
+            df: token_docs.into_iter().collect(),
+            docs,
+        };
+        let mut scored: Vec<(f64, EvidenceString)> = strings
+            .into_iter()
+            .map(|item| {
+                let key = normalise(&item.text).text;
+                let is_label = corpus.df.contains_key(&label_key(&item.pbo, &key));
+                let score = evidence_score(&item, corpus.docs, is_label, false);
+                (score, item)
+            })
+            .collect();
+        scored.sort_by(|(a_score, a), (b_score, b)| {
+            a.pbo
+                .cmp(&b.pbo)
+                .then_with(|| score_order(*a_score, a, *b_score, b))
+        });
+        let strings = scored.into_iter().map(|(_, item)| item).collect();
+
+        EvidencePool {
+            strings,
+            corpus,
+            truncated,
+        }
     }
 }
 
@@ -244,12 +282,20 @@ pub(crate) fn rank_phrases_for_with(
     anchors: &[String],
     limit: usize,
 ) -> Vec<EvidenceString> {
-    rank_items(
-        pool,
-        pool.strings.iter().filter(|item| item.pbo == pbo),
-        anchors,
-        limit,
-    )
+    let range = pbo_range(pool, pbo);
+    rank_items(pool, pool.strings[range].iter(), anchors, limit)
+}
+
+/// The slice of `strings` that belongs to `pbo`.
+///
+/// The pool is ordered by PBO, so two binary searches find the block
+/// without a scan of the whole pool.
+fn pbo_range(pool: &EvidencePool, pbo: &str) -> std::ops::Range<usize> {
+    let start = pool.strings.partition_point(|item| item.pbo.as_str() < pbo);
+    let end = pool
+        .strings
+        .partition_point(|item| item.pbo.as_str() <= pbo);
+    start..end
 }
 
 fn rank_items<'a>(
@@ -932,6 +978,45 @@ mod tests {
     }
 
     #[test]
+    fn rank_phrases_for_matches_a_full_pool_scan() {
+        let string = |pbo: &str, text: &str, kind| EvidenceString {
+            pbo: pbo.to_string(),
+            text: text.to_string(),
+            kind,
+            token_df: 1,
+            pbo_df: 1,
+        };
+        // Sorted by PBO, as `build_evidence_pool` leaves the pool.
+        let pool = EvidencePool {
+            strings: vec![
+                string("a.pbo", "Alpha Title", EvidenceKind::Assignment),
+                string("a.pbo", "Alpha Extra", EvidenceKind::Quoted),
+                string("b.pbo", "Beta Title", EvidenceKind::Quoted),
+                string("c.pbo", "Gamma Title", EvidenceKind::Bare),
+            ],
+            corpus: CorpusStats {
+                df: HashMap::new(),
+                docs: 4,
+            },
+            truncated: false,
+        };
+        let anchors = ["Alpha".to_string()];
+
+        for pbo in ["a.pbo", "b.pbo", "c.pbo", "missing.pbo"] {
+            let found = rank_phrases_for_with(&pool, pbo, &anchors, 3);
+            let scan = rank_items(
+                &pool,
+                pool.strings.iter().filter(|item| item.pbo == pbo),
+                &anchors,
+                3,
+            );
+            assert_eq!(found, scan, "pbo {pbo}");
+        }
+        assert_eq!(rank_phrases_for(&pool, "b.pbo", 3)[0].text, "Beta Title");
+        assert!(rank_phrases_for(&pool, "missing.pbo", 3).is_empty());
+    }
+
+    #[test]
     fn rank_phrases_limits_and_dedupes_case_insensitively() {
         let pool = EvidencePool {
             strings: vec![
@@ -977,8 +1062,8 @@ mod tests {
             ],
         );
 
-        let (sources, _) = pbo_stored_sources_capped(&dir.join("mod.pbo"));
-        let tokens = stringtable_tokens(&sources);
+        let content = PboContent::read(&dir.join("mod.pbo"));
+        let tokens = stringtable_tokens(&content.sources);
         assert_eq!(
             tokens.get("$STR_MYMOD_AUTHOR").map(String::as_str),
             Some("Advanced Diving Systems")

@@ -1,14 +1,50 @@
 use std::collections::HashMap;
 
-use super::plan::{build_plan, SyncPlan};
+use super::plan::{build_plan, classify_status, SyncPlan};
 use super::{lookup_sizes, missing_size_ids, size_share_colour, unpullable_dependencies};
 use crate::lock::{LockFile, ModLockEntry};
 use crate::modlist::{DepMap, ModEntry};
 use crate::steam::WorkshopItem;
 use crate::util::{C_GREEN, C_RED, C_YELLOW};
 
-// --- lookup_sizes ---
+// --- classify_status ---
 
+fn locked(updated: &str, files: &[&str]) -> LockFile {
+    let mut lock = LockFile {
+        version: 1,
+        mods: HashMap::new(),
+    };
+    lock.mods.insert(
+        "111".to_string(),
+        ModLockEntry {
+            files: files.iter().map(|file| (*file).to_string()).collect(),
+            name: "Mod A".to_string(),
+            tags: Vec::new(),
+            dependencies: Vec::new(),
+            updated: updated.to_string(),
+        },
+    );
+    lock
+}
+
+#[test]
+fn classify_status_reads_the_timestamp_before_the_files() {
+    let lock = locked("100", &["/nonexistent/uksfta/sync-plan/missing.pbo"]);
+    // The timestamp differs, so the file test cannot change the answer.
+    assert_eq!(classify_status(&lock, "111", "200"), "updated");
+
+    let lock = locked("100", &["/nonexistent/uksfta/sync-plan/missing.pbo"]);
+    assert_eq!(classify_status(&lock, "111", "100"), "updated");
+
+    let present = std::env::temp_dir().join("uksfta-sync-plan-present.pbo");
+    std::fs::write(&present, b"x").unwrap();
+    let lock = locked("100", &[present.to_str().unwrap()]);
+    assert_eq!(classify_status(&lock, "111", "100"), "unchanged");
+    assert_eq!(classify_status(&lock, "999", "100"), "added");
+    std::fs::remove_file(&present).unwrap();
+}
+
+// --- lookup_sizes ---
 #[test]
 fn lookup_sizes_marks_missing_mods_as_unknown() {
     let mods = vec![

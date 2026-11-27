@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::util::extract_quoted;
 
@@ -255,9 +255,17 @@ pub fn pbo_text_sources(path: &Path) -> Vec<(String, Vec<u8>)> {
 }
 
 fn read_entry_data(path: &Path, mimes: &[u32]) -> (Vec<(String, Vec<u8>)>, bool) {
+    let entries = pbo_entries(path);
+    read_entry_data_of(path, &entries, mimes)
+}
+
+fn read_entry_data_of(
+    path: &Path,
+    entries: &[PboEntry],
+    mimes: &[u32],
+) -> (Vec<(String, Vec<u8>)>, bool) {
     use std::io::{Read, Seek, SeekFrom};
 
-    let entries = pbo_entries(path);
     let mut file = match fs::File::open(path) {
         Ok(file) => file,
         Err(_) => return (Vec::new(), false),
@@ -285,9 +293,58 @@ fn read_entry_data(path: &Path, mimes: &[u32]) -> (Vec<(String, Vec<u8>)>, bool)
             break;
         }
         total += size;
-        sources.push((entry.name, data));
+        sources.push((entry.name.clone(), data));
     }
     (sources, truncated)
+}
+
+/// One PBO read once: header entries, the config scan window and the
+/// stored entry data. The online path hands one read to both the
+/// evidence harvester and the identity extractor.
+#[derive(Debug, Clone, Default)]
+pub struct PboContent {
+    /// Source file.
+    pub path: PathBuf,
+    /// File name, as it appears in a report.
+    pub name: String,
+    /// The first [`PBO_SCAN_LIMIT`] bytes, where the header and the
+    /// packed config sit.
+    pub head: Vec<u8>,
+    /// Stored entry data, in header order, capped at
+    /// [`PBO_ENTRY_DATA_LIMIT`].
+    pub sources: Vec<(String, Vec<u8>)>,
+    /// Set when the entry data or the head was cut short.
+    pub truncated: bool,
+}
+
+impl PboContent {
+    /// Read one PBO. A file that cannot be read yields empty parts, which
+    /// matches the empty result of each single-purpose helper.
+    pub fn read(path: &Path) -> Self {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let head = read_capped(path, PBO_SCAN_LIMIT).unwrap_or_default();
+        let entries = pbo_entries(path);
+        let (sources, truncated) = read_entry_data_of(path, &entries, &[0]);
+        Self {
+            path: path.to_path_buf(),
+            name,
+            head,
+            sources,
+            truncated,
+        }
+    }
+
+    /// Config facts, read from the content already in memory.
+    pub fn config_facts(&self) -> PboConfigFacts {
+        config_facts_with(
+            &self.head,
+            &self.path,
+            KeybindSources::Memory(&self.sources),
+        )
+    }
 }
 
 /// Config facts read from one capped pass over a PBO.
@@ -333,16 +390,62 @@ enum Section {
 /// stronger evidence than printable runs. A `Cprs`-compressed body
 /// carries neither and yields the default facts.
 pub fn pbo_config_facts(path: &Path) -> PboConfigFacts {
-    let mut facts = PboConfigFacts::default();
-    let Some(data) = read_capped(path, PBO_SCAN_LIMIT) else {
-        return facts;
+    let Some(head) = read_capped(path, PBO_SCAN_LIMIT) else {
+        return PboConfigFacts::default();
     };
-    let text = readable_strings(&data);
+    config_facts_with(&head, path, KeybindSources::File(path))
+}
 
-    facts.required_addons = required_addons(&text);
+/// The two config facts the dependency closure reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PboClosureFacts {
+    pub cfgpatches_classes: Vec<String>,
+    pub required_addons: Vec<String>,
+}
+
+/// `CfgPatches` classes and `requiredAddons` for one PBO.
+///
+/// The result matches [`pbo_config_facts`] for these two fields. The
+/// identity-only scans are skipped, so no entry data is read beyond a
+/// stored `config.bin`: models and textures are never touched.
+pub fn pbo_closure_facts(path: &Path) -> PboClosureFacts {
+    let Some(head) = read_capped(path, PBO_SCAN_LIMIT) else {
+        return PboClosureFacts::default();
+    };
+    let text = readable_strings(&head);
+    let facts = base_facts(&head, &text, path);
+    PboClosureFacts {
+        cfgpatches_classes: facts.cfgpatches_classes,
+        required_addons: facts.required_addons,
+    }
+}
+
+fn config_facts_with(head: &[u8], path: &Path, keybinds: KeybindSources<'_>) -> PboConfigFacts {
+    let text = readable_strings(head);
+    let mut facts = base_facts(head, &text, path);
     facts.str_tokens = str_tokens(&text);
-    facts.cba_keybind_names = cba_names_from_entries(path, &text);
+    facts.cba_keybind_names = keybind_names(&text, keybinds);
+    facts
+}
 
+/// Everything one config carries, apart from the identity-only scans.
+fn base_facts(head: &[u8], text: &str, path: &Path) -> PboConfigFacts {
+    let mut facts = PboConfigFacts {
+        required_addons: required_addons(text),
+        ..PboConfigFacts::default()
+    };
+    scan_sections(text, &mut facts);
+
+    if let Some(rap) = rap_from_config_entries(path).or_else(|| parse_rap_config(head)) {
+        merge_rap_facts(&mut facts, rap);
+    }
+
+    facts
+}
+
+/// Walk the config text and record the class declarations and the
+/// assignments the identity path reads.
+fn scan_sections(text: &str, facts: &mut PboConfigFacts) {
     // `section` is the CfgMods or CfgPatches block the scan is inside;
     // `section_depth` is the brace depth at which that block opened.
     let mut section = Section::Unknown;
@@ -350,8 +453,8 @@ pub fn pbo_config_facts(path: &Path) -> PboConfigFacts {
     let mut pending_section = Section::Unknown;
     let mut depth = 0usize;
 
-    for statement in statements(&text) {
-        match statement.as_str() {
+    for statement in statements(text) {
+        match statement {
             "{" => {
                 depth += 1;
                 if pending_section == Section::Unknown {
@@ -371,7 +474,7 @@ pub fn pbo_config_facts(path: &Path) -> PboConfigFacts {
             _ => {}
         }
 
-        if let Some(name) = class_name(&statement) {
+        if let Some(name) = class_name(statement) {
             match name.to_ascii_lowercase().as_str() {
                 "cfgmods" => pending_section = Section::CfgMods,
                 "cfgpatches" => pending_section = Section::CfgPatches,
@@ -417,12 +520,6 @@ pub fn pbo_config_facts(path: &Path) -> PboConfigFacts {
             _ => {}
         }
     }
-
-    if let Some(rap) = rap_from_config_entries(path).or_else(|| parse_rap_config(&data)) {
-        merge_rap_facts(&mut facts, rap);
-    }
-
-    facts
 }
 
 /// Addon classes the PBO provides: every `CfgPatches` class in its config.
@@ -481,26 +578,78 @@ fn is_authored_text(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Categories from CBA keybind registrations, first the 4 MiB window
-/// then every stored authored-text entry, because a mod's keybind code is
-/// often near the end of a large PBO.
-fn cba_names_from_entries(path: &Path, head: &str) -> Vec<String> {
-    let mut names = cba_keybind_names(head);
-    if !names.is_empty() {
-        names.sort();
-        names.dedup();
-        return names;
-    }
+/// Where the keybind entry data comes from.
+enum KeybindSources<'a> {
+    /// Entry data the caller already holds.
+    Memory(&'a [(String, Vec<u8>)]),
+    /// A PBO whose authored-text entries are read one at a time, and only
+    /// when the head carries no keybind.
+    File(&'a Path),
+}
 
-    let (sources, _) = pbo_stored_sources_capped(path);
-    for (name, bytes) in sources {
-        if !is_authored_text(&name) {
-            continue;
-        }
-        names.extend(cba_keybind_names(&readable_strings(&bytes)));
+/// Categories from CBA keybind registrations: first the 4 MiB window,
+/// then the stored authored-text entries, because a mod's keybind code is
+/// often near the end of a large PBO.
+///
+/// Entry names are filtered before any data is read, so a model or a
+/// texture is never read. Every authored-text entry is still scanned,
+/// because a PBO may register categories in more than one file, and the
+/// union is the same as a scan of all stored entries.
+fn keybind_names(head: &str, sources: KeybindSources<'_>) -> Vec<String> {
+    let mut names = cba_keybind_names(head);
+    if names.is_empty() {
+        names = match sources {
+            KeybindSources::Memory(sources) => from_held_sources(sources),
+            KeybindSources::File(path) => from_entry_data(path),
+        };
     }
     names.sort();
     names.dedup();
+    names
+}
+
+fn from_held_sources(sources: &[(String, Vec<u8>)]) -> Vec<String> {
+    let mut names = Vec::new();
+    for (name, bytes) in sources {
+        if is_authored_text(name) {
+            names.extend(cba_keybind_names(&readable_strings(bytes)));
+        }
+    }
+    names
+}
+
+/// Read the authored-text entries in header order. The budget covers
+/// every stored entry, so the entries read match [`read_entry_data_of`]
+/// with the stored mime.
+fn from_entry_data(path: &Path) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut file) = fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    let mut total = 0u64;
+    for entry in pbo_entries(path) {
+        if entry.mime != 0 {
+            continue;
+        }
+        let size = u64::from(entry.data_size);
+        if total + size > PBO_ENTRY_DATA_LIMIT {
+            break;
+        }
+        total += size;
+        if !is_authored_text(&entry.name) {
+            continue;
+        }
+        if file.seek(SeekFrom::Start(entry.offset)).is_err() {
+            break;
+        }
+        let mut data = Vec::new();
+        if file.by_ref().take(size).read_to_end(&mut data).is_err() {
+            break;
+        }
+        names.extend(cba_keybind_names(&readable_strings(&data)));
+    }
     names
 }
 
@@ -591,13 +740,10 @@ fn push_run(run: &mut Vec<u8>, text: &mut String) {
 
 /// Split config text into class declarations, braces, statements and
 /// terminators, so a one-line config parses like a formatted one.
-fn statements(text: &str) -> Vec<String> {
-    text.replace(';', "\n")
-        .lines()
+fn statements(text: &str) -> impl Iterator<Item = &str> {
+    text.split([';', '\n'])
         .map(str::trim)
         .filter(|statement| !statement.is_empty())
-        .map(str::to_string)
-        .collect()
 }
 
 fn class_name(statement: &str) -> Option<&str> {
@@ -1084,6 +1230,9 @@ fn rap_from_config_entries(path: &Path) -> Option<RapFacts> {
         })
         .collect();
     entries.sort_by_key(|entry| entry.name.contains(['\\', '/']) as u8);
+    if entries.is_empty() {
+        return None;
+    }
 
     let mut file = fs::File::open(path).ok()?;
     for entry in entries.into_iter().take(PBO_MAX_CONFIG_ENTRIES) {
@@ -1778,6 +1927,51 @@ pub(crate) mod tests {
         assert!(pbo_provided_classes(&truncated).is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn closure_facts_match_config_facts_for_the_two_fields() {
+        let dir = std::env::temp_dir().join("uksfta-pbo-closure-facts");
+        fs::create_dir_all(&dir).unwrap();
+
+        let text = dir.join("text.pbo");
+        let config: &[u8] = br#"class CfgPatches { class alpha_main { requiredAddons[] = {"A3_Data_F", "ace_common"}; }; class beta_extra {}; };"#;
+        write_pbo_entries(&text, &[("config.cpp", 0, config)]);
+
+        let mut alpha = RapBody::new("alpha_main");
+        alpha.strings("requiredAddons[]", &["A3_Data_F", "cba_main"]);
+        let mut patches = RapBody::new("CfgPatches");
+        patches.class("alpha_main", alpha);
+        let mut root = RapBody::new("");
+        root.class("CfgPatches", patches);
+        let packed = rap_blob(&root);
+        let stale: &[u8] =
+            br#"class CfgPatches { class stale_name { requiredAddons[] = {"stale_dep"}; }; };"#;
+        let binary = dir.join("binary.pbo");
+        write_pbo_entries(
+            &binary,
+            &[("config.cpp", 0, stale), ("config.bin", 0, &packed)],
+        );
+
+        for path in [&text, &binary] {
+            let facts = pbo_config_facts(path);
+            let closure = pbo_closure_facts(path);
+            assert_eq!(closure.cfgpatches_classes, facts.cfgpatches_classes);
+            assert_eq!(closure.required_addons, facts.required_addons);
+        }
+        assert_eq!(
+            pbo_closure_facts(&text).required_addons,
+            ["A3_Data_F", "ace_common"]
+        );
+        assert_eq!(
+            pbo_closure_facts(&binary).cfgpatches_classes,
+            ["alpha_main"]
+        );
+        assert_eq!(
+            pbo_closure_facts(&binary).required_addons,
+            ["A3_Data_F", "cba_main", "stale_dep"]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -1796,5 +1990,91 @@ mod cba_tests {
         assert!(
             cba_keybind_names("[\"some_identifier\",\"x\"] call CBA_fnc_addKeybind;").is_empty()
         );
+    }
+}
+
+/// The entry-scan and one-read paths, checked against the behaviour they
+/// replaced.
+#[cfg(test)]
+mod read_tests {
+    use super::tests::write_pbo_entries;
+    use super::*;
+
+    /// The scan this change replaced: every stored entry read in full,
+    /// then filtered to authored text, with every name kept.
+    fn keybind_names_by_full_scan(path: &Path, head: &str) -> Vec<String> {
+        let mut names = cba_keybind_names(head);
+        if names.is_empty() {
+            let (sources, _) = pbo_stored_sources_capped(path);
+            for (name, bytes) in sources {
+                if !is_authored_text(&name) {
+                    continue;
+                }
+                names.extend(cba_keybind_names(&readable_strings(&bytes)));
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    #[test]
+    fn keybind_names_skip_binary_entries_and_match_the_full_scan() {
+        let dir = std::env::temp_dir().join("uksfta-pbo-keybind-entries");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("ade.pbo");
+
+        // Five MiB of model data puts the keybind code past the 4 MiB
+        // head window, so only the entry scan can find it. A marker
+        // inside the binary body must not become a category.
+        let mut model = vec![0xaa_u8; 5 * 1024 * 1024];
+        model.extend_from_slice(b"[\"Decoy Category\",\"x\"] call CBA_fnc_addKeybind;");
+        let keybind: &[u8] =
+            b"[\"Advanced Diving Environment\",\"adeVar\"] call CBA_fnc_addKeybind;";
+        // A second file registers another category; both must be kept.
+        let second: &[u8] = b"[\"ADE Diving Gear\",\"adeVar2\"] call CBA_fnc_addKeybind;";
+        write_pbo_entries(
+            &f,
+            &[
+                ("models/hull.pak", 0, &model),
+                ("scripts/keys.sqf", 0, keybind),
+                ("scripts/gear.sqf", 0, second),
+            ],
+        );
+
+        let content = PboContent::read(&f);
+        let head = readable_strings(&content.head);
+        assert!(!head.contains("CBA_fnc_addKeybind"));
+
+        let expected = keybind_names_by_full_scan(&f, &head);
+        assert_eq!(expected, ["ADE Diving Gear", "Advanced Diving Environment"]);
+        assert_eq!(content.config_facts().cba_keybind_names, expected);
+        assert_eq!(pbo_config_facts(&f).cba_keybind_names, expected);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn content_config_facts_match_the_path_reader() {
+        let dir = std::env::temp_dir().join("uksfta-pbo-content-facts");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("ade_core.pbo");
+
+        let config: &[u8] = br#"class CfgMods { name = "ADE Core"; author = "ADE"; };
+            class CfgPatches { class ade_core { units[] = {};
+            requiredAddons[] = {"ace_common"}; author = "[ADE]";
+            url = "https://steamcommunity.com/sharedfiles/filedetails/?id=1234";
+            displayName = "Diving Core"; }; };"#;
+        write_pbo_entries(
+            &f,
+            &[
+                ("config.cpp", 0, config),
+                ("docs/readme.txt", 0, b"Advanced Diving Environment"),
+                ("models/hull.pak", 0, &[0xaa; 64]),
+            ],
+        );
+
+        let content = PboContent::read(&f);
+        assert_eq!(content.config_facts(), pbo_config_facts(&f));
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
