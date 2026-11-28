@@ -723,6 +723,7 @@ mod tests {
                 .map(|(text, kind)| EvidenceString {
                     pbo: pbo.to_string(),
                     text: text.to_string(),
+                    key: normalise(text).text,
                     kind: *kind,
                     token_df: 1,
                     pbo_df: 1,
@@ -1071,6 +1072,7 @@ mod tests {
                 .map(|text| crate::investigate::evidence::EvidenceString {
                     pbo: evidence.pbo.clone(),
                     text: text.to_string(),
+                    key: crate::investigate::normalise::normalise(text).text,
                     kind: crate::investigate::evidence::EvidenceKind::Quoted,
                     token_df: 1,
                     pbo_df: 1,
@@ -1164,6 +1166,7 @@ mod tests {
                 .map(|text| crate::investigate::evidence::EvidenceString {
                     pbo: evidence.pbo.clone(),
                     text: text.to_string(),
+                    key: crate::investigate::normalise::normalise(text).text,
                     kind: crate::investigate::evidence::EvidenceKind::Bare,
                     token_df: 1,
                     pbo_df: 1,
@@ -1257,6 +1260,7 @@ mod accuracy_tests {
                 .map(|text| crate::investigate::evidence::EvidenceString {
                     pbo: evidence.pbo.clone(),
                     text: text.to_string(),
+                    key: crate::investigate::normalise::normalise(text).text,
                     kind: crate::investigate::evidence::EvidenceKind::Quoted,
                     token_df: 1,
                     pbo_df: 1,
@@ -1329,6 +1333,7 @@ mod specificity_tests {
                 .map(|text| crate::investigate::evidence::EvidenceString {
                     pbo: evidence.pbo.clone(),
                     text: text.to_string(),
+                    key: crate::investigate::normalise::normalise(text).text,
                     kind: crate::investigate::evidence::EvidenceKind::Quoted,
                     token_df: 1,
                     pbo_df: 1,

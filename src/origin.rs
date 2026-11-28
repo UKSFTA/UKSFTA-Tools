@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,13 +6,26 @@ use crate::pbo::pbo_prefix;
 use crate::prefix::prefix_root;
 use crate::util::{file_sha256, find_pbos};
 
+/// One cached PBO with the header prefix read from it once, when the
+/// folder was scanned.
+///
+/// A common name such as `ace_common.pbo` sits in dozens of packs, so
+/// every target resolved by that name used to re-open the same files and
+/// re-read the same headers. The prefix is read here and matched from
+/// memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedPbo {
+    pub path: PathBuf,
+    pub prefix: Option<String>,
+}
+
 /// A Workshop mod folder plus precomputed statistics used to arbitrate
 /// origin: how many PBOs it holds and how many distinct prefix roots
 /// (a standalone mod has few roots; an aggregate pack spans many).
 pub struct ModDir {
     pub id: String,
     pub path: PathBuf,
-    pub pbos: Vec<PathBuf>,
+    pub pbos: Vec<CachedPbo>,
     pub root_count: usize,
 }
 
@@ -24,12 +37,18 @@ pub fn build_mod_dirs(caches: &[PathBuf]) -> Vec<ModDir> {
                 let path = entry.path();
                 if path.is_dir() {
                     if let Some(id) = path.file_name().and_then(|n| n.to_str()) {
-                        let pbos = find_pbos(&path);
+                        let pbos: Vec<CachedPbo> = find_pbos(&path)
+                            .into_iter()
+                            .map(|pbo| CachedPbo {
+                                prefix: pbo_prefix(&pbo),
+                                path: pbo,
+                            })
+                            .collect();
                         let root_count = {
                             let mut roots = std::collections::HashSet::new();
                             for pbo in &pbos {
-                                if let Some(prefix) = pbo_prefix(pbo) {
-                                    roots.insert(prefix_root(&prefix).to_lowercase());
+                                if let Some(prefix) = &pbo.prefix {
+                                    roots.insert(prefix_root(prefix).to_lowercase());
                                 }
                             }
                             roots.len()
@@ -86,19 +105,44 @@ pub struct ResolvedOrigin {
 /// investigate command, plain id/title pairs in tests).
 pub type IdentityCache<T> = HashMap<String, Vec<T>>;
 
-/// Build a single-pass index of every PBO name to the mod folders that
-/// contain it. This is the expensive cache walk; resolving then becomes
-/// in-memory lookups instead of re-scanning folders per PBO.
-pub fn build_pbo_index(mod_dirs: &[ModDir]) -> HashMap<String, Vec<&ModDir>> {
-    let mut index: HashMap<String, Vec<&ModDir>> = HashMap::new();
+/// Single-pass index of every cached PBO name to the copies of that name
+/// and the folders that hold them.
+///
+/// One name maps to many copies, so a target PBO resolves without a scan
+/// of any folder's PBO list.
+pub struct PboIndex<'a> {
+    by_name: HashMap<String, Vec<(&'a ModDir, &'a CachedPbo)>>,
+}
+
+impl<'a> PboIndex<'a> {
+    /// The cached copies of `name`, in cache walk order. Empty when no
+    /// folder holds the name.
+    pub fn candidates(&self, name: &str) -> &[(&'a ModDir, &'a CachedPbo)] {
+        self.by_name.get(name).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+/// Build the per-name index. This is the expensive cache walk; resolving
+/// then becomes in-memory lookups instead of re-scanning folders per PBO.
+///
+/// A folder that holds the same name twice contributes its first copy
+/// only, which is the copy a linear scan would have scored.
+pub fn build_pbo_index(mod_dirs: &[ModDir]) -> PboIndex<'_> {
+    let mut by_name: HashMap<String, Vec<(&ModDir, &CachedPbo)>> = HashMap::new();
     for dir in mod_dirs {
+        let mut seen: HashSet<&str> = HashSet::new();
         for pbo in &dir.pbos {
-            if let Some(name) = pbo.file_name().and_then(|n| n.to_str()) {
-                index.entry(name.to_string()).or_default().push(dir);
+            if let Some(name) = pbo.path.file_name().and_then(|n| n.to_str()) {
+                if seen.insert(name) {
+                    by_name
+                        .entry(name.to_string())
+                        .or_default()
+                        .push((dir, pbo));
+                }
             }
         }
     }
-    index
+    PboIndex { by_name }
 }
 
 /// Match a PBO against the Workshop cache and arbitrate its origin.
@@ -111,42 +155,39 @@ pub fn build_pbo_index(mod_dirs: &[ModDir]) -> HashMap<String, Vec<&ModDir>> {
 /// an aggregate pack spans many. This steers the result to the original
 /// owner mod over any pack that bundled a copy.
 ///
-/// `candidates` is the prebuilt per-name folder list from the index.
+/// `candidates` is the prebuilt per-name copy list from the index, each
+/// with its prefix already read.
+///
+/// Set `UKSFTA_ORIGIN_TRACE` to report every byte-hash fallback on
+/// stderr, with the target size and the number of copies it must hash.
 pub fn resolve_pbo_from_index(
     pbo_path: &Path,
-    candidates: &[&ModDir],
+    candidates: &[(&ModDir, &CachedPbo)],
     target_prefix: Option<&str>,
 ) -> Option<ResolvedOrigin> {
-    let pbo_name = pbo_path.file_name()?.to_string_lossy().to_string();
-
-    // Score each candidate. Prefix match is the primary signal and is
-    // cheap (512-byte header read). Byte-hash is a fallback used only
-    // when the prefix path fails, since hashing reads the whole PBO.
-    // The target hash is computed once: a single unreadable target
-    // leaves every byte-hash candidate unscored but does not abort.
+    // Score each candidate. Prefix match is the primary signal and costs
+    // nothing here (the header was read when the folder was scanned).
+    // Byte-hash is a fallback used only when the prefix path fails, since
+    // hashing reads the whole PBO. The target hash is computed once: a
+    // single unreadable target leaves every byte-hash candidate unscored
+    // but does not abort.
     let target_hash = match target_prefix {
         Some(_) => None,
-        None => Some(file_sha256(pbo_path)?),
+        None => {
+            trace_fallback(pbo_path, candidates.len());
+            Some(file_sha256(pbo_path)?)
+        }
     };
     let mut scored: Vec<(&ModDir, u8)> = Vec::new();
-    for dir in candidates {
-        let Some(cached_path) = dir.pbos.iter().find(|pbo| {
-            pbo.file_name()
-                .map(|n| n == pbo_name.as_str())
-                .unwrap_or(false)
-        }) else {
-            continue;
-        };
+    for &(dir, cached) in candidates {
         let mut score = 0u8;
         if let Some(target) = target_prefix {
-            if pbo_prefix(cached_path).as_deref() == Some(target) {
+            if cached.prefix.as_deref() == Some(target) {
                 score += 2; // same canonical addon prefix
             }
-        } else {
+        } else if file_sha256(&cached.path) == target_hash {
             // No prefix available: fall back to byte identity.
-            if file_sha256(cached_path) == target_hash {
-                score += 1;
-            }
+            score += 1;
         }
         if score > 0 {
             scored.push((dir, score));
@@ -179,6 +220,23 @@ pub fn resolve_pbo_from_index(
     })
 }
 
+/// Report a byte-hash fallback when `UKSFTA_ORIGIN_TRACE` is set.
+///
+/// The fallback hashes whole files, so how often it runs and how large
+/// the files are decides what it costs. It is a report, never a change to
+/// the result.
+fn trace_fallback(pbo_path: &Path, copies: usize) {
+    if std::env::var_os("UKSFTA_ORIGIN_TRACE").is_none() {
+        return;
+    }
+    let name = pbo_path.file_name().map(|n| n.to_string_lossy());
+    let bytes = fs::metadata(pbo_path).map(|meta| meta.len()).unwrap_or(0);
+    eprintln!(
+        "origin: no prefix in {} ({bytes} bytes); byte-hashing {copies} cached copies",
+        name.as_deref().unwrap_or_default()
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +250,60 @@ mod tests {
         data.push(0);
         data.extend_from_slice(payload);
         fs::write(path, data).unwrap();
+    }
+
+    /// The cached PBO list a folder scan would produce.
+    fn cached(dir: &Path) -> Vec<CachedPbo> {
+        find_pbos(dir)
+            .into_iter()
+            .map(|path| CachedPbo {
+                prefix: pbo_prefix(&path),
+                path,
+            })
+            .collect()
+    }
+
+    /// The old algorithm: for each folder, find the first copy by name and
+    /// re-read its header from disk. The cached lookup must agree with it.
+    fn rescan(
+        mod_dirs: &[ModDir],
+        target: &Path,
+        target_prefix: Option<&str>,
+    ) -> Option<ResolvedOrigin> {
+        let name = target.file_name()?.to_str()?.to_string();
+        let target_hash = match target_prefix {
+            Some(_) => None,
+            None => Some(file_sha256(target)?),
+        };
+        let mut scored: Vec<(&ModDir, u8)> = Vec::new();
+        for dir in mod_dirs {
+            let Some(path) = dir
+                .pbos
+                .iter()
+                .map(|pbo| &pbo.path)
+                .find(|path| path.file_name().and_then(|n| n.to_str()) == Some(name.as_str()))
+            else {
+                continue;
+            };
+            let score = match target_prefix {
+                Some(prefix) => u8::from(pbo_prefix(path).as_deref() == Some(prefix)) * 2,
+                None => u8::from(file_sha256(path) == target_hash),
+            };
+            if score > 0 {
+                scored.push((dir, score));
+            }
+        }
+        let best_score = scored.iter().map(|(_, score)| *score).max()?;
+        let best = scored
+            .into_iter()
+            .filter(|(_, score)| *score == best_score)
+            .min_by_key(|(dir, _)| dir.root_count)?
+            .0;
+        Some(ResolvedOrigin {
+            id: best.id.clone(),
+            prefix: target_prefix.map(str::to_string),
+            is_pack: best.root_count > 50,
+        })
     }
 
     #[test]
@@ -216,13 +328,13 @@ mod tests {
             ModDir {
                 id: "222".to_string(),
                 path: dir.join("222"),
-                pbos: find_pbos(&dir.join("222")),
+                pbos: cached(&dir.join("222")),
                 root_count: 50,
             },
             ModDir {
                 id: "111".to_string(),
                 path: dir.join("111"),
-                pbos: find_pbos(&dir.join("111")),
+                pbos: cached(&dir.join("111")),
                 root_count: 1,
             },
         ];
@@ -232,7 +344,7 @@ mod tests {
         fs::write(&target, content).unwrap();
 
         // Arbitration must pick the standalone mod (111) with fewer roots
-        let candidates = index.get("common.pbo").map(|v| v.as_slice()).unwrap_or(&[]);
+        let candidates = index.candidates("common.pbo");
         assert_eq!(
             resolve_pbo_from_index(&target, candidates, pbo_prefix(&target).as_deref())
                 .unwrap()
@@ -257,11 +369,11 @@ mod tests {
         let mod_dirs = vec![ModDir {
             id: "111".to_string(),
             path: dir.join("111"),
-            pbos: find_pbos(&dir.join("111")),
+            pbos: cached(&dir.join("111")),
             root_count: 1,
         }];
         let index = build_pbo_index(&mod_dirs);
-        let candidates = index.get("target.pbo").map(|v| v.as_slice()).unwrap_or(&[]);
+        let candidates = index.candidates("target.pbo");
         assert_eq!(
             resolve_pbo_from_index(&target, candidates, pbo_prefix(&target).as_deref()),
             None
@@ -296,13 +408,13 @@ mod tests {
             ModDir {
                 id: "222".to_string(),
                 path: dir.join("222"),
-                pbos: find_pbos(&dir.join("222")),
+                pbos: cached(&dir.join("222")),
                 root_count: 50,
             },
             ModDir {
                 id: "111".to_string(),
                 path: dir.join("111"),
-                pbos: find_pbos(&dir.join("111")),
+                pbos: cached(&dir.join("111")),
                 root_count: 1,
             },
         ];
@@ -311,11 +423,174 @@ mod tests {
         let target = dir.join("common.pbo");
         write_pbo(&target, "z\\ace\\addons\\common", b"version-a");
 
-        let candidates = index.get("common.pbo").map(|v| v.as_slice()).unwrap_or(&[]);
+        let candidates = index.candidates("common.pbo");
         let origin =
             resolve_pbo_from_index(&target, candidates, pbo_prefix(&target).as_deref()).unwrap();
         assert_eq!(origin.id, "111".to_string());
         assert!(!origin.is_pack);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cached_prefix_lookup_equals_a_full_rescan() {
+        // One name in several packs, as ace_common.pbo is in reality. The
+        // cached-prefix lookup must reach the same folder as the rescan
+        // that re-reads every header.
+        let dir = std::env::temp_dir().join("uksfta-origin-index");
+        fs::remove_dir_all(&dir).ok();
+        let standalone = dir.join("111").join("addons");
+        let pack_a = dir.join("222").join("addons");
+        let pack_b = dir.join("333").join("addons");
+        let targets = dir.join("targets");
+        for path in [&standalone, &pack_a, &pack_b, &targets] {
+            fs::create_dir_all(path).unwrap();
+        }
+
+        write_pbo(
+            &standalone.join("common.pbo"),
+            "z\\ace\\addons\\common",
+            b"a",
+        );
+        write_pbo(
+            &standalone.join("ace_common.pbo"),
+            "z\\ace\\addons\\main",
+            b"a",
+        );
+
+        write_pbo(
+            &pack_a.join("common.pbo"),
+            "z\\ace\\addons\\common",
+            b"pack-a",
+        );
+        write_pbo(
+            &pack_a.join("ace_common.pbo"),
+            "z\\ace\\addons\\main",
+            b"pack-a",
+        );
+        write_pbo(
+            &pack_a.join("loose.pbo"),
+            "z\\misc\\addons\\loose",
+            b"pack-a",
+        );
+
+        write_pbo(
+            &pack_b.join("common.pbo"),
+            "z\\other\\addons\\common",
+            b"pack-b",
+        );
+        // A second copy of the same name inside one folder: the first in
+        // walk order wins, in the index and in the scan alike.
+        fs::create_dir_all(pack_b.join("nested")).unwrap();
+        write_pbo(
+            &pack_b.join("nested").join("ace_common.pbo"),
+            "z\\ace\\addons\\main",
+            b"pack-b",
+        );
+
+        let mod_dirs = vec![
+            ModDir {
+                id: "222".to_string(),
+                path: dir.join("222"),
+                pbos: cached(&dir.join("222")),
+                root_count: 61,
+            },
+            ModDir {
+                id: "333".to_string(),
+                path: dir.join("333"),
+                pbos: cached(&dir.join("333")),
+                root_count: 61,
+            },
+            ModDir {
+                id: "111".to_string(),
+                path: dir.join("111"),
+                pbos: cached(&dir.join("111")),
+                root_count: 1,
+            },
+        ];
+        let index = build_pbo_index(&mod_dirs);
+
+        // Prefix targets, then a target with no prefix that only bytes
+        // can match, then a target that matches nothing. Each is probed
+        // with its prefix and again with no prefix, so the byte-hash
+        // fallback is compared too.
+        let ace_common = "z\\ace\\addons\\common";
+        let ace_main = "z\\ace\\addons\\main";
+        let cases: [(&str, Option<&str>, &[u8]); 5] = [
+            ("common.pbo", Some(ace_common), b"a"),
+            ("ace_common.pbo", Some(ace_main), b"a"),
+            ("loose.pbo", Some("z\\misc\\addons\\loose"), b"pack-a"),
+            ("absent.pbo", Some(ace_common), b"x"),
+            ("common.pbo", Some("z\\nowhere\\addons\\common"), b"x"),
+        ];
+        for (name, prefix, payload) in cases {
+            let target = targets.join(name);
+            write_pbo(&target, prefix.unwrap_or(ace_main), payload);
+            for probe in [prefix, None] {
+                assert_eq!(
+                    resolve_pbo_from_index(&target, index.candidates(name), probe),
+                    rescan(&mod_dirs, &target, probe),
+                    "{name} with prefix {probe:?}"
+                );
+            }
+        }
+
+        assert_eq!(
+            resolve_pbo_from_index(
+                &targets.join("common.pbo"),
+                index.candidates("common.pbo"),
+                Some(ace_common)
+            )
+            .map(|origin| origin.id),
+            Some("111".to_string())
+        );
+        assert_eq!(
+            resolve_pbo_from_index(
+                &targets.join("loose.pbo"),
+                index.candidates("loose.pbo"),
+                None
+            )
+            .map(|origin| (origin.id, origin.is_pack)),
+            Some(("222".to_string(), true))
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cached_prefix_matches_without_reading_the_file() {
+        // The prefix is stored at build time, so a match needs no file
+        // access. A path that does not exist proves the point: a rescan
+        // finds nothing, the cached lookup finds the folder.
+        let dir = std::env::temp_dir().join("uksfta-origin-cached");
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("111").join("addons").join("common.pbo");
+        let mod_dirs = vec![ModDir {
+            id: "111".to_string(),
+            path: dir.join("111"),
+            pbos: vec![CachedPbo {
+                path: missing,
+                prefix: Some("z\\ace\\addons\\common".to_string()),
+            }],
+            root_count: 1,
+        }];
+        let index = build_pbo_index(&mod_dirs);
+
+        let outcome = resolve_pbo_from_index(
+            &dir.join("common.pbo"),
+            index.candidates("common.pbo"),
+            Some("z\\ace\\addons\\common"),
+        );
+        assert_eq!(outcome.map(|origin| origin.id), Some("111".to_string()));
+        assert_eq!(
+            rescan(
+                &mod_dirs,
+                &dir.join("common.pbo"),
+                Some("z\\ace\\addons\\common")
+            ),
+            None
+        );
 
         fs::remove_dir_all(&dir).unwrap();
     }

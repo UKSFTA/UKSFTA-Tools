@@ -53,13 +53,16 @@ pub(crate) enum EvidenceKind {
 
 /// One harvested string.
 ///
-/// `token_df` is the document frequency of the string's rarest token.
-/// `pbo_df` is how many PBOs contain this phrase. `pbo` binds the string
-/// to its source so the planner can rank one PBO at a time.
+/// `key` is the normalised text: the phrase key, computed once when the
+/// string was harvested. `token_df` is the document frequency of the
+/// string's rarest token. `pbo_df` is how many PBOs contain this phrase.
+/// `pbo` binds the string to its source so the planner can rank one PBO
+/// at a time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EvidenceString {
     pub pbo: String,
     pub text: String,
+    pub key: String,
     pub kind: EvidenceKind,
     pub token_df: usize,
     pub pbo_df: usize,
@@ -92,6 +95,8 @@ fn label_key(pbo: &str, text: &str) -> String {
 struct RawString {
     pbo: String,
     text: String,
+    /// The normalised text: the phrase key and the dedupe identity.
+    key: String,
     kind: EvidenceKind,
     tokens: Vec<String>,
 }
@@ -152,19 +157,19 @@ impl PoolBuilder {
         self.docs += 1;
 
         let (strings, labels) = harvest_sources(&pbo, &content.sources, &mut self.truncated);
-        let mut seen_phrases = BTreeMap::new();
-        let mut seen_tokens = BTreeMap::new();
+        // Token document frequency counts PBOs, not strings, so a token
+        // seen once in this PBO is counted once.
+        let mut seen_tokens: BTreeSet<String> = BTreeSet::new();
 
         for item in strings {
-            let key = normalise(&item.text).text;
-            if key.is_empty() {
+            if item.key.is_empty() {
                 continue;
             }
-            if seen_phrases.insert(key.clone(), ()).is_none() {
-                *self.phrase_docs.entry(key).or_insert(0) += 1;
-            }
+            // Harvest keeps one entry per key, so each item is a distinct
+            // phrase and needs no per-PBO dedupe here.
+            *self.phrase_docs.entry(item.key.clone()).or_insert(0) += 1;
             for token in &item.tokens {
-                if seen_tokens.insert(token.clone(), ()).is_none() {
+                if seen_tokens.insert(token.clone()) {
                     if let Some(count) = self.token_docs.get_mut(token) {
                         *count += 1;
                     } else if self.token_docs.len() < MAX_POOL_TOKENS {
@@ -195,6 +200,9 @@ impl PoolBuilder {
     }
 
     /// Score every harvested string with the learned frequencies.
+    ///
+    /// The phrase key was computed when the string was harvested, so the
+    /// score pass reads it rather than normalising the text again.
     pub(crate) fn finish(self) -> EvidencePool {
         let Self {
             harvested,
@@ -204,41 +212,27 @@ impl PoolBuilder {
             truncated,
         } = self;
 
-        let strings: Vec<EvidenceString> = harvested
-            .into_iter()
-            .map(|item| {
-                let key = normalise(&item.text).text;
-                let pbo_df = phrase_docs.get(&key).copied().unwrap_or(1);
-                let token_df = item
-                    .tokens
-                    .iter()
-                    .filter_map(|token| token_docs.get(token))
-                    .copied()
-                    .min()
-                    .unwrap_or(pbo_df);
-                EvidenceString {
-                    pbo: item.pbo,
-                    text: item.text,
-                    kind: item.kind,
-                    token_df,
-                    pbo_df,
-                }
-            })
-            .collect();
-
-        let corpus = CorpusStats {
-            df: token_docs.into_iter().collect(),
-            docs,
-        };
-        let mut scored: Vec<(f64, EvidenceString)> = strings
-            .into_iter()
-            .map(|item| {
-                let key = normalise(&item.text).text;
-                let is_label = corpus.df.contains_key(&label_key(&item.pbo, &key));
-                let score = evidence_score(&item, corpus.docs, is_label, false);
-                (score, item)
-            })
-            .collect();
+        let mut scored: Vec<(f64, EvidenceString)> = Vec::with_capacity(harvested.len());
+        for item in harvested {
+            let pbo_df = phrase_docs.get(&item.key).copied().unwrap_or(1);
+            let token_df = item
+                .tokens
+                .iter()
+                .filter_map(|token| token_docs.get(token))
+                .copied()
+                .min()
+                .unwrap_or(pbo_df);
+            let is_label = token_docs.contains_key(&label_key(&item.pbo, &item.key));
+            let evidence = EvidenceString {
+                pbo: item.pbo,
+                text: item.text,
+                key: item.key,
+                kind: item.kind,
+                token_df,
+                pbo_df,
+            };
+            scored.push((evidence_score(&evidence, docs, is_label, false), evidence));
+        }
         scored.sort_by(|(a_score, a), (b_score, b)| {
             a.pbo
                 .cmp(&b.pbo)
@@ -248,7 +242,10 @@ impl PoolBuilder {
 
         EvidencePool {
             strings,
-            corpus,
+            corpus: CorpusStats {
+                df: token_docs.into_iter().collect(),
+                docs,
+            },
             truncated,
         }
     }
@@ -307,15 +304,15 @@ fn rank_items<'a>(
     let anchors = anchor_tokens(anchors);
     let mut scored: Vec<(f64, &EvidenceString)> = items
         .map(|item| {
-            let normalised = normalise(&item.text);
             let is_label = pool
                 .corpus
                 .df
-                .contains_key(&label_key(&item.pbo, &normalised.text));
-            let anchored = normalised
-                .tokens
-                .iter()
-                .any(|token| anchors.contains(token));
+                .contains_key(&label_key(&item.pbo, &item.key));
+            let anchored = !anchors.is_empty()
+                && normalise(&item.text)
+                    .tokens
+                    .iter()
+                    .any(|token| anchors.contains(token));
             (
                 evidence_score(item, pool.corpus.docs, is_label, anchored),
                 item,
@@ -560,10 +557,11 @@ fn insert_candidate(
         }
         None => {
             unique.insert(
-                key,
+                key.clone(),
                 RawString {
                     pbo: pbo.to_string(),
                     text,
+                    key,
                     kind,
                     tokens: normalised.tokens,
                 },
@@ -958,10 +956,30 @@ mod tests {
     }
 
     #[test]
+    fn evidence_counts_token_documents_once_per_pbo() {
+        // The same token in several strings of one PBO is one document,
+        // not one per string: df measures how many PBOs hold the token.
+        let dir = addons_dir("uksfta-evidence-token-df");
+        write_pbo(
+            &dir.join("one.pbo"),
+            b"[\"Diving Mask Alpha\", \"Diving Mask Beta\", \"Diving Mask Gamma\"]",
+        );
+        write_pbo(&dir.join("two.pbo"), b"[\"Diving Mask Delta\"]");
+
+        let pool = build_evidence_pool(&dir);
+
+        assert_eq!(pool.corpus.df.get("diving"), Some(&2), "two PBOs hold it");
+        assert_eq!(pool.corpus.df.get("mask"), Some(&2));
+        assert_eq!(pool.corpus.df.get("alpha"), Some(&1));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn evidence_counts_phrase_documents_once_per_pbo() {
         let item = |pbo: &str, pbo_df: usize| EvidenceString {
             pbo: pbo.to_string(),
             text: "Diving Mask".to_string(),
+            key: normalise("Diving Mask").text,
             kind: EvidenceKind::Quoted,
             token_df: 1,
             pbo_df,
@@ -982,6 +1000,7 @@ mod tests {
         let string = |pbo: &str, text: &str, kind| EvidenceString {
             pbo: pbo.to_string(),
             text: text.to_string(),
+            key: normalise(text).text,
             kind,
             token_df: 1,
             pbo_df: 1,
@@ -1023,6 +1042,7 @@ mod tests {
                 EvidenceString {
                     pbo: "a".to_string(),
                     text: "Same Title".to_string(),
+                    key: normalise("Same Title").text,
                     kind: EvidenceKind::Assignment,
                     token_df: 1,
                     pbo_df: 1,
@@ -1030,6 +1050,7 @@ mod tests {
                 EvidenceString {
                     pbo: "a".to_string(),
                     text: "same title".to_string(),
+                    key: normalise("same title").text,
                     kind: EvidenceKind::Bare,
                     token_df: 1,
                     pbo_df: 1,
