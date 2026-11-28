@@ -168,6 +168,9 @@ enum Commands {
         /// Print the resolution report; with --online, resolve first
         #[arg(long)]
         report: bool,
+        /// Add the keyed Workshop search to the candidate sources (needs STEAM_API_KEY)
+        #[arg(long, requires = "online")]
+        steam_search: bool,
     },
     /// Verify the private modpack on a game server over SFTP
     ///
@@ -460,7 +463,8 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             all,
             online,
             report,
-        } => investigate(all, online, report)?,
+            steam_search,
+        } => investigate(all, online, report, steam_search)?,
         Commands::Server {
             config,
             destination,

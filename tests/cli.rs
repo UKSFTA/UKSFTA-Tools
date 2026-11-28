@@ -317,3 +317,53 @@ fn deps_names_a_missing_build_directory() {
         .code(2)
         .stderr(predicate::str::contains(missing.display().to_string()));
 }
+
+/// A command with the Steam root isolated, so no test can find a real
+/// Workshop cache and spend a request.
+fn isolated_steam(dir: &Path) -> Command {
+    let mut command = uksfta(dir);
+    command.env("HOME", dir).env_remove("STEAM_API_KEY");
+    command
+}
+
+#[test]
+fn steam_search_without_a_key_exits_2_before_any_work() {
+    let dir = TempDir::new().expect("temp dir");
+
+    isolated_steam(dir.path())
+        .args(["investigate", "--online", "--steam-search"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("STEAM_API_KEY"));
+}
+
+#[test]
+fn steam_search_requires_the_online_flag() {
+    let dir = TempDir::new().expect("temp dir");
+
+    isolated_steam(dir.path())
+        .args(["investigate", "--steam-search"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--online"));
+}
+
+#[test]
+fn a_steam_search_run_never_prints_the_key() {
+    const KEY: &str = "SENTINEL0123456789abcdef";
+    let dir = TempDir::new().expect("temp dir");
+
+    let assert = isolated_steam(dir.path())
+        .args(["investigate", "--online", "--steam-search"])
+        .env("STEAM_API_KEY", KEY)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("Workshop cache not found"));
+
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stdout.contains(KEY));
+    assert!(!stderr.contains(KEY));
+}

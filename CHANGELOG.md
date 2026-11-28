@@ -9,6 +9,17 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `investigate --online --steam-search` adds Steam's keyed
+  `IPublishedFileService/QueryFiles` search as an extra candidate source.
+  It needs `STEAM_API_KEY` in the environment. One request per planned
+  query returns up to 50 items, and the results merge with the browse
+  results, de-duplicated and best rank first. A keyed hit is still a
+  candidate: the existing evidence rules decide whether it confirms. The
+  run lists the queries, the ranked ids and titles, and the confirmed
+  identity per PBO, or states that none confirmed. The search downloads no
+  item and fetches no manifest. Without the key the command exits with code
+  2 and never falls back, and a refused key names `STEAM_API_KEY` and stops
+  the run. The key stays in memory.
 - The native transport uses a 16 MiB receive window, a 261120-byte packet
   cap and a request buffer sized from `--requests`. The native write block
   is 261120 bytes regardless of `--buffer`, which keeps its default for the

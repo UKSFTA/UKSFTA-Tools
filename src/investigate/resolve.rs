@@ -22,8 +22,9 @@ use super::author::{author_matches, fetch_item_page, has_usable_author, ItemPage
 use super::browse::{search_browse_page, BrowsePage, BrowseResult, SearchError};
 use super::cluster::{cluster_by_identity, Cluster};
 use super::evidence::EvidencePool;
-use super::http::{Http, RateLimiter};
+use super::http::{Endpoint, Http, RateLimiter};
 use super::identity::{IdentityEvidence, PhraseSource};
+use super::keyed::{merge_ranked, KeyedError, KeyedSearch};
 use super::normalise::normalise;
 use super::plan::{
     is_generic_word, is_structural_stop, plan_queries, CorpusStats, PlannedQuery, PlannerContext,
@@ -88,6 +89,24 @@ pub(crate) struct Progress {
 /// The sink a caller installs to receive each [`Progress`] step.
 type ProgressSink<'a> = Box<dyn FnMut(&Progress) + 'a>;
 
+/// An optional content index that maps a PBO fingerprint to the Workshop
+/// items its manifest names. The manifest index lands separately; until
+/// then the resolver holds no index, and a candidate confirms only through
+/// the evidence rules.
+pub(crate) trait ContentIndex {
+    fn confirms(&self, fingerprint: &str, item: &str) -> bool;
+}
+
+/// The keyed search's view of one PBO: the queries sent and the ranked
+/// candidates they returned. It is a report only; the decision is in
+/// [`PboResolution::resolution`].
+#[derive(Debug, Clone)]
+pub(crate) struct KeyedReport {
+    pub pbo: String,
+    pub queries: Vec<String>,
+    pub ranked: Vec<(String, String)>,
+}
+
 /// Everything the tool decided about one PBO.
 #[derive(Debug, Clone)]
 pub(crate) struct PboResolution {
@@ -142,6 +161,19 @@ pub(crate) struct ResolveContext<'a> {
     page_memo: HashMap<String, Option<ItemPage>>,
     /// Called once before the cluster loop and once per resolved cluster.
     progress: Option<ProgressSink<'a>>,
+    /// The opt-in keyed search. Without it this resolver behaves exactly
+    /// as it did before the flag existed.
+    keyed: Option<&'a dyn KeyedSearch>,
+    /// Query text to its keyed results, so a shared query costs one call.
+    keyed_pages: HashMap<String, Vec<BrowseResult>>,
+    /// Query texts already sent to the keyed source.
+    keyed_tried: HashSet<String>,
+    /// A refused key. It stops the run once the caller reads it.
+    keyed_failure: Option<KeyedError>,
+    /// The keyed ranking per PBO, for the search report.
+    keyed_report: BTreeMap<String, KeyedReport>,
+    /// The optional content-hash index. No implementation exists yet.
+    pub(crate) content_index: Option<&'a dyn ContentIndex>,
 }
 
 impl<'a> ResolveContext<'a> {
@@ -160,7 +192,34 @@ impl<'a> ResolveContext<'a> {
             store: None,
             page_memo: HashMap::new(),
             progress: None,
+            keyed: None,
+            keyed_pages: HashMap::new(),
+            keyed_tried: HashSet::new(),
+            keyed_failure: None,
+            keyed_report: BTreeMap::new(),
+            content_index: None,
         }
+    }
+
+    /// Add the keyed search as a candidate source. Without this call the
+    /// resolver sends only the browse request it always sent.
+    pub(crate) fn use_keyed_search(&mut self, source: &'a dyn KeyedSearch) {
+        self.keyed = Some(source);
+    }
+
+    /// The refused-key error, if the keyed source rejected the key.
+    pub(crate) fn keyed_failure(&self) -> Option<&KeyedError> {
+        self.keyed_failure.as_ref()
+    }
+
+    /// The keyed ranking per PBO, sorted by PBO name. Empty without the
+    /// keyed source.
+    pub(crate) fn keyed_report(&self) -> Vec<KeyedReport> {
+        self.keyed_report.values().cloned().collect()
+    }
+
+    fn keyed_enabled(&self) -> bool {
+        self.keyed.is_some()
     }
 
     /// Send progress to `sink`. Without a sink a run reports nothing.
@@ -196,6 +255,31 @@ impl<'a> ResolveContext<'a> {
     /// The creator name of one item, from the memo or from its page.
     fn item_author(&mut self, id: &str) -> Option<String> {
         self.item_page(id).and_then(|page| page.author.clone())
+    }
+
+    /// The keyed results for one query, memoised by text. A refused key is
+    /// recorded once and stops every later request, so a bad key costs one
+    /// call, not one per PBO.
+    fn keyed_page(&mut self, query: &str) -> Option<Vec<BrowseResult>> {
+        let source = self.keyed?;
+        if self.keyed_failure.is_some() {
+            return None;
+        }
+        if !self.keyed_tried.contains(query) {
+            self.limiter.wait(Endpoint::QueryFiles);
+            match source.query(query) {
+                Ok(page) => {
+                    self.keyed_pages.insert(query.to_string(), page.results);
+                }
+                Err(error) if error.is_fatal() => self.keyed_failure = Some(error),
+                Err(error) => {
+                    eprintln!("  steam search failed: \"{query}\" ({})", error.message());
+                    self.keyed_pages.insert(query.to_string(), Vec::new());
+                }
+            }
+            self.keyed_tried.insert(query.to_string());
+        }
+        self.keyed_pages.get(query).cloned()
     }
 
     /// Every distinct candidate this run saw, sorted by id. Feeds the item
@@ -365,6 +449,8 @@ pub(crate) fn resolve_cluster(cluster: &Cluster, ctx: &mut ResolveContext) -> Ve
         vec![BTreeMap::new(); resolved.len()];
     let mut ties: Vec<Option<TieContext>> = (0..resolved.len()).map(|_| None).collect();
     let mut best: Option<BestPage> = None;
+    let mut keyed_pages: Vec<BrowsePage> = Vec::new();
+    let mut keyed_queries: Vec<String> = Vec::new();
 
     for query in plan.queries.iter().take(MAX_QUERIES) {
         let page = match memoised(ctx, &query.text) {
@@ -380,12 +466,26 @@ pub(crate) fn resolve_cluster(cluster: &Cluster, ctx: &mut ResolveContext) -> Ve
                     });
                     item.resolution = failed(status, &query.text);
                 }
+                if ctx.keyed_enabled() {
+                    keyed_queries.push(query.text.clone());
+                }
                 if status == ResolutionStatus::RateLimited {
                     break;
                 }
                 continue;
             }
         };
+
+        // The memo already holds this query's keyed results, so the report
+        // costs no second request.
+        if ctx.keyed_enabled() {
+            keyed_queries.push(query.text.clone());
+            if let Some(results) = ctx.keyed_page(&query.text) {
+                if !results.is_empty() {
+                    keyed_pages.push(keyed_only_page(results));
+                }
+            }
+        }
 
         let phrase = normalise(&query.text);
         let query_score = score_query(&query.text, Some(page.total_count), ctx.corpus);
@@ -488,6 +588,27 @@ pub(crate) fn resolve_cluster(cluster: &Cluster, ctx: &mut ResolveContext) -> Ve
 
     for (item, seen) in resolved.iter_mut().zip(candidate_maps) {
         item.candidates = top_candidates(seen);
+    }
+
+    if let Some(index) = ctx.content_index {
+        apply_hash_index(index, &mut resolved);
+    }
+
+    if !keyed_queries.is_empty() {
+        let ranked: Vec<(String, String)> = merge_ranked(&keyed_pages)
+            .into_iter()
+            .map(|item| (item.id, item.title))
+            .collect();
+        for item in &resolved {
+            ctx.keyed_report.insert(
+                item.pbo.clone(),
+                KeyedReport {
+                    pbo: item.pbo.clone(),
+                    queries: keyed_queries.clone(),
+                    ranked: ranked.clone(),
+                },
+            );
+        }
     }
 
     resolved
@@ -979,6 +1100,36 @@ fn top_candidates(seen: BTreeMap<String, CandidateRecord>) -> Vec<CandidateRecor
     top
 }
 
+/// Confirm the first recorded candidate the content index vouches for.
+/// The index decides on a hash, so no title gate applies; the evidence
+/// record still keeps its best query and score.
+fn apply_hash_index(index: &dyn ContentIndex, resolved: &mut [PboResolution]) {
+    for item in resolved.iter_mut() {
+        if item.resolution.status == ResolutionStatus::Confirmed {
+            continue;
+        }
+        let vouched = item
+            .candidates
+            .iter()
+            .find(|candidate| index.confirms(&item.evidence.fingerprint, &candidate.id))
+            .map(|candidate| (candidate.id.clone(), candidate.title.clone(), candidate.m));
+        let Some((id, title, m)) = vouched else {
+            continue;
+        };
+        item.resolution = Resolution {
+            status: ResolutionStatus::Confirmed,
+            id: Some(id),
+            title: Some(title),
+            m,
+            q: item.resolution.q,
+            c: 1.0,
+            margin: 0.0,
+            query: item.resolution.query.clone(),
+            matched_by: vec!["manifest_hash".to_string()],
+        };
+    }
+}
+
 /// The one candidate that two or more distinct queries agreed on, unless a
 /// second candidate has the same claim. Two agreeing names are still a tie.
 fn unique_agreement(seen: &BTreeMap<String, Agreement>) -> Option<(&str, &Agreement)> {
@@ -1111,11 +1262,16 @@ fn memoised_page(
         return cached.outcome();
     }
 
-    let mut outcome = fetch_outcome(ctx, query, page);
+    let mut outcome = if page == 1 {
+        first_page(ctx, query)
+    } else {
+        fetch_outcome(ctx, query, page)
+    };
     // Throttle guard: Steam sometimes answers a search with an empty page
     // while it throttles, and that looks like a real absence. A second
     // paced request tells the two apart. Only the first page is retried,
-    // and only once.
+    // and only once. Keyed results already merged into this page keep it
+    // from looking empty.
     if page == 1 && outcome.as_ref().is_ok_and(|held| held.total_count == 0) {
         ctx.limiter.pause(Duration::from_secs(30));
         outcome = fetch_outcome(ctx, query, page);
@@ -1150,6 +1306,42 @@ fn fetch_outcome(
                 _ => Err(ResolutionStatus::Unresolved),
             }
         }
+    }
+}
+
+/// Page one of one search: the browse page with the keyed results merged
+/// in, or the keyed page alone when the browse page failed.
+fn first_page(ctx: &mut ResolveContext, query: &str) -> Result<BrowsePage, ResolutionStatus> {
+    let browse = fetch_outcome(ctx, query, 1);
+    let keyed = ctx.keyed_page(query).unwrap_or_default();
+    match browse {
+        Ok(page) if keyed.is_empty() => Ok(page),
+        Ok(page) => Ok(merge_page(page, &keyed)),
+        Err(_status) if !keyed.is_empty() => Ok(keyed_only_page(keyed)),
+        Err(status) => Err(status),
+    }
+}
+
+/// Append the keyed results that the browse page did not already hold.
+/// The browse copy of an item is kept, because it carries the description
+/// and tags that the keyed response leaves out.
+fn merge_page(mut page: BrowsePage, keyed: &[BrowseResult]) -> BrowsePage {
+    let mut seen: HashSet<String> = page.results.iter().map(|item| item.id.clone()).collect();
+    for item in keyed {
+        if seen.insert(item.id.clone()) {
+            page.results.push(item.clone());
+        }
+    }
+    page.total_count = page.total_count.max(page.results.len() as u64);
+    page
+}
+
+fn keyed_only_page(results: Vec<BrowseResult>) -> BrowsePage {
+    BrowsePage {
+        current_page: 1,
+        total_pages: 1,
+        total_count: results.len() as u64,
+        results,
     }
 }
 
@@ -2439,6 +2631,249 @@ mod tests {
         );
 
         assert_eq!(resolved.len(), 1);
+    }
+    /// A keyed source that answers from a table, so a test never opens a
+    /// socket and records every query it was sent.
+    struct KeyedStub {
+        pages: BTreeMap<String, Result<BrowsePage, KeyedError>>,
+        calls: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl KeyedStub {
+        fn new(pages: Vec<(&str, Result<BrowsePage, KeyedError>)>) -> Self {
+            Self {
+                pages: pages
+                    .into_iter()
+                    .map(|(text, page)| (text.to_string(), page))
+                    .collect(),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl KeyedSearch for KeyedStub {
+        fn query(&self, text: &str) -> Result<BrowsePage, KeyedError> {
+            self.calls.borrow_mut().push(text.to_string());
+            self.pages
+                .get(text)
+                .cloned()
+                .unwrap_or_else(|| Ok(BrowsePage::default()))
+        }
+    }
+
+    fn keyed_page(ids: &[(&str, &str)]) -> BrowsePage {
+        BrowsePage {
+            current_page: 1,
+            total_pages: 1,
+            total_count: ids.len() as u64,
+            results: ids
+                .iter()
+                .map(|(id, title)| BrowseResult {
+                    id: id.to_string(),
+                    title: title.to_string(),
+                    short_description: String::new(),
+                    tags: Vec::new(),
+                    subscriptions: 10,
+                    lifetime_subscriptions: 10,
+                    views: 10,
+                    favorited: 0,
+                    time_created: 0,
+                    time_updated: 0,
+                    file_size: String::new(),
+                    num_children: 0,
+                    children: Vec::new(),
+                    star_rating: 0.0,
+                    total_votes: 0,
+                    creator: "ADE Team".to_string(),
+                    file_type: 0,
+                })
+                .collect(),
+        }
+    }
+
+    fn resolve_with_keyed(keyed: &KeyedStub) -> Vec<PboResolution> {
+        let http = FixtureHttp::new(vec![Ok(page_html(&[], 0))]);
+        let mut limiter = RateLimiter::new(no_sleep);
+        let corpus = CorpusStats::default();
+        let mut ctx = ResolveContext::new(&http, &mut limiter, &corpus, None);
+        ctx.use_keyed_search(keyed);
+        resolve_all(
+            vec![evidence(
+                "ade_core.pbo",
+                "ADE diving",
+                PhraseSource::CfgModsName,
+            )],
+            &mut ctx,
+        )
+    }
+
+    #[test]
+    fn keyed_search_supplies_the_confirming_candidate() {
+        let keyed = KeyedStub::new(vec![(
+            "ADE diving",
+            Ok(keyed_page(&[("1", "ADE - Advanced Diving Environment")])),
+        )]);
+
+        let resolved = resolve_with_keyed(&keyed);
+
+        assert_eq!(resolved[0].resolution.status, ResolutionStatus::Confirmed);
+        assert_eq!(resolved[0].resolution.id.as_deref(), Some("1"));
+        assert_eq!(keyed.calls(), ["ADE diving"]);
+    }
+
+    #[test]
+    fn a_keyed_top_hit_is_not_promoted_without_evidence() {
+        let keyed = KeyedStub::new(vec![(
+            "ADE diving",
+            Ok(keyed_page(&[("9", "Unrelated Terrain Pack")])),
+        )]);
+
+        let resolved = resolve_with_keyed(&keyed);
+
+        assert_ne!(resolved[0].resolution.status, ResolutionStatus::Confirmed);
+        assert_eq!(resolved[0].resolution.id, None);
+    }
+
+    #[test]
+    fn keyed_report_states_an_empty_search() {
+        let http = FixtureHttp::new(vec![Ok(page_html(&[], 0))]);
+        let keyed = KeyedStub::new(vec![("ADE diving", Ok(BrowsePage::default()))]);
+        let mut limiter = RateLimiter::new(no_sleep);
+        let corpus = CorpusStats::default();
+        let mut ctx = ResolveContext::new(&http, &mut limiter, &corpus, None);
+        ctx.use_keyed_search(&keyed);
+
+        resolve_all(
+            vec![evidence(
+                "ade_core.pbo",
+                "ADE diving",
+                PhraseSource::CfgModsName,
+            )],
+            &mut ctx,
+        );
+        let report = ctx.keyed_report();
+
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].queries, ["ADE diving"]);
+        assert!(report[0].ranked.is_empty());
+    }
+
+    #[test]
+    fn keyed_report_lists_the_queries_and_the_ranking() {
+        let http = FixtureHttp::new(vec![Ok(page_html(&[], 0))]);
+        let keyed = KeyedStub::new(vec![(
+            "ADE diving",
+            Ok(keyed_page(&[("1", "ADE - Advanced Diving Environment")])),
+        )]);
+        let mut limiter = RateLimiter::new(no_sleep);
+        let corpus = CorpusStats::default();
+        let mut ctx = ResolveContext::new(&http, &mut limiter, &corpus, None);
+        ctx.use_keyed_search(&keyed);
+
+        resolve_all(
+            vec![evidence(
+                "ade_core.pbo",
+                "ADE diving",
+                PhraseSource::CfgModsName,
+            )],
+            &mut ctx,
+        );
+        let report = ctx.keyed_report();
+
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].pbo, "ade_core.pbo");
+        assert_eq!(report[0].queries, ["ADE diving"]);
+        assert_eq!(
+            report[0].ranked[0],
+            (
+                "1".to_string(),
+                "ADE - Advanced Diving Environment".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn a_refused_key_is_fatal_and_stops_further_keyed_requests() {
+        let http = FixtureHttp::new(vec![Ok(page_html(&[], 0))]);
+        let keyed = KeyedStub::new(vec![("ADE diving", Err(KeyedError::Rejected))]);
+        let mut limiter = RateLimiter::new(no_sleep);
+        let corpus = CorpusStats::default();
+        let mut ctx = ResolveContext::new(&http, &mut limiter, &corpus, None);
+        ctx.use_keyed_search(&keyed);
+
+        resolve_all(
+            vec![evidence(
+                "ade_core.pbo",
+                "ADE diving",
+                PhraseSource::CfgModsName,
+            )],
+            &mut ctx,
+        );
+
+        assert!(ctx.keyed_failure().is_some());
+        assert_eq!(keyed.calls(), ["ADE diving"]);
+    }
+
+    #[test]
+    fn a_keyed_result_already_on_the_browse_page_is_not_repeated() {
+        let page = BrowsePage {
+            current_page: 1,
+            total_pages: 1,
+            total_count: 1,
+            results: keyed_page(&[("1", "ADE - Advanced Diving Environment")]).results,
+        };
+
+        let merged = merge_page(
+            page,
+            &keyed_page(&[("1", "ADE - Advanced Diving Environment")]).results,
+        );
+
+        assert_eq!(merged.results.len(), 1);
+    }
+
+    struct HashIndex {
+        ids: Vec<&'static str>,
+    }
+
+    impl ContentIndex for HashIndex {
+        fn confirms(&self, _fingerprint: &str, item: &str) -> bool {
+            self.ids.contains(&item)
+        }
+    }
+
+    #[test]
+    fn a_content_hash_confirms_a_candidate_the_evidence_does_not() {
+        let http = FixtureHttp::new(vec![Ok(page_html(&[], 0))]);
+        let keyed = KeyedStub::new(vec![(
+            "ADE diving",
+            Ok(keyed_page(&[
+                ("9", "Unrelated Terrain Pack"),
+                ("2", "Repacked Addon Bundle"),
+            ])),
+        )]);
+        let index = HashIndex { ids: vec!["2"] };
+        let mut limiter = RateLimiter::new(no_sleep);
+        let corpus = CorpusStats::default();
+        let mut ctx = ResolveContext::new(&http, &mut limiter, &corpus, None);
+        ctx.use_keyed_search(&keyed);
+        ctx.content_index = Some(&index);
+
+        let resolved = resolve_all(
+            vec![evidence(
+                "ade_core.pbo",
+                "ADE diving",
+                PhraseSource::CfgModsName,
+            )],
+            &mut ctx,
+        );
+
+        assert_eq!(resolved[0].resolution.status, ResolutionStatus::Confirmed);
+        assert_eq!(resolved[0].resolution.id.as_deref(), Some("2"));
+        assert_eq!(resolved[0].resolution.matched_by, ["manifest_hash"]);
     }
 }
 

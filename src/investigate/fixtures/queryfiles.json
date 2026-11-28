@@ -1,0 +1,5 @@
+{"response":{"total":412,"publishedfiledetails":[
+{"publishedfileid":"450814997","result":1,"creator":"ACE Team","title":"CBA_A3","subscriptions":123456,"lifetime_subscriptions":234567,"views":900000,"favorited":4567,"time_created":1500000000,"time_updated":1700000000,"file_size":"12345678","file_type":0,"tags":[{"tag":"Mod"},{"tag":"Arma 3"}]},
+{"publishedfileid":"1234567890","result":1,"creator":"ADE Team","title":"ADE - Advanced Diving Environment","subscriptions":5432,"lifetime_subscriptions":6543,"views":20000,"favorited":300,"time_created":1600000000,"time_updated":1700000000,"file_size":"2345678","file_type":0,"tags":[{"tag":"Mod"}]},
+{"publishedfileid":"987654321","result":1,"creator":"Someone","title":"Unrelated Terrain Pack","subscriptions":10,"lifetime_subscriptions":10,"views":100,"favorited":1,"time_created":1600000000,"time_updated":1600000000,"file_size":"999","file_type":0,"tags":[]}
+]}}
