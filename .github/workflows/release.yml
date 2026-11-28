@@ -100,12 +100,14 @@ jobs:
 
       - name: Normalise Asset Names
         run: |
-          # Each artifact keeps its own directory, so the four binaries do not
-          # collide before they are renamed for the release assets.
-          mv dist/uksfta-linux/uksfta dist/uksfta
-          mv dist/uksfta-linux-arm64/uksfta dist/uksfta-linux-arm64
-          mv dist/uksfta-macos-arm64/uksfta dist/uksfta-macos-arm64
-          mv dist/uksfta-windows.exe/uksfta.exe dist/uksfta.exe
+          # Each artifact keeps its own directory. Stage the binaries under
+          # their asset names in a separate directory, because the arm64
+          # asset name is also the name of its artifact directory.
+          mkdir -p dist/assets
+          cp dist/uksfta-linux/uksfta dist/assets/uksfta
+          cp dist/uksfta-linux-arm64/uksfta dist/assets/uksfta-linux-arm64
+          cp dist/uksfta-macos-arm64/uksfta dist/assets/uksfta-macos-arm64
+          cp dist/uksfta-windows.exe/uksfta.exe dist/assets/uksfta.exe
           rm -rf dist/uksfta-linux dist/uksfta-linux-arm64 dist/uksfta-macos-arm64 dist/uksfta-windows.exe
 
       - name: Install git-cliff
@@ -124,7 +126,7 @@ jobs:
 
       - name: Generate Checksums
         run: |
-          cd dist
+          cd dist/assets
           sha256sum ./* > SHA256SUMS
           cat SHA256SUMS
 
@@ -136,7 +138,7 @@ jobs:
           # Keyless signing through the GitHub OIDC token. One bundle per
           # binary, named after the binary, so an installer can verify the
           # exact file it downloaded.
-          for asset in dist/uksfta dist/uksfta-linux-arm64 dist/uksfta-macos-arm64 dist/uksfta.exe; do
+          for asset in dist/assets/uksfta dist/assets/uksfta-linux-arm64 dist/assets/uksfta-macos-arm64 dist/assets/uksfta.exe; do
             if [ -f "$asset" ]; then
               cosign sign-blob --yes --bundle "$asset.sigstore.json" "$asset"
             fi
@@ -146,12 +148,12 @@ jobs:
         run: |
           # The one-liner installers are served from the release assets, so
           # copy them into the upload directory alongside the binaries.
-          cp install.ps1 install.sh dist/
+          cp install.ps1 install.sh dist/assets/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/*
+          files: dist/assets/*
           body_path: ${{ env.BODY_PATH }}
           draft: false
           prerelease: false
