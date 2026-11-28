@@ -959,9 +959,9 @@ A value of 0 makes one attempt. The wait is 2 seconds after the first attempt,
 then 4 seconds. Each attempt prints the attempt number, the file count, the
 attempted bytes, the elapsed time and the rate in MB/s.
 
-`--jobs N` uploads N files at the same time. The default is 1, which is a single
-batch, and the maximum is 8. Each job runs in its own `sftp` process, so parallel
-uploads need non-interactive authentication.
+`--jobs N` uploads N files at the same time. The default is one per core, up to
+8, and the maximum is 8. A cap of 1 is a single batch. Each job runs in its own
+`sftp` process, so parallel uploads need non-interactive authentication.
 
 Use an agent or an identity file. A password prompt cannot serve several
 workers.
@@ -976,7 +976,7 @@ the workers by size.
 An interactive upload shows one total bar, one row per planned file, and the
 per-connection rows that the segmented file expands into. The rows read
 `waiting`, `uploading` and `done`. The view is on by default when the output is a
-terminal and `--jobs` is 1.
+terminal and one worker runs.
 
 Use `--no-progress` to hide it. Use `--progress` when you redirect the output: it
 prints one plain line every five seconds, with no escape codes.
@@ -1268,7 +1268,7 @@ with `--password-prompt`.
 | Flag | Range | Default | Effect |
 | --- | --- | --- | --- |
 | `--native-whole` | on or off | off | Send every file over the native whole-file path. |
-| `--jobs N` | 1 to 8 | 1 | The connections. One file per connection at a time. |
+| `--jobs N` | 1 to 8 | one per core, at most 8 | The connections. One file per connection at a time. |
 | `--buffer BYTES` | 4096 to 261120 | 261120 | The write size. The path uses the larger of this value and 261120. |
 | `--requests N` | 1 to 256 | 64 | The window: the writes in flight per worker, before the worker split. |
 | `--preallocate` | on or off | on | Set the temp file to its full length before the first packet. |
@@ -1365,6 +1365,24 @@ figure is the read-back the transfer performs.
 On the real server link the limit is the link. One stream gives 1.68 MB/s
 and two streams give 1.80 MB/s, so the larger block and the extra
 connections change little there. They help a fast or high-latency link.
+
+##### Two cores
+
+A container with two client cores, two server cores, a 2.5 GiB pack of eight
+PBOs and a loopback link, three runs each, page cache evicted. The client
+container recorded its own CPU time:
+
+| `--jobs` | Wall, median | Client CPU |
+| --- | --- | --- |
+| 1 | 11.4 s | 13.2 s |
+| 2 | 7.9 s | 13.6 s |
+| 4 | 8.0 s | 14.1 s |
+| 8 | 8.4 s | 13.8 s |
+
+One stream costs 44 percent more wall time for the same CPU, because the
+hash waits behind the send. Past two workers the wall time stops falling and
+the CPU rises, so the default is one worker per core. A larger
+`--buffer`/`--requests` changed nothing on two cores.
 
 ##### Password prompt
 

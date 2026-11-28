@@ -225,9 +225,9 @@ enum Commands {
         /// Retry an upload this many times (0 means one attempt)
         #[arg(long, default_value_t = 2)]
         retries: u8,
-        /// Upload this many files in parallel (1 to 8)
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=8))]
-        jobs: u8,
+        /// Upload this many files in parallel (1 to 8, default one per core)
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=8))]
+        jobs: Option<u8>,
         /// sftp transfer buffer in bytes (4096 to 261120)
         #[arg(long, value_name = "BYTES")]
         buffer: Option<u32>,

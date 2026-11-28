@@ -496,10 +496,10 @@ impl DoctorReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::native::probe::{Decision, Probe};
+    use crate::server::native::probe::{Decision, Options, Probe};
 
     fn decision(whole: f64) -> Decision {
-        Decision::decide(
+        Decision::decide_with(
             Probe {
                 system_mbps: 100.0,
                 system_jobs: 4,
@@ -509,6 +509,10 @@ mod tests {
                 read_mbps: 1.0,
             },
             1_000_000_000,
+            Options {
+                segment: true,
+                native_whole: true,
+            },
         )
     }
 
