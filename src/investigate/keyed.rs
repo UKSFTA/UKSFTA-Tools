@@ -6,8 +6,9 @@
 //! names a PBO, and nothing here fetches an item or a manifest.
 //!
 //! The API key is read from the environment, held in a private field, and
-//! never printed: [`LiveKeyedSearch`] has a redacting `Debug`, and every
-//! [`KeyedError`] message is built without the key or the request URL.
+//! never printed: [`LiveKeyedSearch`] has a redacting `Debug`, the request
+//! URL is private to this module, and every [`KeyedError`] is built without
+//! the key or the URL.
 
 use std::collections::BTreeMap;
 
@@ -51,6 +52,12 @@ pub(crate) enum KeyedError {
     Transport,
     /// The body was not a QueryFiles response.
     Parse,
+}
+
+impl std::fmt::Display for KeyedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message())
+    }
 }
 
 impl KeyedError {
@@ -121,10 +128,14 @@ impl LiveKeyedSearch {
         })
     }
 
-    fn request_body(&self, text: &str) -> String {
+    /// The GET URL for one search. `QueryFiles` rejects a POST, so the key
+    /// must travel in the query string. The value stays inside this module:
+    /// no error carries a URL, and a transport failure is opaque.
+    fn request_url(&self, text: &str) -> String {
         format!(
-            "key={}&format=json&appid={ARMA_APP_ID}&query_type={RANKED_BY_TEXT_SEARCH}\
-             &numperpage={PAGE_SIZE}&return_short_description=false&search_text={}",
+            "{QUERY_FILES_URL}?key={}&format=json&appid={ARMA_APP_ID}\
+             &query_type={RANKED_BY_TEXT_SEARCH}&numperpage={PAGE_SIZE}\
+             &return_short_description=false&return_metadata=true&search_text={}",
             urlencode(&self.key),
             urlencode(text)
         )
@@ -133,18 +144,14 @@ impl LiveKeyedSearch {
 
 impl KeyedSearch for LiveKeyedSearch {
     fn query(&self, text: &str) -> Result<BrowsePage, KeyedError> {
+        // `QueryFiles` is GET-only, so the key is in this URL. A transport
+        // failure maps to the opaque `Transport`; the `reqwest` error text,
+        // which names the URL, is dropped here and never reaches a caller.
         let response = self
             .client
-            .post(QUERY_FILES_URL)
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
-            .body(self.request_body(text))
+            .get(self.request_url(text))
             .send()
             .map_err(|_| KeyedError::Transport)?;
-        // The key is in the body, never in the URL, so no status or
-        // transport error can echo it.
         match response.status().as_u16() {
             200..=299 => {}
             403 => return Err(KeyedError::Rejected),
@@ -440,30 +447,41 @@ mod tests {
         };
 
         let shown = format!(
-            "{search:?} {} {} {}",
-            KeyedError::Rejected.message(),
-            KeyedError::MissingKey.message(),
-            KeyedError::Status(500).message()
+            "{search:?} {} {} {} {} {} {}",
+            KeyedError::Rejected,
+            KeyedError::MissingKey,
+            KeyedError::Transport,
+            KeyedError::Parse,
+            KeyedError::RateLimited,
+            KeyedError::Status(500),
         );
 
         assert!(!shown.contains(KEY));
         assert!(shown.contains("[redacted]"));
+        // The GET URL necessarily holds the key. It must stay private to
+        // this module, so no error text may carry it.
+        assert!(search.request_url("ADE diving").contains(KEY));
     }
 
     #[test]
-    fn request_carries_the_key_in_the_body_only() {
+    fn request_is_a_get_with_the_parameters_in_the_query() {
         let search = LiveKeyedSearch {
             client: crate::workshop_api::build_client(),
             key: "abc".to_string(),
         };
 
-        let body = search.request_body("ADE diving");
+        let url = search.request_url("ADE diving");
 
-        assert!(body.contains("key=abc"));
-        assert!(body.contains("search_text=ADE%20diving"));
-        assert!(body.contains("numperpage=50"));
-        assert!(body.contains("return_short_description=false"));
-        assert!(!QUERY_FILES_URL.contains("key="));
+        assert!(
+            url.starts_with("https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/?")
+        );
+        assert!(url.contains("key=abc"));
+        assert!(url.contains("search_text=ADE%20diving"));
+        assert!(url.contains("numperpage=50"));
+        assert!(url.contains("return_short_description=false"));
+        // Without this flag the response carries ids only, and a candidate
+        // needs its title to be scored.
+        assert!(url.contains("return_metadata=true"));
     }
 
     #[test]
@@ -473,9 +491,23 @@ mod tests {
             return;
         }
         let search = LiveKeyedSearch::from_env().expect("STEAM_API_KEY must be set");
-        let page = search
-            .query("Advanced Diving Environment")
-            .expect("the keyed search must answer");
+        let query = "Advanced Diving Environment";
+        let page = search.query(query).expect("the keyed search must answer");
+
+        println!(
+            "live query \"{query}\": total={} returned={}",
+            page.total_count,
+            page.results.len()
+        );
+        for (position, item) in page.results.iter().take(3).enumerate() {
+            println!(
+                "  {}. {} ({}) - {}",
+                position + 1,
+                item.title,
+                item.id,
+                item.creator
+            );
+        }
 
         assert!(!page.results.is_empty());
         assert!(page.results.iter().all(|item| !item.id.is_empty()));
