@@ -204,7 +204,7 @@ pub fn investigate(
     println!("Untracked PBO Investigation:");
     println!("  {} PBO(s) examined", results.len());
     let mut unknown_count = 0;
-    for (pbo, _, origin) in &results {
+    for (pbo, path, origin) in &results {
         let Some(origin) = origin else {
             unknown_count += 1;
             println!("  {} {}", paint(use_colour, C_RED, "[UNKNOWN]"), pbo);
@@ -221,15 +221,28 @@ pub fn investigate(
         } else {
             meta.name
         };
+        let differs = manifest_index
+            .as_ref()
+            .map(|index| {
+                version_note(
+                    index,
+                    origin,
+                    pbo,
+                    path,
+                    digests.get(path).map(|(sha, _)| sha),
+                )
+            })
+            .unwrap_or_default();
         if origin.is_pack {
             println!(
-                "  {} {} -> {} ({}) {} [pack: prefix {} — verify source]",
+                "  {} {} -> {} ({}) {} [pack: prefix {} — verify source]{}",
                 paint(use_colour, C_GREEN, "[PACK]"),
                 pbo,
                 name,
                 id,
                 workshop_url(id),
-                origin.prefix.as_deref().unwrap_or("unknown")
+                origin.prefix.as_deref().unwrap_or("unknown"),
+                differs
             );
         } else {
             let confirmed = hash_hits
@@ -244,13 +257,14 @@ pub fn investigate(
                 })
                 .unwrap_or_default();
             println!(
-                "  {} {} -> {} ({}) {}{}",
+                "  {} {} -> {} ({}) {}{}{}",
                 paint(use_colour, C_GREEN, "[RESOLVED]"),
                 pbo,
                 name,
                 id,
                 workshop_url(id),
-                confirmed
+                confirmed,
+                differs
             );
         }
     }
@@ -285,6 +299,37 @@ pub fn investigate(
         },
     )?;
     Ok(())
+}
+
+/// A note for a file whose bytes are not the copy Steam installed for its
+/// item: a different size, or a different hash when one is already known.
+/// A file can legitimately differ, because an item may publish one version
+/// per game branch.
+fn version_note(
+    index: &WorkshopIndex,
+    origin: &ResolvedOrigin,
+    pbo: &str,
+    path: &Path,
+    digest: Option<&[u8; 20]>,
+) -> String {
+    let Some(entry) = index.installed_entry(&origin.id, pbo) else {
+        return String::new();
+    };
+    let size = std::fs::metadata(path).map(|metadata| metadata.len()).ok();
+    if size.is_some_and(|size| size != entry.size) {
+        return " [differs from the installed copy]".to_string();
+    }
+    match (digest, size) {
+        (Some(digest), Some(size))
+            if index
+                .lookup(digest, size)
+                .iter()
+                .all(|entry| entry.published_id != origin.id) =>
+        {
+            " [differs from the installed copy]".to_string()
+        }
+        _ => String::new(),
+    }
 }
 
 /// Print the status lines from the store, offline.

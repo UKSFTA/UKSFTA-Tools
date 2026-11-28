@@ -19,7 +19,10 @@ enum PageVerdict {
     /// The page renders the item title, so the item exists and is readable
     /// without an account. This is what an unlisted item looks like.
     Visible { title: String },
-    /// The page answers without the item: removed, or private to its owner.
+    /// The page carries the community-guidelines removal notice: withdrawn
+    /// from the Workshop, still served to its owner.
+    Removed,
+    /// The page answers without the item: private to its owner, or gone.
     Unavailable,
     /// Neither shape was found, so the page proves nothing either way.
     Unknown,
@@ -28,11 +31,17 @@ enum PageVerdict {
 /// Marker that carries the item name on a Workshop item page.
 const TITLE_MARKER: &str = "workshopItemTitle";
 
-/// The page has no item: Steam serves an error box for a removed or private
-/// id, and may redirect to the login page instead.
-const UNAVAILABLE_MARKERS: [&str; 4] = [
+/// The page says the item was withdrawn from the Workshop. It can still be
+/// served, and still render its title, so this is checked first.
+const REMOVED_MARKERS: [&str; 2] = [
+    "has been removed from the community",
+    "violates steam community &amp; content guidelines",
+];
+
+/// The page has no item: Steam serves an error box for a private id, and may
+/// redirect to the login page instead.
+const UNAVAILABLE_MARKERS: [&str; 3] = [
     "problem accessing the item",
-    "has been removed",
     "this item is private",
     "error_box",
 ];
@@ -85,6 +94,9 @@ pub(crate) fn check_workshop_visibility(results: &[(String, PathBuf, Option<Reso
                 "  {id} -> {} [UNLISTED (page is public; the item is absent from the API index)]",
                 sanitize_for_terminal(&title)
             ),
+            PageVerdict::Removed => println!(
+                "  {id} -> {id} [REMOVED (the page says it was removed from the community)]"
+            ),
             PageVerdict::Unavailable => {
                 println!("  {id} -> {id} [REMOVED OR PRIVATE (the page does not load)]")
             }
@@ -92,7 +104,44 @@ pub(crate) fn check_workshop_visibility(results: &[(String, PathBuf, Option<Reso
                 "  {id} -> {id} [NOT PUBLICLY VISIBLE (no API entry; the page proves nothing)]"
             ),
         }
+        if let Some(note) = version_dates(&http, id) {
+            println!("      {note}");
+        }
     }
+}
+
+/// The item's published versions, when the change-notes page lists them.
+/// Steam shows one line per upload with a day and time but no year, so the
+/// year is not reported. An item with a single version prints nothing.
+fn version_dates(http: &dyn Http, id: &str) -> Option<String> {
+    let url = format!("https://steamcommunity.com/sharedfiles/filedetails/changelog/{id}");
+    let body = http.get(&url).ok()?;
+    let dates = changelog_dates(&body);
+    if dates.len() < 2 {
+        return None;
+    }
+    Some(format!("versions: {} (latest {})", dates.len(), dates[0]))
+}
+
+/// The upload dates on a change-notes page, newest first. Each entry starts
+/// with `Update: ` and carries the author after `by`.
+fn changelog_dates(body: &str) -> Vec<String> {
+    let mut dates: Vec<String> = Vec::new();
+    for piece in body.split("Update:").skip(1) {
+        let date: String = piece
+            .split('<')
+            .next()
+            .unwrap_or("")
+            .split("by ")
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !date.is_empty() && !dates.contains(&date) {
+            dates.push(date);
+        }
+    }
+    dates
 }
 
 /// One GET of the item page, mapped to what it proves. A transport fault
@@ -107,6 +156,16 @@ fn probe_page(http: &dyn Http, id: &str) -> PageVerdict {
 
 /// Read the title block, or the error shape, from an item page.
 fn parse_item_page(body: &str) -> PageVerdict {
+    let lower = body.to_ascii_lowercase();
+    if REMOVED_MARKERS.iter().any(|marker| lower.contains(marker)) {
+        return PageVerdict::Removed;
+    }
+    if UNAVAILABLE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return PageVerdict::Unavailable;
+    }
     if let Some(rest) = body.split(TITLE_MARKER).nth(1) {
         if let Some(open) = rest.find('>') {
             let inner = rest[open + 1..].split("</div>").next().unwrap_or("");
@@ -114,13 +173,6 @@ fn parse_item_page(body: &str) -> PageVerdict {
                 return PageVerdict::Visible { title };
             }
         }
-    }
-    let lower = body.to_ascii_lowercase();
-    if UNAVAILABLE_MARKERS
-        .iter()
-        .any(|marker| lower.contains(marker))
-    {
-        return PageVerdict::Unavailable;
     }
     PageVerdict::Unknown
 }
@@ -231,6 +283,37 @@ mod tests {
         assert_eq!(parse_item_page(body), PageVerdict::Unavailable);
         assert_eq!(fetch(Ok(body)), PageVerdict::Unavailable);
         assert_eq!(fetch(Err(HttpError::Status(404))), PageVerdict::Unavailable);
+    }
+
+    #[test]
+    fn a_removal_notice_wins_over_the_rendered_title() {
+        let body = r#"<div class="workshopItemTitle">UKSF Client side</div>
+            This item has been removed from the community because it violates
+            Steam Community &amp; Content Guidelines. It is only visible to you."#;
+        assert_eq!(parse_item_page(body), PageVerdict::Removed);
+        assert_eq!(fetch(Ok(body)), PageVerdict::Removed);
+    }
+
+    #[test]
+    fn change_notes_give_the_upload_dates_newest_first() {
+        let body = r#"
+            Showing 1-4 of 4 entries
+            Update: 3 May @ 1:43pm
+            by N0v3r
+            Update: 3 May @ 7:57am
+            by N0v3r
+            Update: 12 Feb @ 7:00am
+            by N0v3r
+        "#;
+        assert_eq!(
+            changelog_dates(body),
+            vec![
+                "3 May @ 1:43pm".to_string(),
+                "3 May @ 7:57am".to_string(),
+                "12 Feb @ 7:00am".to_string()
+            ]
+        );
+        assert!(changelog_dates("<html>no notes</html>").is_empty());
     }
 
     #[test]
