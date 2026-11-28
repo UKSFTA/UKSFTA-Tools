@@ -154,29 +154,38 @@ fn read_le_u32(reader: &mut impl std::io::Read) -> Option<u32> {
 /// Parse the header into named entries with data offsets. A malformed
 /// header yields `None`: every name and data range is bounds-checked.
 fn parse_pbo_entries(path: &Path) -> Option<Vec<PboEntry>> {
-    use std::io::{BufReader, Seek};
+    use std::io::BufReader;
 
     // Names are read a byte at a time, so the file is buffered.
     let file = fs::File::open(path).ok()?;
     let file_len = file.metadata().ok()?.len();
     let mut file = BufReader::new(file);
+    parse_pbo_header(&mut file, file_len).map(|(entries, _)| entries)
+}
 
+/// Parse the header from any seekable reader. Returns the entries and the
+/// offset of the first entry's data, which is where the entry data area
+/// starts.
+fn parse_pbo_header(
+    reader: &mut (impl std::io::Read + std::io::Seek),
+    file_len: u64,
+) -> Option<(Vec<PboEntry>, u64)> {
     // Properties header: empty name, mime `Vers`, four sizes. Its data is
     // inline and has no stored length: `key\0value\0...\0`.
-    let name = read_cstring(&mut file, PBO_MAX_NAME)?;
-    let mime = read_le_u32(&mut file)?;
+    let name = read_cstring(reader, PBO_MAX_NAME)?;
+    let mime = read_le_u32(reader)?;
     if !name.is_empty() || mime != PBO_PROPERTIES_MIME {
         return None;
     }
     for _ in 0..4 {
-        read_le_u32(&mut file)?;
+        read_le_u32(reader)?;
     }
     loop {
-        let key = read_cstring(&mut file, PBO_MAX_NAME)?;
+        let key = read_cstring(reader, PBO_MAX_NAME)?;
         if key.is_empty() {
             break;
         }
-        read_cstring(&mut file, PBO_MAX_NAME)?;
+        read_cstring(reader, PBO_MAX_NAME)?;
     }
 
     let mut raw: Vec<RawPboEntry> = Vec::new();
@@ -184,12 +193,12 @@ fn parse_pbo_entries(path: &Path) -> Option<Vec<PboEntry>> {
         if raw.len() >= PBO_MAX_HEADER_ENTRIES {
             return None;
         }
-        let name = read_cstring(&mut file, PBO_MAX_NAME)?;
-        let mime = read_le_u32(&mut file)?;
-        let original_size = read_le_u32(&mut file)?;
-        let reserved = read_le_u32(&mut file)?;
-        let timestamp = read_le_u32(&mut file)?;
-        let data_size = read_le_u32(&mut file)?;
+        let name = read_cstring(reader, PBO_MAX_NAME)?;
+        let mime = read_le_u32(reader)?;
+        let original_size = read_le_u32(reader)?;
+        let reserved = read_le_u32(reader)?;
+        let timestamp = read_le_u32(reader)?;
+        let data_size = read_le_u32(reader)?;
 
         // Terminator: empty name plus twenty zero bytes.
         if name.is_empty()
@@ -199,7 +208,8 @@ fn parse_pbo_entries(path: &Path) -> Option<Vec<PboEntry>> {
             && timestamp == 0
             && data_size == 0
         {
-            let mut offset = file.stream_position().ok()?;
+            let mut offset = reader.stream_position().ok()?;
+            let data_start = offset;
             let mut entries = Vec::new();
             for entry in raw {
                 let end = offset.checked_add(u64::from(entry.data_size))?;
@@ -217,7 +227,7 @@ fn parse_pbo_entries(path: &Path) -> Option<Vec<PboEntry>> {
                 }
                 offset = end;
             }
-            return Some(entries);
+            return Some((entries, data_start));
         }
 
         raw.push(RawPboEntry {
@@ -373,6 +383,22 @@ pub struct PboConfigFacts {
 /// sit at the front.
 const PBO_SCAN_LIMIT: u64 = 4_000_000;
 
+/// First read of a PBO by the dependency closure. It covers the entry
+/// table of every PBO in the pack except the largest map packs, which
+/// grow it.
+const PBO_CLOSURE_PROBE: u64 = 65_536;
+
+/// Config region read after the entry table by the dependency closure.
+///
+/// Eight times the smallest window that leaves every closure fact
+/// unchanged on the reference pack (8 KiB). The margin leaves room for an
+/// unpacked `config.cpp`, which sits at the start of the data area.
+const PBO_CLOSURE_CONFIG_WINDOW: u64 = 65_536;
+
+/// Largest front buffer the closure holds. A header past it is read from
+/// the file instead.
+const PBO_CLOSURE_FRONT_LIMIT: u64 = PBO_SCAN_LIMIT;
+
 /// Bytes hashed at each end of a PBO by [`pbo_fingerprint`].
 const PBO_FINGERPRINT_WINDOW: u64 = 65_536;
 
@@ -407,36 +433,182 @@ pub struct PboClosureFacts {
 ///
 /// The result matches [`pbo_config_facts`] for these two fields. The
 /// identity-only scans are skipped, so no entry data is read beyond a
-/// stored `config.bin`: models and textures are never touched.
+/// stored `config.bin`: models and textures are never touched. One open
+/// and one bounded read of the front serve the entry table, the text scan
+/// and the stored config.
 pub fn pbo_closure_facts(path: &Path) -> PboClosureFacts {
-    let Some(head) = read_capped(path, PBO_SCAN_LIMIT) else {
+    let Some(mut front) = PboFront::open(path, PBO_CLOSURE_PROBE, PBO_CLOSURE_CONFIG_WINDOW) else {
         return PboClosureFacts::default();
     };
-    let text = readable_strings(&head);
-    let facts = base_facts(&head, &text, path);
+    let text = if has_closure_text(&front.buf) {
+        readable_strings(&front.buf)
+    } else {
+        String::new()
+    };
+    let facts = base_facts(&text, front.rap_facts());
     PboClosureFacts {
         cfgpatches_classes: facts.cfgpatches_classes,
         required_addons: facts.required_addons,
     }
 }
 
+/// Whether the window can carry a closure fact at all.
+///
+/// A class only enters the scan through a `class ` statement, and an
+/// addon only through a `requiredAddons[]` key. Both are printable, so a
+/// byte search over the raw window is exact, and a binarised pack can
+/// skip the text walk.
+fn has_closure_text(data: &[u8]) -> bool {
+    data.windows(6).any(|window| window == b"class ")
+        || data.windows(16).any(|window| window == b"requiredAddons[]")
+}
+
+/// The front of one PBO, read once.
+///
+/// The closure needs three things that all live at or near the front: the
+/// entry table, the printable runs a text config sits in, and the stored
+/// `config.bin` body. One open and one bounded read serve all three, and
+/// the buffer grows only when the entry table runs past it.
+struct PboFront {
+    file: fs::File,
+    len: u64,
+    buf: Vec<u8>,
+    entries: Option<Vec<PboEntry>>,
+}
+
+impl PboFront {
+    fn open(path: &Path, probe: u64, config_window: u64) -> Option<Self> {
+        let file = fs::File::open(path).ok()?;
+        let len = file.metadata().ok()?.len();
+        let mut front = Self {
+            file,
+            len,
+            buf: Vec::new(),
+            entries: None,
+        };
+        front.extend_to(probe)?;
+
+        // The entry table ends the header, and the config region follows
+        // it. Grow past the probe until the table parses.
+        let limit = PBO_CLOSURE_FRONT_LIMIT.min(len);
+        loop {
+            let parsed = parse_pbo_header(&mut std::io::Cursor::new(&front.buf[..]), len);
+            match parsed {
+                Some((entries, data_start)) => {
+                    // An unpacked config is an entry, so the window must
+                    // reach past its body to be scanned at all.
+                    let text_end = entries
+                        .iter()
+                        .find(|entry| entry.mime == 0 && is_text_config_entry(&entry.name))
+                        .map(|entry| entry.offset.saturating_add(u64::from(entry.data_size)))
+                        .unwrap_or(0);
+                    let target = data_start
+                        .saturating_add(config_window)
+                        .max(text_end)
+                        .min(PBO_CLOSURE_FRONT_LIMIT);
+                    front.entries = Some(entries);
+                    front.extend_to(target)?;
+                    return Some(front);
+                }
+                None if (front.buf.len() as u64) < limit => {
+                    let target = (front.buf.len() as u64).saturating_mul(2).min(limit);
+                    front.extend_to(target)?;
+                }
+                None => return Some(front),
+            }
+        }
+    }
+
+    /// Read up to `target` bytes of the file into the buffer, appending.
+    fn extend_to(&mut self, target: u64) -> Option<()> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let target = target.min(self.len) as usize;
+        if self.buf.len() >= target {
+            return Some(());
+        }
+        self.file
+            .seek(SeekFrom::Start(self.buf.len() as u64))
+            .ok()?;
+        let want = (target - self.buf.len()) as u64;
+        self.buf.reserve_exact(want as usize);
+        self.file
+            .by_ref()
+            .take(want)
+            .read_to_end(&mut self.buf)
+            .ok()?;
+        Some(())
+    }
+
+    /// The entry table. A header past the memory limit falls back to the
+    /// reader that reads the whole file.
+    fn entries(&mut self) -> &[PboEntry] {
+        if self.entries.is_none() {
+            let mut reader = std::io::BufReader::new(&self.file);
+            let parsed = {
+                use std::io::{Seek, SeekFrom};
+                reader
+                    .seek(SeekFrom::Start(0))
+                    .ok()
+                    .and_then(|_| parse_pbo_header(&mut reader, self.len))
+                    .map(|(entries, _)| entries)
+            };
+            self.entries = Some(parsed.unwrap_or_default());
+        }
+        self.entries.as_deref().unwrap_or_default()
+    }
+
+    /// Facts from a stored `config.bin`, then from a `\0raP` blob in the
+    /// window. Same order as the whole-file reader.
+    fn rap_facts(&mut self) -> Option<RapFacts> {
+        self.rap_from_config_entries()
+            .or_else(|| parse_rap_config(&self.buf))
+    }
+
+    fn rap_from_config_entries(&mut self) -> Option<RapFacts> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let entries = self.entries().to_vec();
+        rap_from_config_entries_with(&entries, |entry| {
+            let end = entry.offset.checked_add(u64::from(entry.data_size));
+            if let Some(end) = end.filter(|end| *end <= self.buf.len() as u64) {
+                return Ok(Some(self.buf[entry.offset as usize..end as usize].to_vec()));
+            }
+            let mut data = Vec::new();
+            self.file
+                .seek(SeekFrom::Start(entry.offset))
+                .map_err(|_| ())?;
+            match self
+                .file
+                .by_ref()
+                .take(u64::from(entry.data_size))
+                .read_to_end(&mut data)
+            {
+                Ok(_) => Ok(Some(data)),
+                Err(_) => Ok(None),
+            }
+        })
+    }
+}
+
 fn config_facts_with(head: &[u8], path: &Path, keybinds: KeybindSources<'_>) -> PboConfigFacts {
     let text = readable_strings(head);
-    let mut facts = base_facts(head, &text, path);
+    let rap = rap_from_config_entries(path).or_else(|| parse_rap_config(head));
+    let mut facts = base_facts(&text, rap);
     facts.str_tokens = str_tokens(&text);
     facts.cba_keybind_names = keybind_names(&text, keybinds);
     facts
 }
 
 /// Everything one config carries, apart from the identity-only scans.
-fn base_facts(head: &[u8], text: &str, path: &Path) -> PboConfigFacts {
+fn base_facts(text: &str, rap: Option<RapFacts>) -> PboConfigFacts {
     let mut facts = PboConfigFacts {
         required_addons: required_addons(text),
         ..PboConfigFacts::default()
     };
     scan_sections(text, &mut facts);
 
-    if let Some(rap) = rap_from_config_entries(path).or_else(|| parse_rap_config(head)) {
+    if let Some(rap) = rap {
         merge_rap_facts(&mut facts, rap);
     }
 
@@ -1207,11 +1379,50 @@ fn merge_rap_facts(facts: &mut PboConfigFacts, rap: RapFacts) {
     set_author(&mut facts.cfgmods_author, rap.cfgmods_author);
 }
 
+/// Parse the stored `config.bin` candidates: root first, then nested, up
+/// to [`PBO_MAX_CONFIG_ENTRIES`]. `read` yields the entry body, `Ok(None)`
+/// skips an unreadable entry and `Err` stops the scan.
+fn rap_from_config_entries_with(
+    entries: &[PboEntry],
+    mut read: impl FnMut(&PboEntry) -> Result<Option<Vec<u8>>, ()>,
+) -> Option<RapFacts> {
+    let mut candidates: Vec<&PboEntry> = entries
+        .iter()
+        .filter(|entry| {
+            entry.mime == 0
+                && u64::from(entry.data_size) <= PBO_CONFIG_ENTRY_LIMIT
+                && is_binary_config_entry(&entry.name)
+        })
+        .collect();
+    candidates.sort_by_key(|entry| entry.name.contains(['\\', '/']) as u8);
+
+    for entry in candidates.into_iter().take(PBO_MAX_CONFIG_ENTRIES) {
+        match read(entry) {
+            Err(()) => return None,
+            Ok(Some(data)) => {
+                if let Some(facts) = parse_rap_config(&data) {
+                    return Some(facts);
+                }
+            }
+            Ok(None) => {}
+        }
+    }
+    None
+}
+
 /// A stored `config.bin` at any depth in the PBO.
 fn is_binary_config_entry(name: &str) -> bool {
     name.rsplit(['\\', '/'])
         .next()
         .map(|stem| stem.eq_ignore_ascii_case("config.bin"))
+        .unwrap_or(false)
+}
+
+/// An unpacked `config.cpp`, which the text scan reads as printable runs.
+fn is_text_config_entry(name: &str) -> bool {
+    name.rsplit(['\\', '/'])
+        .next()
+        .map(|stem| stem.eq_ignore_ascii_case("config.cpp"))
         .unwrap_or(false)
 }
 
@@ -1221,38 +1432,24 @@ fn is_binary_config_entry(name: &str) -> bool {
 fn rap_from_config_entries(path: &Path) -> Option<RapFacts> {
     use std::io::{Read, Seek, SeekFrom};
 
-    let mut entries: Vec<PboEntry> = pbo_entries(path)
-        .into_iter()
-        .filter(|entry| {
-            entry.mime == 0
-                && u64::from(entry.data_size) <= PBO_CONFIG_ENTRY_LIMIT
-                && is_binary_config_entry(&entry.name)
-        })
-        .collect();
-    entries.sort_by_key(|entry| entry.name.contains(['\\', '/']) as u8);
-    if entries.is_empty() {
-        return None;
-    }
-
-    let mut file = fs::File::open(path).ok()?;
-    for entry in entries.into_iter().take(PBO_MAX_CONFIG_ENTRIES) {
-        let mut data = Vec::new();
-        if file.seek(SeekFrom::Start(entry.offset)).is_err() {
-            return None;
+    let entries = pbo_entries(path);
+    let mut file: Option<fs::File> = None;
+    rap_from_config_entries_with(&entries, |entry| {
+        if file.is_none() {
+            file = Some(fs::File::open(path).ok().ok_or(())?);
         }
-        if file
+        let file = file.as_mut().ok_or(())?;
+        let mut data = Vec::new();
+        file.seek(SeekFrom::Start(entry.offset)).map_err(|_| ())?;
+        match file
             .by_ref()
             .take(u64::from(entry.data_size))
             .read_to_end(&mut data)
-            .is_err()
         {
-            continue;
+            Ok(_) => Ok(Some(data)),
+            Err(_) => Ok(None),
         }
-        if let Some(facts) = parse_rap_config(&data) {
-            return Some(facts);
-        }
-    }
-    None
+    })
 }
 
 #[cfg(test)]
@@ -1970,6 +2167,104 @@ pub(crate) mod tests {
             pbo_closure_facts(&binary).required_addons,
             ["A3_Data_F", "cba_main", "stale_dep"]
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The closure pipeline from before the shared front read: a fixed
+    /// 4 MB head, then a fresh open for the stored config. Every layout
+    /// must still produce these facts.
+    fn reference_closure_facts(path: &Path) -> PboClosureFacts {
+        let Some(head) = read_capped(path, PBO_SCAN_LIMIT) else {
+            return PboClosureFacts::default();
+        };
+        let text = readable_strings(&head);
+        let rap = rap_from_config_entries(path).or_else(|| parse_rap_config(&head));
+        let facts = base_facts(&text, rap);
+        PboClosureFacts {
+            cfgpatches_classes: facts.cfgpatches_classes,
+            required_addons: facts.required_addons,
+        }
+    }
+
+    #[test]
+    fn closure_facts_match_the_whole_head_reader_on_every_layout() {
+        let dir = std::env::temp_dir().join("uksfta-pbo-closure-front");
+        fs::create_dir_all(&dir).unwrap();
+
+        let text: &[u8] = br#"class CfgPatches { class alpha_main { requiredAddons[] = {"A3_Data_F", "ace_common"}; }; };"#;
+        let mut patch = RapBody::new("alpha_main");
+        patch.strings("requiredAddons[]", &["A3_Data_F", "cba_main"]);
+        let mut patches = RapBody::new("CfgPatches");
+        patches.class("alpha_main", patch);
+        let mut root = RapBody::new("");
+        root.class("CfgPatches", patches);
+        let packed = rap_blob(&root);
+        let payload = vec![0xa5u8; 200_000];
+
+        let mut cases: Vec<PathBuf> = Vec::new();
+        let mut write = |name: &str, entries: &[(&str, u32, &[u8])]| {
+            let path = dir.join(name);
+            write_pbo_entries(&path, entries);
+            cases.push(path);
+        };
+        write("text.pbo", &[("config.cpp", 0, text)]);
+        write("binary.pbo", &[("config.bin", 0, &packed)]);
+        write(
+            "both.pbo",
+            &[("config.cpp", 0, text), ("config.bin", 0, &packed)],
+        );
+        write(
+            "late_text.pbo",
+            &[("models/big.p3d", 0, &payload), ("config.cpp", 0, text)],
+        );
+        write(
+            "late_binary.pbo",
+            &[("models/big.p3d", 0, &payload), ("config.bin", 0, &packed)],
+        );
+        write("nested.pbo", &[("z\\thing\\config.bin", 0, &packed)]);
+        write("compressed.pbo", &[("config.bin", PBO_CPRS_MIME, &packed)]);
+
+        // An entry table past the first read: the front has to grow.
+        let names: Vec<String> = (0..4_000)
+            .map(|index| format!("data/file{index}.txt"))
+            .collect();
+        let bodies: Vec<&[u8]> = (0..4_000).map(|_| b"x".as_slice()).collect();
+        let wide: Vec<(&str, u32, &[u8])> = names
+            .iter()
+            .map(String::as_str)
+            .zip(bodies)
+            .map(|(name, body)| (name, 0, body))
+            .collect();
+        let path = dir.join("wide.pbo");
+        write_pbo_entries(&path, &wide);
+
+        for path in &cases {
+            assert_eq!(
+                pbo_closure_facts(path),
+                reference_closure_facts(path),
+                "{}",
+                path.display()
+            );
+        }
+
+        let wide = reference_closure_facts(&path);
+        assert_eq!(pbo_closure_facts(&path), wide);
+        assert!(pbo_entries(&path).len() == 4_000);
+
+        // Unreadable and malformed files yield the same empty facts.
+        let empty = dir.join("empty.pbo");
+        fs::write(&empty, b"").unwrap();
+        let short = dir.join("short.pbo");
+        fs::write(&short, b"short").unwrap();
+        let missing = dir.join("missing.pbo");
+        for path in [&empty, &short, &missing] {
+            assert_eq!(
+                pbo_closure_facts(path),
+                reference_closure_facts(path),
+                "{}",
+                path.display()
+            );
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 }
