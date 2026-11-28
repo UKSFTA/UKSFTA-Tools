@@ -12,6 +12,7 @@ mod lock;
 mod modlist;
 mod origin;
 mod pbo;
+mod pbo_hashes;
 mod prefix;
 mod server;
 mod steam;
@@ -19,6 +20,7 @@ mod sync;
 mod util;
 mod version;
 mod workshop_api;
+mod workshop_manifest;
 
 use crate::error::UksftaError;
 

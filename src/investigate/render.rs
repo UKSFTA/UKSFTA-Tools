@@ -39,6 +39,32 @@ pub(crate) fn render_resolution(item: &PboResolution, use_colour: bool) -> Strin
     if resolution.status == ResolutionStatus::Confirmed {
         let title = sanitize_for_terminal(resolution.title.as_deref().unwrap_or_default());
         let id = sanitize_for_terminal(resolution.id.as_deref().unwrap_or_default());
+
+        // A manifest hash confirms the bytes, not a search ranking, so the
+        // line names the published path instead of a query score.
+        if let Some(path) = resolution
+            .matched_by
+            .iter()
+            .find_map(|signal| signal.strip_prefix("path:"))
+        {
+            let path = sanitize_for_terminal(path);
+            let shared = resolution
+                .matched_by
+                .iter()
+                .find_map(|signal| signal.strip_prefix("shared:"))
+                .map(|count| format!(", shared by {count} items"))
+                .unwrap_or_default();
+            return format!(
+                "{} {} -> \"{}\" ({}) [content hash: {}{}]",
+                paint(use_colour, C_GREEN, "[confirmed]"),
+                pbo,
+                title,
+                id,
+                path,
+                shared
+            );
+        }
+
         let query = sanitize_for_terminal(resolution.query.as_deref().unwrap_or_default());
         return format!(
             "{} {} -> \"{}\" ({}) [query \"{}\", M={:.2} Q={:.2} margin={:.2}]",

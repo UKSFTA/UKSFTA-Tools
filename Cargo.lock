@@ -3894,6 +3894,7 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "static_assertions",
  "tempfile",

@@ -42,6 +42,7 @@ pub fn modlist_size(modlist_file: &Path, online: bool) -> Result<(), UksftaError
                     WorkshopItem {
                         size,
                         time_updated: 0,
+                        manifest: String::new(),
                     },
                 );
             }
