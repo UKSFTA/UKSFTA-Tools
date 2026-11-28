@@ -174,6 +174,9 @@ pub(crate) struct ResolveContext<'a> {
     keyed_report: BTreeMap<String, KeyedReport>,
     /// The optional content-hash index. No implementation exists yet.
     pub(crate) content_index: Option<&'a dyn ContentIndex>,
+    /// An item id that must never become a candidate: the pack under
+    /// investigation is not a source for its own files.
+    excluded: Option<String>,
 }
 
 impl<'a> ResolveContext<'a> {
@@ -198,6 +201,7 @@ impl<'a> ResolveContext<'a> {
             keyed_failure: None,
             keyed_report: BTreeMap::new(),
             content_index: None,
+            excluded: None,
         }
     }
 
@@ -257,6 +261,18 @@ impl<'a> ResolveContext<'a> {
         self.item_page(id).and_then(|page| page.author.clone())
     }
 
+    /// Never treat this Workshop id as a candidate.
+    pub(crate) fn exclude_item(&mut self, id: String) {
+        self.excluded = Some(id);
+    }
+
+    /// Drop the excluded id from one page of results.
+    fn drop_excluded(&self, results: &mut Vec<BrowseResult>) {
+        if let Some(excluded) = self.excluded.as_deref() {
+            results.retain(|result| result.id != excluded);
+        }
+    }
+
     /// The keyed results for one query, memoised by text. A refused key is
     /// recorded once and stops every later request, so a bad key costs one
     /// call, not one per PBO.
@@ -269,7 +285,9 @@ impl<'a> ResolveContext<'a> {
             self.limiter.wait(Endpoint::QueryFiles);
             match source.query(query) {
                 Ok(page) => {
-                    self.keyed_pages.insert(query.to_string(), page.results);
+                    let mut results = page.results;
+                    self.drop_excluded(&mut results);
+                    self.keyed_pages.insert(query.to_string(), results);
                 }
                 Err(error) if error.is_fatal() => self.keyed_failure = Some(error),
                 Err(error) => {
@@ -1293,6 +1311,9 @@ fn memoised_page(
         outcome = fetch_outcome(ctx, query, page);
     }
 
+    if let Ok(page) = &mut outcome {
+        ctx.drop_excluded(&mut page.results);
+    }
     ctx.memo.insert(
         key,
         match &outcome {
@@ -1593,6 +1614,30 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].resolution.status, ResolutionStatus::Confirmed);
         assert_eq!(http.calls().len(), 1);
+    }
+
+    #[test]
+    fn the_investigated_item_is_never_a_candidate() {
+        let page = page_html(&[("3549882948", "UKSF Mod Pack")], 1);
+        let http = FixtureHttp::new(vec![Ok(page.clone()), Ok(page.clone()), Ok(page.clone())]);
+        let mut limiter = RateLimiter::new(no_sleep);
+        let corpus = CorpusStats::default();
+        let item = || evidence("pdt_envg.pbo", "UKSF Mod Pack", PhraseSource::CfgModsName);
+
+        // Control: without the exclusion the same page confirms, so the
+        // assertion below measures the exclusion and not a weak fixture.
+        let mut open = ResolveContext::new(&http, &mut limiter, &corpus, None);
+        let resolved = resolve_all(vec![item()], &mut open);
+        assert_eq!(resolved[0].resolution.status, ResolutionStatus::Confirmed);
+
+        let http = FixtureHttp::new(vec![Ok(page.clone()), Ok(page.clone()), Ok(page)]);
+        let mut limiter = RateLimiter::new(no_sleep);
+        let mut closed = ResolveContext::new(&http, &mut limiter, &corpus, None);
+        closed.exclude_item("3549882948".to_string());
+        let resolved = resolve_all(vec![item()], &mut closed);
+
+        assert_ne!(resolved[0].resolution.status, ResolutionStatus::Confirmed);
+        assert_ne!(resolved[0].resolution.id.as_deref(), Some("3549882948"));
     }
 
     #[test]

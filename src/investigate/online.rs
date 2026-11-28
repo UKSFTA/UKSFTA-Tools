@@ -273,7 +273,16 @@ pub fn investigate(
     check_workshop_visibility(&results);
     let source = keyed.as_ref().map(|search| search as &dyn KeyedSearch);
     resolve_identities(
-        &examined, &hash_hits, addons_dir, &mod_dirs, use_colour, source, refresh,
+        &examined,
+        &hash_hits,
+        addons_dir,
+        &mod_dirs,
+        use_colour,
+        source,
+        OnlineOptions {
+            refresh,
+            self_id: self_id.as_deref(),
+        },
     )?;
     Ok(())
 }
@@ -325,6 +334,13 @@ fn examined_fingerprints(addons_dir: &Path) -> Vec<(String, String)> {
     examined
 }
 
+/// The switches one online run needs: whether to drop stored decisions, and
+/// the id of the pack being investigated, which is never a candidate.
+struct OnlineOptions<'a> {
+    refresh: bool,
+    self_id: Option<&'a str>,
+}
+
 /// Print the online phase: identity resolution and summary.
 fn resolve_identities(
     pbos: &[(String, PathBuf)],
@@ -333,8 +349,9 @@ fn resolve_identities(
     mod_dirs: &[ModDir],
     use_colour: bool,
     keyed: Option<&dyn KeyedSearch>,
-    refresh: bool,
+    options: OnlineOptions<'_>,
 ) -> Result<(), UksftaError> {
+    let OnlineOptions { refresh, self_id } = options;
     let bikey_names = scan_bikey_names(addons_dir);
     if !bikey_names.is_empty() {
         println!("  Signing keys found: {}", bikey_names.join(", "));
@@ -392,6 +409,9 @@ fn resolve_identities(
     let http = LiveHttp::new();
     let mut limiter = RateLimiter::new(std::thread::sleep);
     let mut ctx = ResolveContext::new(&http, &mut limiter, &corpus, Some(&work.pool));
+    if let Some(self_id) = self_id {
+        ctx.exclude_item(self_id.to_string());
+    }
     if let Some(source) = keyed {
         ctx.use_keyed_search(source);
     }
