@@ -124,13 +124,20 @@ struct Guard {
     password: Option<Arc<Secret>>,
     locals: Vec<PathBuf>,
     names: Vec<String>,
+    session: Option<connect::NativeSession>,
 }
 
 impl Guard {
     async fn cleanup(&mut self) {
         if !self.names.is_empty() {
             let password = self.password.clone();
-            if let Ok(session) = connect::connect_with(&self.settings, password.as_deref()).await {
+            let session = match self.session.take() {
+                Some(session) => Some(session),
+                None => connect::connect_with(&self.settings, password.as_deref())
+                    .await
+                    .ok(),
+            };
+            if let Some(session) = session {
                 for name in self.names.drain(..) {
                     let _ = session.sftp.fs().remove_file(&name).await;
                 }
@@ -230,6 +237,7 @@ pub async fn measure(
         password: password.cloned(),
         locals: vec![local.clone(), local_sys.clone()],
         names: names.clone(),
+        session: None,
     };
     let result = probe_inner(
         &probe_settings,
@@ -243,10 +251,22 @@ pub async fn measure(
         jobs,
     )
     .await;
+    let (result, session) = match result {
+        Ok((decision, session)) => (Ok(decision), Some(session)),
+        Err(error) => (Err(error), None),
+    };
+    // The last probe session removes the probe files, so the cleanup costs
+    // no second handshake.
+    guard.session = session;
     guard.cleanup().await;
     result
 }
 
+/// Measure the link. The system streams, the native write and the second
+/// native connection are independent, so they run at the same time. Each
+/// measured interval still covers only its own bytes: the system probe moves
+/// 1 MiB per stream and the native probe 4 MiB, so the overlap costs a
+/// handshake's worth of frames, not a share of the measured bytes.
 #[allow(clippy::too_many_arguments)]
 async fn probe_inner(
     settings: &Settings,
@@ -258,10 +278,16 @@ async fn probe_inner(
     sys_names: &[String],
     size: u64,
     jobs: u8,
-) -> Result<Decision, UksftaError> {
-    let system = measure_system(settings, local_sys, sys_names).await.ok();
-    let (one_time, session) = measure_native(settings, password, local, one).await?;
-    let two_time = measure_native_two(settings, password, local, two, &session).await?;
+) -> Result<(Decision, connect::NativeSession), UksftaError> {
+    let (system, second, native) = tokio::join!(
+        measure_system(settings, local_sys, sys_names),
+        connect::connect_with(settings, password.map(AsRef::as_ref)),
+        measure_native(settings, password, local, one),
+    );
+    let system = system.ok();
+    let second = second?;
+    let (one_time, session) = native?;
+    let two_time = measure_native_two(settings, local, two, &session, &second).await?;
     let (read, _) = timed(verify::hash_remote(
         &session.sftp,
         two,
@@ -278,7 +304,7 @@ async fn probe_inner(
         native_two_mbps: rate(PROBE_BYTES, two_time),
         read_mbps: rate(PROBE_BYTES, read),
     };
-    Ok(Decision::decide(probe, size))
+    Ok((Decision::decide(probe, size), session))
 }
 
 /// Upload one small file on each system stream at the same time.
@@ -334,13 +360,12 @@ async fn measure_native(
 
 async fn measure_native_two(
     settings: &Settings,
-    password: Option<&Arc<Secret>>,
     local: &Path,
     remote: &str,
     session: &connect::NativeSession,
+    second: &connect::NativeSession,
 ) -> Result<Duration, UksftaError> {
     writer::create_temp(&session.sftp, remote).await?;
-    let second = connect::connect_with(settings, password.map(AsRef::as_ref)).await?;
     let half = (PROBE_BYTES / 2) as u32;
     let buffer = settings.transfer.buffer.max(super::NATIVE_BUFFER);
     let (elapsed, ()) = timed(async {
@@ -361,14 +386,16 @@ async fn write_probe(
     len: u32,
     buffer: u32,
 ) -> Result<(), UksftaError> {
-    let open = writer::open_range_writer(sftp, remote).await?;
-    let mut file = writer::RangeWriter::from_handle(open);
+    let mut file = writer::RangeWriter::open(sftp, remote, 1).await?;
+    let mut readers = writer::LocalReaders::open(local, buffer, 1).await?;
     let chunk = Chunk {
         index: 0,
         start,
         len,
     };
-    let written = file.write(&chunk, local, buffer, None, &mut |_| {}).await;
+    let written = file
+        .write(&chunk, &mut readers, buffer, None, &mut |_| {})
+        .await;
     let _ = file.close().await;
     written
 }
