@@ -100,6 +100,8 @@ pub struct ServerOptions {
     pub strict_config: bool,
     /// Use the native segmented transport.
     pub segmented: bool,
+    /// Use the native whole-file transport.
+    pub native_whole: bool,
     /// Force the system sftp path for one release.
     pub legacy_sftp: bool,
     /// Read a password from the controlling terminal for the native path.
@@ -394,6 +396,7 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
             },
             segment.as_ref(),
             opts.password_prompt,
+            opts.native_whole,
         )?;
         outcome.upload_ms = Some(millis(upload_started.elapsed()));
     }
@@ -452,6 +455,10 @@ fn overrides(opts: &ServerOptions) -> Overrides {
             Some(false)
         } else if opts.segmented {
             Some(true)
+        } else if opts.native_whole {
+            // The whole-file transport replaces the segmented one, so a
+            // config that enables segmentation does not claim a file.
+            Some(false)
         } else {
             None
         },
@@ -855,6 +862,7 @@ impl LazyHashes {
 
 /// Send the upload batch, re-verify, and send again only what is still
 /// missing or stale. The wait grows with the attempt number.
+#[allow(clippy::too_many_arguments)]
 fn upload_with_retries(
     verifier: &Verifier<'_>,
     mut plan: Plan,
@@ -863,6 +871,7 @@ fn upload_with_retries(
     mut report: UploadReport<'_>,
     segment: Option<&SegmentChoice>,
     password_prompt: bool,
+    whole: bool,
 ) -> Result<Plan, UksftaError> {
     let units = upload_units(&plan);
     let view = report
@@ -870,7 +879,7 @@ fn upload_with_retries(
         .is_on()
         .then(|| progress::UploadProgress::new(&units, report.mode));
     // The prompt owns the terminal, so the view is hidden while it runs.
-    let password = if password_prompt && segment.is_some() {
+    let password = if password_prompt && (segment.is_some() || whole) {
         if let Some(view) = &view {
             view.hide();
         }
@@ -891,11 +900,22 @@ fn upload_with_retries(
         segment,
         password,
         view.clone(),
+        whole,
     );
     if let Some(view) = &view {
         view.finish();
     }
     outcome.map(|()| plan)
+}
+
+/// One summary row waiting for its digest. The whole-file path fills the
+/// digest from the send; the batch path waits for the hash pool.
+struct SentRow {
+    unit: UploadUnit,
+    seconds: f64,
+    hash: Option<String>,
+    /// True when the seconds and the digest come from the send.
+    exact: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -908,6 +928,7 @@ fn upload_loop(
     segment: Option<&SegmentChoice>,
     password: Option<Arc<native::secret::Secret>>,
     view: Option<Arc<progress::UploadProgress>>,
+    whole: bool,
 ) -> Result<(), UksftaError> {
     let upload_started = Instant::now();
     let mut skip: HashSet<String> = HashSet::new();
@@ -1030,28 +1051,56 @@ fn upload_loop(
     let limit = u16::from(retries) + 1;
     // A published segment is a completed attempt even when the batch is empty.
     let mut attempted = !skip.is_empty();
-    let mut sent_files: Vec<(UploadUnit, f64)> = Vec::new();
+    let mut sent_files: Vec<SentRow> = Vec::new();
     // The pool hashes beside the batch. It starts when the first file
-    // completes, so a fast link is not waiting on four threads of disk.
-    let paths: Vec<PathBuf> = remaining_units(plan, &skip)
-        .into_iter()
-        .map(|unit| unit.local)
-        .collect();
+    // completes, so a fast link is not waiting on four threads of disk. The
+    // whole-file path hashes as it sends, so it gives the pool no paths.
+    let paths: Vec<PathBuf> = if whole {
+        Vec::new()
+    } else {
+        remaining_units(plan, &skip)
+            .into_iter()
+            .map(|unit| unit.local)
+            .collect()
+    };
     let hashes = LazyHashes::new(paths, hash_threads(jobs));
     for attempt in 1..=limit {
-        let batch = upload_batch(plan, &skip)?;
-        if batch.is_empty() {
+        let units: Vec<UploadUnit> = remaining_units(plan, &skip);
+        if units.is_empty() {
             break;
         }
+        if !whole {
+            let batch = upload_batch(plan, &skip)?;
+            if batch.is_empty() {
+                break;
+            }
+        }
         attempted = true;
-        let units: Vec<UploadUnit> = remaining_units(plan, &skip);
         let files = units.len();
         let bytes: u64 = units.iter().map(|unit| unit.size).sum();
         let started = Instant::now();
-        let clean = send_parallel(verifier, plan, jobs, attempt, &skip, view.as_ref(), &hashes)?;
-        // A worker that never reported a completion has left the pool to the
-        // verify phase instead.
-        hashes.begin();
+        let mut native_rows: Vec<native::whole::SentFile> = Vec::new();
+        let clean = if whole {
+            let outcome = native::whole::run_batch(
+                verifier.settings,
+                units.clone(),
+                jobs,
+                password.clone(),
+                view.clone(),
+            )?;
+            for error in &outcome.errors {
+                eprintln!("Warning: upload attempt {attempt}: {error}");
+            }
+            native_rows = outcome.sent;
+            outcome.errors.is_empty()
+        } else {
+            let clean =
+                send_parallel(verifier, plan, jobs, attempt, &skip, view.as_ref(), &hashes)?;
+            // A worker that never reported a completion has left the pool to
+            // the verify phase instead.
+            hashes.begin();
+            clean
+        };
         if clean {
             // Every batch reported success, so the plan is already what a
             // re-listing would return and the remote walk is not paid again.
@@ -1061,24 +1110,45 @@ fn upload_loop(
             *plan = verifier.verify()?;
         }
         let elapsed = started.elapsed();
-        // A file that is no longer in the plan is on the server. Its seconds
-        // are its share of this attempt's bytes, so the row is marked as an
-        // estimate.
         let left: HashSet<String> = upload_units(plan)
             .into_iter()
             .map(|unit| unit.remote)
             .collect();
-        let share = if bytes == 0 {
-            0.0
-        } else {
-            elapsed.as_secs_f64() / bytes as f64
-        };
-        for unit in units {
-            if left.contains(&unit.remote) {
-                continue;
+        if whole {
+            // Each row carries the digest of its own send, so the file is
+            // not read again.
+            for file in native_rows {
+                if left.contains(&file.unit.remote) {
+                    continue;
+                }
+                sent_files.push(SentRow {
+                    unit: file.unit,
+                    seconds: file.seconds,
+                    hash: Some(file.hash),
+                    exact: true,
+                });
             }
-            let seconds = unit.size as f64 * share;
-            sent_files.push((unit, seconds));
+        } else {
+            // A file that is no longer in the plan is on the server. Its
+            // seconds are its share of this attempt's bytes, so the row is
+            // marked as an estimate.
+            let share = if bytes == 0 {
+                0.0
+            } else {
+                elapsed.as_secs_f64() / bytes as f64
+            };
+            for unit in units {
+                if left.contains(&unit.remote) {
+                    continue;
+                }
+                let seconds = unit.size as f64 * share;
+                sent_files.push(SentRow {
+                    unit,
+                    seconds,
+                    hash: None,
+                    exact: false,
+                });
+            }
         }
         say(
             report.json,
@@ -1100,21 +1170,39 @@ fn upload_loop(
     }
     // The rows are built once the batch has finished. The order is the
     // order the attempts sent the files, so the table does not move.
-    let hashes = hashes.join();
-    for (unit, seconds) in sent_files {
-        // A path the pool did not reach, because a worker panicked or the
-        // file arrived on a later attempt, is hashed here instead.
-        let row = match hashes.get(&unit.local) {
-            Some(sha256) => summary::SentFile::whole_with_hash(
+    let hashes = if whole { HashMap::new() } else { hashes.join() };
+    for row in sent_files {
+        let SentRow {
+            unit,
+            seconds,
+            hash,
+            exact,
+        } = row;
+        let sha256 = match hash.or_else(|| hashes.get(&unit.local).cloned()) {
+            Some(sha256) => sha256,
+            // A path the pool did not reach, because a worker panicked or
+            // the file arrived on a later attempt, is hashed here instead.
+            None => {
+                report.sent.push(summary::SentFile::whole(
+                    &unit.local,
+                    &unit.remote,
+                    unit.size,
+                    seconds,
+                ));
+                continue;
+            }
+        };
+        report.sent.push(if exact {
+            summary::SentFile::native(&unit.local, &unit.remote, unit.size, seconds, sha256)
+        } else {
+            summary::SentFile::whole_with_hash(
                 &unit.local,
                 &unit.remote,
                 unit.size,
                 seconds,
-                sha256.clone(),
-            ),
-            None => summary::SentFile::whole(&unit.local, &unit.remote, unit.size, seconds),
-        };
-        report.sent.push(row);
+                sha256,
+            )
+        });
     }
     if !report.sent.is_empty() {
         let seconds = upload_started.elapsed().as_secs_f64();

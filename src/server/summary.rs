@@ -42,6 +42,14 @@ impl SentFile {
         Self::whole_with_hash(local, remote, planned, seconds, sha256)
     }
 
+    /// The row for a whole file whose exact digest and seconds the send
+    /// produced.
+    pub fn native(local: &Path, remote: &str, planned: u64, seconds: f64, sha256: String) -> Self {
+        let mut row = Self::whole_with_hash(local, remote, planned, seconds, sha256);
+        row.estimated = false;
+        row
+    }
+
     /// The row for a whole file whose local digest another thread already
     /// computed. `sha256` is `-` when the file could not be read.
     pub fn whole_with_hash(
@@ -196,6 +204,18 @@ mod tests {
         assert!(lines[2].contains("1.0 s~"), "{}", lines[2]);
         assert!(lines[2].contains("0.00~"), "{}", lines[2]);
         assert!(!lines[3].contains('~'), "{}", lines[3]);
+    }
+
+    #[test]
+    fn a_native_whole_file_is_not_an_estimate() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("big.pbo");
+        std::fs::write(&path, [b'x'; 128]).unwrap();
+        let row = SentFile::native(&path, "/srv/@1/addons/big.pbo", 128, 0.5, "d".repeat(64));
+        assert!(!row.estimated);
+        let lines = render(&[row], 0.5);
+        assert!(lines[2].contains("0.5 s"), "{}", lines[2]);
+        assert!(!lines[2].contains('~'), "{}", lines[2]);
     }
 
     #[test]

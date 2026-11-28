@@ -259,6 +259,9 @@ enum Commands {
         /// Use the native segmented transport
         #[arg(long)]
         segmented: bool,
+        /// Use the native whole-file transport: read each file once and hash it as it is written
+        #[arg(long, conflicts_with_all = ["segmented", "legacy_sftp"])]
+        native_whole: bool,
         /// Force the system sftp path for one release
         #[arg(long, conflicts_with = "segmented")]
         legacy_sftp: bool,
@@ -492,6 +495,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             server_cfg,
             strict_config,
             segmented,
+            native_whole,
             legacy_sftp,
             password_prompt,
             segment_min,
@@ -543,6 +547,7 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
                 server_cfg,
                 strict_config,
                 segmented,
+                native_whole,
                 legacy_sftp,
                 password_prompt,
                 segment_min,

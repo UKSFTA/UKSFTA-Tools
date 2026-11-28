@@ -1167,7 +1167,8 @@ batch time and its rate is the batch rate.
 
 Both values carry a `~` to mark the estimate. The command computes the local
 SHA-256 for each whole file on four threads while the batch uploads, so the
-pass costs no extra time. A total row gives the exact bytes, the elapsed
+pass costs no extra time. `--native-whole` takes the digest from the send, so
+that path does not run the pass. A total row gives the exact bytes, the elapsed
 seconds and the average rate. A 0-byte file shows `0 B`, `0.0 s` and `-`.
 
 The table goes to the human output only. With `--json` the same values appear in
@@ -1233,6 +1234,98 @@ Without that kernel they skip with a printed reason. The shaped container shapes
 only its own interface, never the host network.
 
 </details>
+
+##### Native whole-file upload
+
+`--native-whole` sends every file over the native transport. Each worker
+holds one connection and sends one file at a time, so `--jobs` is the
+number of connections.
+
+The default transport reads each file twice: once for `sftp put` and once
+for the summary SHA-256. This flag reads each file once. A worker reads the
+file in packets and sends each packet to a hash thread in file order. It
+keeps a window of writes in flight: the next packet is read while the
+window's writes are outstanding, and only one write is awaited when the
+window is full. Every write runs as its own task, so the link never empties
+between packets. The summary digest is the digest of the send.
+
+The window for one worker is
+
+```text
+max( min(requests × packet, 64 MiB, file size) / workers, packet )
+```
+
+`packet` is the larger of `--buffer` and 261120 bytes. `workers` is the
+number of workers in the batch. With `--jobs 8 --requests 256` on the
+15.46 GB pack, one worker holds 32 packets, or 8 MiB. With one worker it
+holds 256 packets, or 63.75 MiB. The whole transfer never holds more than
+64 MiB of unsent data, whatever the worker count.
+
+The feature is off by default, so a run without the flag is unchanged. The
+flag takes a key file or an agent, or one password typed at the terminal
+with `--password-prompt`.
+
+| Flag | Range | Default | Effect |
+| --- | --- | --- | --- |
+| `--native-whole` | on or off | off | Send every file over the native whole-file path. |
+| `--jobs N` | 1 to 8 | 1 | The connections. One file per connection at a time. |
+| `--buffer BYTES` | 4096 to 261120 | 261120 | The write size. The path uses the larger of this value and 261120. |
+| `--requests N` | 1 to 256 | 64 | The window: the writes in flight per worker, before the worker split. |
+| `--preallocate` | on or off | on | Set the temp file to its full length before the first packet. |
+| `--limit BYTES` | at least 1 B/s | none | Cap the write rate through one shared limiter. |
+
+The flag conflicts with `--legacy-sftp` and `--segmented`. If `server.toml`
+enables segmentation, the flag turns it off for that run.
+
+Memory follows the window, not the file size. At `--jobs 8 --requests 256`
+the run held under 300 MB. A smaller `--requests` or more workers lowers it,
+and the writes in flight fall with it.
+
+The command writes the file to `<name>.uksfta-part` and leaves the final
+name empty. It checks the remote length against the bytes it read, then
+publishes with one rename. It does not fsync the temp first, because `put`
+does not either; the segmented path does sync, because it records
+acknowledged ranges. The rename uses `posix-rename@openssh.com` when the
+server advertises it, and the aside rename otherwise.
+
+The command sets the remote modification time from the local file, as
+`put -p` does. The time has one-second resolution.
+
+The command creates a missing directory, and the parents, before the temp
+file. A 0-byte file is created, published and hashed as the empty digest.
+
+A failed send removes nothing. The temp file stays. The next run truncates
+it before the first packet, and it also sweeps a temp that is a day old and
+belongs to a file no longer planned. The final name is written only by the
+rename, so a short file never takes the final name.
+
+The path does not read the published file back. The SSH transport checks
+the integrity of every packet, and the length check covers a truncation.
+The segmented path does read back, because it writes ranges out of order.
+
+Measured on the local fixtures, three runs each, medians:
+
+| Case | system `sftp` | `--native-whole` |
+| --- | --- | --- |
+| 15.46 GB pack, upload phase | 36.6 s | 33.2 s |
+| 15.46 GB pack, wall | 36.8 s | 33.3 s |
+| 15.46 GB pack, disk read | 16.0 GB | 15.46 GB |
+| 15.46 GB pack, peak memory | 15 MB | 136 MB |
+| 977 MB file, 20 ms link, send | 13.1 s | 13.9 s |
+| 977 MB file, 20 ms link, wall | 14.45 s | 14.54 s |
+
+The pack run used `--jobs 8 --buffer 261120 --requests 256`. The shaped run
+used `--jobs 1`, a 20 ms delay with 5 ms of jitter, and a 1 GB file. The
+whole path reads the pack once and is level with the system path on the
+delayed link: its send is 6 percent slower because it hashes the bytes,
+and its wall is within 1 percent because the system path then pays its
+own digest pass.
+
+Do not use the flag when you need resume. A killed whole-file send restarts
+that file from byte zero, while `--segmented` resumes from acknowledged
+ranges. The digest also comes from the send, so there is no independent
+second hash of the file. For a small pack, or a link that already runs at
+the server's write limit, the default path is simpler and costs little.
 
 ##### Measured throughput
 

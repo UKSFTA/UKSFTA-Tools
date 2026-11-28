@@ -497,7 +497,16 @@ pub async fn finish(sftp: &Sftp, path: &str, size: u64) -> Result<(), UksftaErro
         file.sync_all().await.map_err(sftp_error)?;
     }
     file.close().await.map_err(sftp_error)?;
+    check_len(sftp, path, size).await
+}
 
+/// Check the server holds exactly `size` bytes at `path`. The whole-file
+/// path uses this without a sync, because `put` does not sync either and a
+/// sync of a large file costs a full flush before the rename.
+///
+/// # Errors
+/// Returns `Input` when the metadata read fails or the length differs.
+pub async fn check_len(sftp: &Sftp, path: &str, size: u64) -> Result<(), UksftaError> {
     let mut fs = sftp.fs();
     let metadata = fs.metadata(path).await.map_err(sftp_error)?;
     let len = metadata.len().unwrap_or(u64::MAX);
@@ -509,7 +518,7 @@ pub async fn finish(sftp: &Sftp, path: &str, size: u64) -> Result<(), UksftaErro
     Ok(())
 }
 
-fn sftp_error(error: openssh_sftp_client::Error) -> UksftaError {
+pub(super) fn sftp_error(error: openssh_sftp_client::Error) -> UksftaError {
     UksftaError::Input(format!("sftp: {error}"))
 }
 
@@ -578,9 +587,10 @@ pub async fn clean_orphans(
     Ok(removed)
 }
 
-/// The names this command leaves behind between runs.
+/// The names this command leaves behind between runs. A temp is
+/// `<name>.uksfta-part`, or `<name>.uksfta-part-<run>` from an older build.
 fn is_temp_name(name: &str) -> bool {
-    name.contains(".uksfta-part-") || name.contains(".uksfta-old-")
+    name.contains(".uksfta-part") || name.contains(".uksfta-old-")
 }
 
 /// Ask for the free space in the target directory. `None` means the server
@@ -671,9 +681,9 @@ mod tests {
     #[test]
     fn only_temp_markers_are_orphans() {
         assert!(is_temp_name("x.pbo.uksfta-part-old"));
+        assert!(is_temp_name("x.pbo.uksfta-part"));
         assert!(is_temp_name("x.pbo.uksfta-old-0123456789abcdef"));
-        assert!(!is_temp_name("x.pbo.uksfta-part"), "the live temp is kept");
-        assert!(!is_temp_name("x.pbo"));
+        assert!(!is_temp_name("x.pbo"), "a real file is never an orphan");
         assert!(!is_temp_name("x.pbo.bisign"));
     }
 
