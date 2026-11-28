@@ -35,6 +35,7 @@ use crate::origin::{
     ResolvedOrigin,
 };
 use crate::pbo::{get_mod_metadata, pbo_fingerprint, pbo_prefix, PboContent};
+use crate::pbo_hashes::PboHashes;
 use crate::steam::find_all_workshop_caches;
 use crate::util::{
     find_pbos, paint, sanitize_for_terminal, stdout_is_tty, workshop_url, C_GREEN, C_RED,
@@ -125,18 +126,45 @@ pub fn investigate(
     let manifest_index = WorkshopIndex::load();
     let mut hash_hits: HashMap<String, (String, String, usize)> = HashMap::new();
 
-    // Match each untracked PBO against the index and arbitrate the origin
+    // First pass: prefix origin and candidate discovery read no file body.
+    let mut target_prefixes: HashMap<String, Option<String>> = HashMap::new();
     for (pbo_name, pbo_path, origin) in &mut results {
         let target_prefix = pbo_prefix(pbo_path);
         let candidates = index.candidates(pbo_name);
         *origin = resolve_pbo_from_index(pbo_path, candidates, target_prefix.as_deref());
+        target_prefixes.insert(pbo_name.clone(), target_prefix);
+    }
 
+    // One bounded batch hashes every file with a name candidate. An
+    // unchanged file is read from the hash cache instead.
+    let hash_paths: Vec<PathBuf> = results
+        .iter()
+        .filter(|(_, path, _)| {
+            manifest_index
+                .as_ref()
+                .is_some_and(|index| !index.candidates_for(path).is_empty())
+        })
+        .map(|(_, path, _)| path.clone())
+        .collect();
+    let mut hashes = PboHashes::load(&PboHashes::default_path());
+    let digests: HashMap<PathBuf, ([u8; 20], u64)> = hash_paths
+        .iter()
+        .cloned()
+        .zip(hashes.digests(&hash_paths))
+        .filter_map(|(path, digest)| digest.map(|digest| (path, digest)))
+        .collect();
+
+    for (pbo_name, pbo_path, origin) in &mut results {
         let Some(index) = manifest_index.as_ref() else {
+            break;
+        };
+        let Some((sha, size)) = digests.get(pbo_path) else {
             continue;
         };
-        let Some(entries) = index.confirm_named(pbo_path) else {
+        let entries = index.lookup(sha, *size);
+        if entries.is_empty() {
             continue;
-        };
+        }
         let chosen = index
             .pick(entries, origin.as_ref().map(|o| o.id.as_str()))
             .expect("a confirmed match has at least one entry");
@@ -156,10 +184,11 @@ pub fn investigate(
         );
         *origin = Some(ResolvedOrigin {
             id: chosen.published_id.clone(),
-            prefix: target_prefix.clone(),
+            prefix: target_prefixes.get(pbo_name).cloned().flatten(),
             is_pack,
         });
     }
+    hashes.finish();
 
     // Report
     let use_colour = stdout_is_tty();

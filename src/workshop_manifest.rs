@@ -363,15 +363,6 @@ pub fn shared_suffix(entries: &[IndexEntry]) -> String {
     }
 }
 
-/// The outcome of hashing one file against the index.
-#[derive(Debug)]
-pub enum Confirmation<'a> {
-    Match(&'a [IndexEntry]),
-    Miss,
-    /// The file could not be read, so its bytes are unknown.
-    Unreadable,
-}
-
 /// A content-addressed index of every file in every installed manifest,
 /// with a basename index over the PBOs for discovery before hashing.
 #[derive(Debug, Default)]
@@ -435,39 +426,6 @@ impl WorkshopIndex {
             }
         }
         entries.first()
-    }
-
-    /// Hash one file and look it up. `None` covers an unreadable file and a
-    /// miss alike.
-    pub fn confirm(&self, path: &Path) -> Option<&[IndexEntry]> {
-        match self.confirmation(path) {
-            Confirmation::Match(entries) => Some(entries),
-            Confirmation::Miss | Confirmation::Unreadable => None,
-        }
-    }
-
-    /// Hash one file and say whether the bytes match, miss, or could not be
-    /// read. The caller needs the difference to choose between the prefix
-    /// fallback and an unconfirmed candidate.
-    pub fn confirmation(&self, path: &Path) -> Confirmation<'_> {
-        let Some((sha, size)) = sha1_and_size(path) else {
-            return Confirmation::Unreadable;
-        };
-        let entries = self.lookup(&sha, size);
-        if entries.is_empty() {
-            Confirmation::Miss
-        } else {
-            Confirmation::Match(entries)
-        }
-    }
-
-    /// Confirm a file only when its name has a candidate. A file no
-    /// manifest lists is never hashed.
-    pub fn confirm_named(&self, path: &Path) -> Option<&[IndexEntry]> {
-        if self.candidates_for(path).is_empty() {
-            return None;
-        }
-        self.confirm(path)
     }
 
     /// Items publishing this PBO basename. A size that matches at least one
@@ -1215,46 +1173,6 @@ mod tests {
     }
 
     #[test]
-    fn confirm_named_refuses_a_name_with_no_candidate() {
-        let dir = scratch("named");
-        let path = dir.join("renamed.pbo");
-        fs::write(&path, b"exact bytes").unwrap();
-        let (digest, size) = sha1_and_size(&path).unwrap();
-
-        let index = from_mappings(vec![(
-            "111".to_string(),
-            vec![ManifestFile {
-                path: "addons\\original.pbo".to_string(),
-                size,
-                flags: 0,
-                sha_content: digest,
-            }],
-        )]);
-
-        // The bytes are in the index under another name.
-        assert!(index.confirm(&path).is_some());
-        assert!(index.confirm_named(&path).is_none());
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn confirmation_separates_a_miss_from_an_unreadable_file() {
-        let dir = scratch("confirmation");
-        let index = from_mappings(vec![(
-            "111".to_string(),
-            vec![file("addons\\a.pbo", 3, 0x01)],
-        )]);
-        let path = dir.join("unknown.pbo");
-        assert!(matches!(
-            index.confirmation(&path),
-            Confirmation::Unreadable
-        ));
-        fs::write(&path, b"xyz").unwrap();
-        assert!(matches!(index.confirmation(&path), Confirmation::Miss));
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
     fn basename_handles_separators_and_case() {
         assert_eq!(
             pbo_basename("Addons\\ACE_Common.PBO"),
@@ -1271,45 +1189,53 @@ mod tests {
     #[test]
     #[ignore]
     fn live_index_finds_a_known_pbo() {
+        use crate::pbo_hashes::PboHashes;
+
         let caches = find_depot_caches();
         assert!(!caches.is_empty(), "no depot cache found");
         let index = build_index(&caches, &index_path());
         assert!(!index.is_empty(), "index is empty");
 
-        let mut checked = 0;
+        // Take the first installed PBOs with a name candidate, hash them
+        // through the production cache, and confirm each against its item.
+        let mut paths = Vec::new();
+        let mut expected = Vec::new();
         'outer: for cache in find_all_workshop_caches() {
             for entry in fs::read_dir(&cache).unwrap().flatten() {
                 let id = entry.file_name().to_string_lossy().to_string();
-                let dir = entry.path();
-                for pbo in crate::util::find_pbos(&dir) {
-                    let candidates = index.candidates_for(&pbo);
-                    assert!(
-                        !candidates.is_empty(),
-                        "no name candidate for {}",
-                        pbo.display()
-                    );
-                    let Confirmation::Match(entries) = index.confirmation(&pbo) else {
-                        continue;
-                    };
-                    assert!(
-                        entries.iter().any(|entry| entry.published_id == id),
-                        "{} matched the index but not item {}",
-                        pbo.display(),
-                        id
-                    );
-                    checked += 1;
-                    println!(
-                        "confirmed {} -> item {} ({} candidate item(s))",
-                        pbo.display(),
-                        id,
-                        candidates.ids().len()
-                    );
-                    if checked == 3 {
+                for pbo in crate::util::find_pbos(&entry.path()) {
+                    if index.candidates_for(&pbo).is_empty() {
+                        panic!("no name candidate for {}", pbo.display());
+                    }
+                    paths.push(pbo);
+                    expected.push(id.clone());
+                    if paths.len() == 3 {
                         break 'outer;
                     }
                 }
             }
         }
-        assert!(checked > 0, "no installed PBO matched the index");
+        assert_eq!(paths.len(), 3, "too few installed PBOs");
+
+        let cache_path = std::env::temp_dir().join("uksfta-live-pbo-hashes.json");
+        let _ = fs::remove_file(&cache_path);
+        let mut hashes = PboHashes::load(&cache_path);
+        let digests = hashes.digests(&paths);
+        assert_eq!(hashes.hashed, 3);
+        hashes.finish();
+        assert!(cache_path.is_file());
+
+        for ((pbo, id), digest) in paths.iter().zip(&expected).zip(digests) {
+            let (sha, size) = digest.expect("an installed PBO is readable");
+            let entries = index.lookup(&sha, size);
+            assert!(
+                entries.iter().any(|entry| &entry.published_id == id),
+                "{} matched the index but not item {}",
+                pbo.display(),
+                id
+            );
+            println!("confirmed {} -> item {}", pbo.display(), id);
+        }
+        fs::remove_file(&cache_path).unwrap();
     }
 }
