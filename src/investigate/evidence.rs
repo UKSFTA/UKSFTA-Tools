@@ -12,6 +12,7 @@
 //! therefore outranks an item label and a menu entry.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 
 use super::normalise::normalise;
@@ -116,6 +117,7 @@ pub(crate) fn build_evidence_pool(addons_dir: &Path) -> EvidencePool {
 }
 
 /// The PBOs the pool covers: the files directly in `addons_dir`, sorted.
+#[cfg(test)]
 pub(crate) fn pool_files(addons_dir: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = match std::fs::read_dir(addons_dir) {
         Ok(entries) => entries

@@ -53,11 +53,6 @@ pub(crate) struct IdentityEvidence {
     pub stem: String,
 }
 
-/// Read one PBO and derive its ordered phrases.
-pub(crate) fn extract_identity(path: &Path) -> IdentityEvidence {
-    extract_identity_from(&PboContent::read(path))
-}
-
 /// Derive the ordered phrases from a PBO already read. The online path
 /// passes the same read to the evidence harvester.
 pub(crate) fn extract_identity_from(content: &PboContent) -> IdentityEvidence {
@@ -313,7 +308,7 @@ mod tests {
         )
         .unwrap();
 
-        let evidence = extract_identity(&path);
+        let evidence = extract_identity_from(&PboContent::read(&path));
 
         assert_eq!(
             evidence.required_addons,

@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::bikey::scan_bikey_names;
-use super::evidence::{pool_files, PoolBuilder};
+use super::evidence::{EvidencePool, PoolBuilder};
 use super::http::{LiveHttp, RateLimiter};
-use super::identity::{extract_identity, extract_identity_from, IdentityEvidence};
+use super::identity::{extract_identity_from, IdentityEvidence};
 use super::keyed::{KeyedSearch, LiveKeyedSearch};
 use super::plan::build_corpus_stats_many;
 use super::r#match::{Resolution, ResolutionStatus};
@@ -333,35 +333,24 @@ fn resolve_identities(
     // The origin phase already hashed every PBO that has a name candidate.
     // A hit needs no browse request and no corpus read, so a pack whose
     // files are all installed can finish without either.
-    let mut confirmed: Vec<PboResolution> = Vec::new();
-    let mut unresolved: Vec<(String, PathBuf)> = Vec::new();
-    for pbo in pbos {
-        match hash_hits.get(&pbo.0) {
-            Some((id, path, shared)) => {
-                confirmed.push(hash_resolution(pbo, id, path, *shared, mod_dirs));
-            }
-            None => unresolved.push(pbo.clone()),
-        }
-    }
-    if !confirmed.is_empty() {
+    let plan = plan_evidence(pbos, hash_hits, mod_dirs, PboContent::read);
+    if !plan.confirmed.is_empty() {
         println!(
             "  {} PBO(s) confirmed by content hash; no request is spent on them.",
-            confirmed.len()
+            plan.confirmed.len()
         );
     }
-    if unresolved.is_empty() {
-        let now = now_secs();
-        let rendered = persist(&confirmed, &[], now, Vec::new());
+    let Some(work) = plan.pending else {
+        let rendered = persist(&plan.confirmed, &[], now_secs(), Vec::new());
         println!("\n{}", render_all(&rendered, use_colour));
         println!("\n{}", render_summary(&summary_of(&rendered), use_colour));
         return Ok(());
-    }
-    let pbos = &unresolved;
+    };
 
     println!(
         "\nResolving {} PBO(s) online. The evidence read takes about a minute and \
          Workshop browse requests are paced at one every 4 s, so a run takes minutes.",
-        pbos.len()
+        work.pbos.len()
     );
 
     // Rarity is learned from every installed Workshop PBO, not from this
@@ -377,31 +366,9 @@ fn resolve_identities(
     }
     let corpus = build_corpus_stats_many(&corpus_dirs.into_iter().collect::<Vec<_>>());
 
-    // One read per PBO serves both the evidence pool and the identity
-    // extractor. The read is released before the next PBO, so a large
-    // pack is never held in memory at once.
-    let examined: HashSet<&Path> = pbos.iter().map(|(_, path)| path.as_path()).collect();
-    let mut evidence_by_path: HashMap<PathBuf, IdentityEvidence> = HashMap::new();
-    let mut builder = PoolBuilder::new();
-    for path in pool_files(addons_dir) {
-        let content = PboContent::read(&path);
-        builder.add(&content);
-        if examined.contains(path.as_path()) {
-            evidence_by_path.insert(path.clone(), extract_identity_from(&content));
-        }
-    }
-    let pool = builder.finish();
-    let evidence: Vec<_> = pbos
-        .iter()
-        .map(|(_, path)| match evidence_by_path.remove(path) {
-            Some(evidence) => evidence,
-            None => extract_identity(path),
-        })
-        .collect();
-
     let store = load_store(&store_path());
     let now = now_secs();
-    let (kept, pending) = split_fresh(&store, evidence, now);
+    let (kept, pending) = split_fresh(&store, work.evidence, now);
     if !kept.is_empty() {
         println!(
             "  {} PBO(s) still hold a fresh record; no request is spent on them.",
@@ -411,7 +378,7 @@ fn resolve_identities(
 
     let http = LiveHttp::new();
     let mut limiter = RateLimiter::new(std::thread::sleep);
-    let mut ctx = ResolveContext::new(&http, &mut limiter, &corpus, Some(&pool));
+    let mut ctx = ResolveContext::new(&http, &mut limiter, &corpus, Some(&work.pool));
     if let Some(source) = keyed {
         ctx.use_keyed_search(source);
     }
@@ -455,7 +422,7 @@ fn resolve_identities(
         return Err(UksftaError::Input(error.message()));
     }
 
-    let mut all = confirmed;
+    let mut all = plan.confirmed;
     all.extend(resolutions);
     let rendered = persist(&all, &items, now, kept);
 
@@ -509,6 +476,77 @@ fn hash_resolution(
             matched_by,
         },
         candidates: Vec::new(),
+    }
+}
+
+/// The examined PBOs after the content-hash partition, with the evidence
+/// pass for the ones that still need a query.
+struct EvidencePlan {
+    /// A decision the depot manifest already settled.
+    confirmed: Vec<PboResolution>,
+    /// `None` when every examined PBO is confirmed. The pool is then not
+    /// built, no PBO content is read, and no request is spent.
+    pending: Option<PendingEvidence>,
+}
+
+/// The PBOs that still need a query, with the evidence read for them.
+struct PendingEvidence {
+    pbos: Vec<(String, PathBuf)>,
+    pool: EvidencePool,
+    evidence: Vec<IdentityEvidence>,
+}
+
+/// Split the examined PBOs by content-hash confirmation, then read one
+/// record per PBO that still needs a query.
+///
+/// `read` is the only PBO content read on this path. A confirmed PBO is
+/// never read: the origin phase hashed its bytes and the manifest names
+/// its item. The pool covers the pending PBOs alone, so a mixed pack
+/// spends no read on the files the hash already proved, and a run with
+/// nothing pending builds no pool at all.
+fn plan_evidence(
+    pbos: &[(String, PathBuf)],
+    hash_hits: &HashMap<String, (String, String, usize)>,
+    mod_dirs: &[ModDir],
+    mut read: impl FnMut(&Path) -> PboContent,
+) -> EvidencePlan {
+    let mut confirmed = Vec::new();
+    let mut waiting: Vec<(String, PathBuf)> = Vec::new();
+    for pbo in pbos {
+        match hash_hits.get(&pbo.0) {
+            Some((id, path, shared)) => {
+                confirmed.push(hash_resolution(pbo, id, path, *shared, mod_dirs));
+            }
+            None => waiting.push(pbo.clone()),
+        }
+    }
+    if waiting.is_empty() {
+        return EvidencePlan {
+            confirmed,
+            pending: None,
+        };
+    }
+    // Sorted by path, as the whole-pack pool was, so a partial pool keeps
+    // the pack's file order.
+    waiting.sort();
+
+    // One read per pending PBO serves both the pool and the identity
+    // extractor. The read is released before the next PBO, so a large
+    // pack is never held in memory at once.
+    let mut builder = PoolBuilder::new();
+    let mut evidence = Vec::with_capacity(waiting.len());
+    for (_, path) in &waiting {
+        let content = read(path);
+        builder.add(&content);
+        evidence.push(extract_identity_from(&content));
+    }
+    EvidencePlan {
+        confirmed,
+        pending: Some(PendingEvidence {
+            pbos: waiting,
+            pool: builder.finish(),
+            evidence,
+        }),
     }
 }
 
@@ -575,4 +613,108 @@ fn persist(
         eprintln!("Warning: could not save {}: {error}", path.display());
     }
     rendered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn pbo(name: &str) -> (String, PathBuf) {
+        (name.to_string(), Path::new("addons").join(name))
+    }
+
+    fn hits(entries: &[(&str, &str)]) -> HashMap<String, (String, String, usize)> {
+        entries
+            .iter()
+            .map(|(name, id)| {
+                (
+                    name.to_string(),
+                    (id.to_string(), format!("Addons\\{name}"), 1),
+                )
+            })
+            .collect()
+    }
+
+    /// A content record with no bytes: enough for the pool and the
+    /// clauses that need no packed config.
+    fn fake_content(path: &Path) -> PboContent {
+        PboContent {
+            path: path.to_path_buf(),
+            name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            head: Vec::new(),
+            sources: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn all_confirmed_plan_builds_no_pool_and_reads_no_pbo() {
+        let examined = [pbo("a.pbo"), pbo("b.pbo")];
+        let hits = hits(&[("a.pbo", "1"), ("b.pbo", "2")]);
+        let reads = Cell::new(0usize);
+
+        let plan = plan_evidence(&examined, &hits, &[], |path| {
+            reads.set(reads.get() + 1);
+            fake_content(path)
+        });
+
+        assert_eq!(reads.get(), 0);
+        assert!(plan.pending.is_none());
+        assert_eq!(plan.confirmed.len(), 2);
+        assert!(plan
+            .confirmed
+            .iter()
+            .all(|item| item.resolution.status == ResolutionStatus::Confirmed));
+    }
+
+    #[test]
+    fn mixed_plan_builds_the_pool_for_the_unconfirmed_pbo_only() {
+        let examined = [pbo("a.pbo"), pbo("miss.pbo"), pbo("b.pbo")];
+        let hits = hits(&[("a.pbo", "1"), ("b.pbo", "2")]);
+        let reads = Cell::new(0usize);
+
+        let plan = plan_evidence(&examined, &hits, &[], |path| {
+            reads.set(reads.get() + 1);
+            fake_content(path)
+        });
+
+        let pending = plan.pending.expect("a miss keeps the pool");
+        assert_eq!(reads.get(), 1);
+        assert_eq!(pending.pbos.len(), 1);
+        assert_eq!(pending.pbos[0].0, "miss.pbo");
+        assert_eq!(pending.evidence.len(), 1);
+        assert_eq!(pending.evidence[0].pbo, "miss.pbo");
+        assert_eq!(pending.pool.corpus.docs, 1);
+    }
+
+    #[test]
+    fn settled_lines_render_as_the_store_reports_them() {
+        let dir = std::env::temp_dir().join("uksfta-online-settled-lines");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ade_core.pbo");
+        std::fs::write(&path, b"hash-confirmed content").unwrap();
+
+        let examined = vec![("ade_core.pbo".to_string(), path.clone())];
+        let hits = hits(&[("ade_core.pbo", "123")]);
+        let plan = plan_evidence(&examined, &hits, &[], fake_content);
+        assert!(plan.pending.is_none());
+
+        let mut store = IdentityStore::empty();
+        record_run(&mut store, &plan.confirmed, &[], 1_000);
+        let fingerprint = plan.confirmed[0].fingerprint.clone();
+        let reported = report_resolutions(&store, &[("ade_core.pbo".to_string(), fingerprint)]);
+
+        assert_eq!(
+            render_all(&plan.confirmed, false),
+            render_all(&reported, false)
+        );
+        assert_eq!(
+            render_summary(&summary_of(&plan.confirmed), false),
+            render_summary(&summary_of(&reported), false)
+        );
+    }
 }
