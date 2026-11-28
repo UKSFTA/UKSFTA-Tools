@@ -408,6 +408,13 @@ impl Fixture {
         fs::write(self.dir.path().join("mod_sources.txt"), text).expect("write mod_sources.txt");
     }
 
+    /// A remote PBO the stub's `get` copies into scratch.
+    fn write_remote_pbo(&self, name: &str, body: &[u8]) {
+        let addons = self.remote.join(format!("@{ID}/addons"));
+        fs::create_dir_all(&addons).expect("create the remote addons");
+        fs::write(addons.join(name), body).expect("write the remote PBO");
+    }
+
     /// A config that turns the segmented path on for every file.
     fn enable_segment(&self, min_bytes: u64) {
         let known_hosts = self.dir.path().join("known_hosts");
@@ -457,6 +464,48 @@ fn a_matching_pack_plans_no_change() {
         "sftp must not run in -b mode: {argv:?}"
     );
     assert!(log.contains("CMDS"), "commands arrive on stdin");
+}
+
+#[test]
+fn a_deep_run_passes_when_the_remote_copy_matches() {
+    let fixture = Fixture::new(&signing_listing(9, KEY, 7));
+    fixture.write_remote_pbo(PBO, b"local");
+
+    fixture
+        .command()
+        .arg("server")
+        .arg("--deep")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("status: ok"))
+        .stdout(predicate::str::contains("plan: no changes"))
+        // The stub destination has no native session, so this covers the
+        // fallback that reads each remote PBO into scratch.
+        .stderr(predicate::str::contains("Warning: deep:"));
+
+    assert!(
+        fixture
+            .log()
+            .contains(&format!("-get \"{ROOT}/@{ID}/addons/{PBO}\"")),
+        "the fallback downloads the PBO"
+    );
+}
+
+#[test]
+fn a_deep_hash_mismatch_is_reported_and_exits_one() {
+    let fixture = Fixture::new(&signing_listing(9, KEY, 7));
+    fixture.write_remote_pbo(PBO, b"other");
+
+    fixture
+        .command()
+        .arg("server")
+        .arg("--deep")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "stale uksfta_main.pbo: contents differ",
+        ))
+        .stderr(predicate::str::contains("pack problem(s)"));
 }
 
 #[test]

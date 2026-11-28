@@ -7,12 +7,14 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::config::Settings;
+use super::native;
 use super::parse;
 use super::plan::{
     build_plan, join_remote, mod_dir, LocalPack, Plan, PlanInput, RemoteEntry, RemotePack,
 };
 use super::sftp::{quote, ScratchDir, Sftp};
 use super::signature;
+use super::{hash_threads, LocalHashes, MISSING_HASH};
 use crate::error::UksftaError;
 use crate::util::file_sha256;
 
@@ -28,6 +30,9 @@ const MAX_DIRS: usize = 512;
 const DIR_BATCH: usize = 32;
 /// The deepest directory level listed below the pack root.
 const MAX_DEPTH: usize = 8;
+/// The deep phase sends nothing, so its local hash takes the full thread cap
+/// that [`hash_threads`] allows when no single worker owns the link.
+const DEEP_HASH_JOBS: u8 = 2;
 
 /// The reads that need only the listing: the remote key authorities, the
 /// deep hash results, and every warning they raise.
@@ -140,34 +145,16 @@ impl Verifier<'_> {
             keys.push((name.to_string(), target));
         }
 
-        let deep_dir = self.scratch.join("deep");
-        let mut targets = Vec::new();
-        if self.deep {
-            fs::create_dir_all(&deep_dir).map_err(UksftaError::Io)?;
-            let remote_by_name: HashMap<String, &RemoteEntry> = remote
-                .files
-                .iter()
-                .map(|entry| (entry.rel.to_ascii_lowercase(), entry))
-                .collect();
-            for pbo in self.local.pbos() {
-                let key = pbo.rel.to_ascii_lowercase();
-                let Some(remote_file) = remote_by_name.get(&key) else {
-                    continue;
-                };
-                let target = deep_dir.join(format!("{}.pbo", key.replace('/', "_")));
-                lines.push(format!(
-                    "-get {} {}",
-                    quote(&join_remote(dir, &remote_file.rel))?,
-                    quote(&target.display().to_string())?
-                ));
-                targets.push((key, pbo.path.clone(), target));
-            }
-        }
+        let deep = if self.deep {
+            self.deep_hashes(dir, remote)?
+        } else {
+            HashMap::new()
+        };
 
         if lines.is_empty() {
             return Ok(Fetched {
                 authorities: HashSet::new(),
-                deep: HashMap::new(),
+                deep,
                 warnings,
             });
         }
@@ -182,7 +169,7 @@ impl Verifier<'_> {
             warnings.push(format!("keys/: cannot download the remote keys: {e}"));
             return Ok(Fetched {
                 authorities: HashSet::new(),
-                deep: HashMap::new(),
+                deep,
                 warnings,
             });
         }
@@ -195,19 +182,6 @@ impl Verifier<'_> {
                 }
                 Err(e) => warnings.push(format!("keys/{name}: {e}")),
             }
-        }
-
-        let mut deep = HashMap::new();
-        for (key, local, downloaded) in targets {
-            let same = match (file_sha256(&local), file_sha256(&downloaded)) {
-                (Some(a), Some(b)) => a == b,
-                _ => {
-                    eprintln!("Warning: {key}: cannot hash the downloaded PBO");
-                    false
-                }
-            };
-            let _ = fs::remove_file(&downloaded);
-            deep.insert(key, same);
         }
 
         Ok(Fetched {
@@ -360,8 +334,214 @@ impl Verifier<'_> {
             .filter(|meta| meta.is_file())
             .map(|meta| meta.len());
     }
+
+    /// Every remote PBO that has a local match is hashed on both sides. The
+    /// remote copy streams into the hasher, so no local copy is written. The
+    /// local side hashes on its own threads at the same time.
+    fn deep_hashes(
+        &self,
+        dir: &str,
+        remote: &RemotePack,
+    ) -> Result<HashMap<String, bool>, UksftaError> {
+        let remote_by_name: HashMap<String, &RemoteEntry> = remote
+            .files
+            .iter()
+            .map(|entry| (entry.rel.to_ascii_lowercase(), entry))
+            .collect();
+
+        let mut targets = Vec::new();
+        for pbo in self.local.pbos() {
+            let key = pbo.rel.to_ascii_lowercase();
+            let Some(remote_file) = remote_by_name.get(&key) else {
+                continue;
+            };
+            targets.push(DeepTarget {
+                key,
+                local: pbo.path.clone(),
+                remote: join_remote(dir, &remote_file.rel),
+                size: remote_file.size,
+            });
+        }
+        if targets.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let local = LocalHashes::start(
+            targets.iter().map(|target| target.local.clone()).collect(),
+            hash_threads(DEEP_HASH_JOBS),
+        );
+        let paths: Vec<(String, u64)> = targets
+            .iter()
+            .map(|target| (target.remote.clone(), target.size))
+            .collect();
+        let remote_hashes = match native::verify::stream_hashes(self.settings, &paths) {
+            Ok(streamed) => streamed.digests,
+            Err(error) => {
+                eprintln!("Warning: deep: {error}; reading the remote PBOs to scratch");
+                self.deep_hashes_scratch(&targets)?
+            }
+        };
+
+        Ok(compare(&targets, &remote_hashes, &local.join()))
+    }
+
+    /// The fallback for a setup the native session cannot reach, such as one
+    /// that authenticates with a password prompt: download each remote PBO to
+    /// scratch, hash it, then unlink it.
+    fn deep_hashes_scratch(
+        &self,
+        targets: &[DeepTarget],
+    ) -> Result<Vec<Option<String>>, UksftaError> {
+        let out_dir = self.scratch.join("deep");
+        fs::create_dir_all(&out_dir).map_err(UksftaError::Io)?;
+
+        let mut lines = Vec::new();
+        let mut copies = Vec::new();
+        for target in targets {
+            let copy = out_dir.join(format!("{}.pbo", target.key.replace('/', "_")));
+            lines.push(format!(
+                "-get {} {}",
+                quote(&target.remote)?,
+                quote(&copy.display().to_string())?
+            ));
+            copies.push(copy);
+        }
+        self.client.batch(&lines)?;
+
+        let mut digests = Vec::with_capacity(copies.len());
+        for copy in copies {
+            digests.push(file_sha256(&copy));
+            let _ = fs::remove_file(&copy);
+        }
+        Ok(digests)
+    }
+}
+
+/// A remote PBO that has a local match, with the path of each copy.
+struct DeepTarget {
+    key: String,
+    local: PathBuf,
+    remote: String,
+    /// The length the listing reported.
+    size: u64,
+}
+
+/// A pair matches only when both digests exist and are equal. A digest that
+/// is missing is a warning and a mismatch, as a failed download was.
+fn compare(
+    targets: &[DeepTarget],
+    remote: &[Option<String>],
+    local: &HashMap<PathBuf, String>,
+) -> HashMap<String, bool> {
+    let mut results = HashMap::new();
+    for (index, target) in targets.iter().enumerate() {
+        let local_hash = local
+            .get(&target.local)
+            .filter(|digest| digest.as_str() != MISSING_HASH);
+        let remote_hash = remote.get(index).and_then(Option::as_ref);
+        let same = match (local_hash, remote_hash) {
+            (Some(a), Some(b)) => a == b,
+            _ => {
+                eprintln!("Warning: {}: cannot hash the PBO", target.key);
+                false
+            }
+        };
+        results.insert(target.key.clone(), same);
+    }
+    results
 }
 
 fn basename(rel: &str) -> &str {
     rel.rsplit_once('/').map_or(rel, |(_, name)| name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(key: &str) -> DeepTarget {
+        DeepTarget {
+            key: key.to_string(),
+            local: PathBuf::from(format!("/local/{key}")),
+            remote: format!("/remote/{key}"),
+            size: 5,
+        }
+    }
+
+    fn hashed(path: &str, digest: &str) -> HashMap<PathBuf, String> {
+        let mut map = HashMap::new();
+        map.insert(PathBuf::from(path), digest.to_string());
+        map
+    }
+
+    #[test]
+    fn a_clean_pack_matches_on_every_pair() {
+        let targets = [target("a.pbo"), target("b.pbo")];
+        let local = [("a.pbo", "11"), ("b.pbo", "22")]
+            .iter()
+            .flat_map(|(key, digest)| hashed(&format!("/local/{key}"), digest))
+            .collect::<HashMap<_, _>>();
+        let remote = [Some("11".to_string()), Some("22".to_string())];
+
+        let results = compare(&targets, &remote, &local);
+
+        assert_eq!(results.get("a.pbo"), Some(&true));
+        assert_eq!(results.get("b.pbo"), Some(&true));
+    }
+
+    #[test]
+    fn a_hash_mismatch_is_reported_for_that_pair_only() {
+        let targets = [target("a.pbo"), target("b.pbo")];
+        let local = [("a.pbo", "11"), ("b.pbo", "22")]
+            .iter()
+            .flat_map(|(key, digest)| hashed(&format!("/local/{key}"), digest))
+            .collect::<HashMap<_, _>>();
+        let remote = [Some("11".to_string()), Some("33".to_string())];
+
+        let results = compare(&targets, &remote, &local);
+
+        assert_eq!(results.get("a.pbo"), Some(&true));
+        assert_eq!(results.get("b.pbo"), Some(&false));
+    }
+
+    #[test]
+    fn a_remote_read_error_is_a_mismatch_for_every_affected_pair() {
+        let local = [("a.pbo", "11"), ("b.pbo", "22")]
+            .iter()
+            .flat_map(|(key, digest)| hashed(&format!("/local/{key}"), digest))
+            .collect::<HashMap<_, _>>();
+        // The second remote read failed, and a third pair has no digest at all.
+        let remote = [Some("11".to_string()), None];
+
+        let results = compare(
+            &[target("a.pbo"), target("b.pbo"), target("c.pbo")],
+            &remote,
+            &local,
+        );
+
+        assert_eq!(results.get("a.pbo"), Some(&true));
+        assert_eq!(results.get("b.pbo"), Some(&false));
+        assert_eq!(results.get("c.pbo"), Some(&false));
+    }
+
+    #[test]
+    fn a_local_file_that_cannot_be_hashed_is_a_mismatch() {
+        let targets = [target("a.pbo")];
+        let local = hashed("/local/a.pbo", MISSING_HASH);
+        let remote = [Some("11".to_string())];
+
+        let results = compare(&targets, &remote, &local);
+
+        assert_eq!(results.get("a.pbo"), Some(&false));
+    }
+
+    #[test]
+    fn every_target_reaches_the_plan_even_with_no_digest() {
+        let targets = [target("a.pbo"), target("b.pbo")];
+
+        let results = compare(&targets, &[], &HashMap::new());
+
+        assert_eq!(results.len(), 2);
+        assert!(results.values().all(|same| !same));
+    }
 }
