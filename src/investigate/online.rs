@@ -17,9 +17,13 @@ use super::bikey::scan_bikey_names;
 use super::evidence::{pool_files, PoolBuilder};
 use super::http::{LiveHttp, RateLimiter};
 use super::identity::{extract_identity, extract_identity_from, IdentityEvidence};
+use super::keyed::{KeyedSearch, LiveKeyedSearch};
 use super::plan::build_corpus_stats_many;
+use super::r#match::ResolutionStatus;
 use super::render::{render_all, render_progress, render_summary, summary_of};
-use super::resolve::{resolve_all, split_fresh, PboResolution, Progress, ResolveContext, SeenItem};
+use super::resolve::{
+    resolve_all, split_fresh, KeyedReport, PboResolution, Progress, ResolveContext, SeenItem,
+};
 use super::store::{
     load_store, now_secs, record_run, report_resolutions, save_store, store_path, IdentityStore,
 };
@@ -32,7 +36,9 @@ use crate::origin::{
 };
 use crate::pbo::{get_mod_metadata, pbo_fingerprint, pbo_prefix, PboContent};
 use crate::steam::find_all_workshop_caches;
-use crate::util::{find_pbos, paint, stdout_is_tty, workshop_url, C_GREEN, C_RED};
+use crate::util::{
+    find_pbos, paint, sanitize_for_terminal, stdout_is_tty, workshop_url, C_GREEN, C_RED,
+};
 
 /// Trace the Workshop origin of untracked PBOs in addons/, then, when
 /// `online` is set, resolve each PBO's identity and print one line per PBO.
@@ -40,10 +46,23 @@ use crate::util::{find_pbos, paint, stdout_is_tty, workshop_url, C_GREEN, C_RED}
 /// `report` without `online` renders the stored decisions and needs no
 /// network. `report` with `online` resolves, saves, then prints the same
 /// lines the store now holds.
-pub fn investigate(all: bool, online: bool, report: bool) -> Result<(), UksftaError> {
+pub fn investigate(
+    all: bool,
+    online: bool,
+    report: bool,
+    steam_search: bool,
+) -> Result<(), UksftaError> {
     if report && !online {
         return investigate_report();
     }
+
+    // A missing or refused key is a configuration fault. It is read before
+    // any output, and the keyless path is never used in its place.
+    let keyed = if steam_search {
+        Some(LiveKeyedSearch::from_env().map_err(|error| UksftaError::Input(error.message()))?)
+    } else {
+        None
+    };
 
     let caches = find_all_workshop_caches();
     if caches.is_empty() {
@@ -170,7 +189,8 @@ pub fn investigate(all: bool, online: bool, report: bool) -> Result<(), UksftaEr
         .map(|(name, path, _)| (name.clone(), path.clone()))
         .collect();
     check_workshop_visibility(&results);
-    resolve_identities(&examined, addons_dir, &mod_dirs, use_colour);
+    let source = keyed.as_ref().map(|search| search as &dyn KeyedSearch);
+    resolve_identities(&examined, addons_dir, &mod_dirs, use_colour, source)?;
     Ok(())
 }
 
@@ -227,7 +247,8 @@ fn resolve_identities(
     addons_dir: &Path,
     mod_dirs: &[ModDir],
     use_colour: bool,
-) {
+    keyed: Option<&dyn KeyedSearch>,
+) -> Result<(), UksftaError> {
     let bikey_names = scan_bikey_names(addons_dir);
     if !bikey_names.is_empty() {
         println!("  Signing keys found: {}", bikey_names.join(", "));
@@ -287,6 +308,9 @@ fn resolve_identities(
     let http = LiveHttp::new();
     let mut limiter = RateLimiter::new(std::thread::sleep);
     let mut ctx = ResolveContext::new(&http, &mut limiter, &corpus, Some(&pool));
+    if let Some(source) = keyed {
+        ctx.use_keyed_search(source);
+    }
     ctx.schedule_from(&store);
     // The scan is paced, so a long pack would otherwise print nothing for
     // minutes. One line is rewritten in place until the scan ends.
@@ -316,8 +340,16 @@ fn resolve_identities(
     if scanning {
         println!();
     }
+    // A refused key invalidates every keyed request, so the run stops
+    // before its partial result is written or shown as final.
+    let keyed_failure = ctx.keyed_failure().cloned();
+    let keyed_report = ctx.keyed_report();
     let items = ctx.seen_items();
     drop(ctx);
+
+    if let Some(error) = keyed_failure {
+        return Err(UksftaError::Input(error.message()));
+    }
 
     let resolutions = persist(&resolutions, &items, now, kept);
 
@@ -326,7 +358,53 @@ fn resolve_identities(
         "\n{}",
         render_summary(&summary_of(&resolutions), use_colour)
     );
+    if !keyed_report.is_empty() {
+        print_keyed_report(&keyed_report, &resolutions);
+    }
+    Ok(())
 }
+
+/// The keyed search per PBO: queries sent, ranked candidates, and the
+/// identity the evidence rules confirmed. The top hit is never promoted.
+fn print_keyed_report(reports: &[KeyedReport], resolutions: &[PboResolution]) {
+    println!("\nSteam search candidates (search only; nothing is downloaded):");
+    for report in reports {
+        println!("  {}", sanitize_for_terminal(&report.pbo));
+        let queries = report
+            .queries
+            .iter()
+            .map(|text| format!("\"{}\"", sanitize_for_terminal(text)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("    queries: {queries}");
+        if report.ranked.is_empty() {
+            println!("    no candidates");
+        }
+        for (position, (id, title)) in report.ranked.iter().take(KEYED_REPORT_TOP).enumerate() {
+            println!(
+                "    {}. {} ({})",
+                position + 1,
+                sanitize_for_terminal(title),
+                sanitize_for_terminal(id)
+            );
+        }
+        let confirmed = resolutions.iter().find(|item| {
+            item.pbo == report.pbo && item.resolution.status == ResolutionStatus::Confirmed
+        });
+        match confirmed {
+            Some(item) => {
+                let title =
+                    sanitize_for_terminal(item.resolution.title.as_deref().unwrap_or_default());
+                let id = sanitize_for_terminal(item.resolution.id.as_deref().unwrap_or_default());
+                println!("    confirmed: \"{title}\" ({id})");
+            }
+            None => println!("    no identity confirmed by the evidence rules"),
+        }
+    }
+}
+
+/// Ranked keyed candidates shown per PBO.
+const KEYED_REPORT_TOP: usize = 5;
 
 /// Merge this run into the store, save it, and return the records the
 /// store now holds for exactly these PBOs.

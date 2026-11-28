@@ -11,6 +11,7 @@ mod cluster;
 mod evidence;
 mod http;
 mod identity;
+mod keyed;
 // `match` is a keyword, so the module name needs a raw identifier; the
 // file keeps the name the plan gives it.
 mod r#match;

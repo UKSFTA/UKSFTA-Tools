@@ -13,6 +13,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub(crate) enum Endpoint {
     Browse,
     SharedFiles,
+    /// The opt-in keyed search. It is a small JSON response with its own
+    /// quota, so its interval stays short.
+    QueryFiles,
 }
 
 impl Endpoint {
@@ -20,13 +23,18 @@ impl Endpoint {
         match self {
             Endpoint::Browse => 0,
             Endpoint::SharedFiles => 1,
+            Endpoint::QueryFiles => 2,
         }
     }
 }
 
 /// Minimum seconds between two calls to the same endpoint. Browse is a
-/// full HTML page and sharedfiles is a detail page.
-const ENDPOINT_INTERVALS: [Duration; 2] = [Duration::from_secs(4), Duration::from_secs(8)];
+/// full HTML page, sharedfiles is a detail page and queryfiles is a search.
+const ENDPOINT_INTERVALS: [Duration; 3] = [
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(2),
+];
 
 /// The first backoff a rate-limited response waits, plus up to
 /// [`BACKOFF_JITTER_MS`]. Each further retry doubles it.
@@ -105,14 +113,14 @@ impl Http for LiveHttp {
 ///
 /// `sleep` is injected so a test records delays instead of waiting.
 pub(crate) struct RateLimiter {
-    last: [Option<Instant>; 2],
+    last: [Option<Instant>; 3],
     sleep: fn(Duration),
 }
 
 impl RateLimiter {
     pub(crate) fn new(sleep: fn(Duration)) -> Self {
         Self {
-            last: [None; 2],
+            last: [None; 3],
             sleep,
         }
     }

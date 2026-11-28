@@ -503,6 +503,9 @@ uksfta investigate --online
 # Investigate every PBO, including tracked ones
 uksfta investigate --all
 
+# Add the keyed Steam Workshop search to the candidate sources
+uksfta investigate --online --steam-search
+
 # Refresh the online resolution, then print the status lines
 uksfta investigate --report --online
 ```
@@ -530,6 +533,24 @@ URL, the display names, and other title-shaped strings that are rare in the pack
 
 It plans at most three Workshop text searches per PBO, most specific first. It
 stops at the first confirmed match.
+
+With `--steam-search` the run also sends one `QueryFiles` request per planned
+query to Steam's published-file search. The flag needs `STEAM_API_KEY` in the
+environment, and it needs `--online`. The keyed results merge with the browse
+page and de-duplicate by id. Steam's rank orders the search report, while the
+evidence rules score every candidate by its title. A keyed hit is a candidate
+only: the same evidence rules decide whether it confirms, so the top search hit
+never becomes an identity by itself.
+
+The run prints a `Steam search candidates` block for each PBO. The block lists
+the queries used, the ranked candidates with id and title, and the identity the
+rules confirmed. When nothing confirms, the block states that.
+
+The search reads the Workshop index only. It downloads no item and fetches no
+manifest. Without the key the command exits with code 2 and does not fall back
+to the keyless path. A refused key (HTTP 403) names `STEAM_API_KEY` and stops
+the run. The key is read from the environment only, is never written to a file,
+and never appears in the output.
 
 A search result confirms only when the title covers the query phrase, the head noun
 agrees, the result set is narrow, and the best candidate leads the next one by a
