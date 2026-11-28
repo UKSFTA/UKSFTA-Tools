@@ -78,8 +78,8 @@ pub struct ServerOptions {
     pub require_signatures: bool,
     /// Upload attempts after the first. Zero means one attempt.
     pub retries: u8,
-    /// Uploads to run at the same time. One is a single batch.
-    pub jobs: u8,
+    /// Uploads to run at the same time. The default is one per core.
+    pub jobs: Option<u8>,
     /// sftp transfer buffer in bytes. The default is 32768.
     pub buffer: Option<u32>,
     /// sftp outstanding requests. The default is 64.
@@ -286,10 +286,11 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
     let scratch = ScratchDir::new("uksfta-server-")?;
     let locked = locked_pbos()?;
     let cross_checks = cross_checks(&local)?;
+    let jobs = opts.jobs.unwrap_or_else(default_jobs);
     let requested = match opts.progress {
         Progress::Always => true,
         Progress::Never => false,
-        Progress::Auto => opts.jobs == 1 && std::io::stdout().is_terminal(),
+        Progress::Auto => jobs == 1 && std::io::stdout().is_terminal(),
     };
     let mode = progress::resolve(
         requested,
@@ -398,7 +399,7 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
             &verifier,
             plan,
             opts.retries,
-            opts.jobs,
+            jobs,
             UploadReport {
                 mode,
                 json: opts.json,
@@ -809,6 +810,15 @@ fn probe_target(
 
 /// The digest the summary shows for a file that cannot be read.
 const MISSING_HASH: &str = "-";
+
+/// The most parallel uploads the flag accepts.
+pub const MAX_JOBS: u8 = 8;
+
+/// The parallel uploads when `--jobs` is absent: one per core, at most eight.
+pub fn default_jobs() -> u8 {
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    u8::try_from(cores).unwrap_or(MAX_JOBS).min(MAX_JOBS)
+}
 
 /// The hashing threads: four at most, and two when one worker sends,
 /// because a single connection leaves the disk and the link competing.
@@ -2150,8 +2160,15 @@ mod tests {
     }
 
     #[test]
-    fn a_single_worker_caps_the_hash_pool_at_two() {
-        assert!(hash_threads(1) >= 1);
+    fn the_default_worker_count_follows_the_cores() {
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let expected = u8::try_from(cores).unwrap_or(MAX_JOBS).min(MAX_JOBS);
+        assert_eq!(default_jobs(), expected);
+        assert!((1..=MAX_JOBS).contains(&default_jobs()));
+    }
+
+    #[test]
+    fn a_single_worker_caps_the_hash_pool_at_two() {        assert!(hash_threads(1) >= 1);
         assert!(
             hash_threads(1) <= 2,
             "one worker must not start four threads"
