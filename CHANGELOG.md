@@ -20,6 +20,20 @@ This project uses [Semantic Versioning](https://semver.org/).
   item and fetches no manifest. Without the key the command exits with code
   2 and never falls back, and a refused key names `STEAM_API_KEY` and stops
   the run. The key stays in memory.
+- `--native-whole` sends every file over the native transport. Each worker
+  holds one connection and one file at a time, reads the file once, and
+  sends each packet to a hash thread in file order. A sliding window of
+  piece writes keeps up to
+  `max(min(requests × packet, 64 MiB, file size) / workers, packet)` bytes in
+  flight per worker, and every piece runs as its own task, so the link does
+  not idle between packets. The digest comes from the send and no second
+  local read runs. On the 15.46 GB pack the upload phase fell from 36.6 s to
+  33.2 s and the disk read from 16.0 GB to 15.46 GB; on a 20 ms link it is
+  level with the system client (send 13.9 s against 13.1 s, wall 14.54 s
+  against 14.45 s). The flag is off by default, conflicts with
+  `--legacy-sftp` and `--segmented`, and leaves the default, segmented,
+  probe, checkpoint and JSON paths unchanged.
+
 - The native transport uses a 16 MiB receive window, a 261120-byte packet
   cap and a request buffer sized from `--requests`. The native write block
   is 261120 bytes regardless of `--buffer`, which keeps its default for the
@@ -139,6 +153,13 @@ This project uses [Semantic Versioning](https://semver.org/).
   `keys/*.bikey`, locally and on the server. A renamed key still matches,
   because the file names are ignored. The command does not verify
   cryptography, a hash or a PBO.
+
+### Fixed
+
+- `clean_orphans` now recognises `<name>.uksfta-part`, the name the writer
+  creates, as well as the older `<name>.uksfta-part-<run>`. A temp left by a
+  killed run is swept by a later run instead of staying for ever.
+
 
 ### Changed
 

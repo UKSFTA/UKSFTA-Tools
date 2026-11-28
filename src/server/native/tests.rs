@@ -1414,3 +1414,330 @@ async fn a_keyboard_interactive_server_accepts_the_password() {
         .await
         .expect("the keyboard-interactive fixture must accept the password");
 }
+
+// ---- Whole-file upload -----------------------------------------------------
+
+/// The settings of one whole-file send.
+fn whole_settings(pinned: PathBuf) -> Settings {
+    settings(pinned, Some(client_key()), port())
+}
+
+/// Send one file over the whole-file path with no rate limit.
+async fn whole_send(
+    settings: &Settings,
+    unit: &UploadUnit,
+) -> Result<super::whole::Sent, crate::error::UksftaError> {
+    let session = session(settings).await;
+    let limiter = settings
+        .transfer
+        .limit
+        .map(crate::server::limit::RateLimiter::new)
+        .map(std::sync::Arc::new);
+    let mut noop = |_bytes: u64| {};
+    super::whole::send_file(
+        &session.sftp,
+        unit,
+        "whole-test",
+        super::whole::Params {
+            packet: crate::server::native::NATIVE_BUFFER,
+            requests: settings.transfer.requests,
+            workers: 1,
+            preallocate: settings.segment.preallocate,
+        },
+        limiter,
+        &mut noop,
+    )
+    .await
+}
+
+/// The digest of the published remote file.
+async fn remote_digest(settings: &Settings, remote: &str, size: u64) -> String {
+    let session = session(settings).await;
+    super::verify::hash_remote(&session.sftp, remote, size, super::verify::READBACK_BUFFER)
+        .await
+        .expect("read the published file back")
+}
+
+#[tokio::test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+async fn a_whole_file_send_hashes_what_it_writes() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock_async().await;
+    let (dir, pinned) = pin(port());
+    let settings = whole_settings(pinned);
+    const SIZE: u64 = 64 * 1024 * 1024;
+    let local = local_file(&dir, "whole.pbo", SIZE);
+    let base = remote_dir("whole");
+    // The parent does not exist yet, so the send creates it.
+    let remote = format!("{base}/nested/addons/whole.pbo");
+    let unit = units(&local, &remote, SIZE);
+
+    let sent = whole_send(&settings, &unit)
+        .await
+        .expect("the whole-file send");
+    assert_eq!(sent.bytes, SIZE);
+    assert_eq!(
+        sent.hash,
+        crate::util::file_sha256(&local).expect("the local digest"),
+        "the digest comes from the bytes that were sent"
+    );
+
+    let session = session(&settings).await;
+    let metadata = session
+        .sftp
+        .fs()
+        .metadata(&remote)
+        .await
+        .expect("the published file");
+    assert_eq!(metadata.len(), Some(SIZE), "the published length");
+    assert_eq!(
+        remote_digest(&settings, &remote, SIZE).await,
+        sent.hash,
+        "the server holds the bytes that were sent"
+    );
+
+    let local_mtime = std::fs::metadata(&local)
+        .and_then(|meta| meta.modified())
+        .expect("the local time")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the local time")
+        .as_secs();
+    let remote_mtime = metadata
+        .modified()
+        .map(openssh_sftp_client::UnixTimeStamp::into_raw)
+        .expect("the remote time");
+    assert!(
+        u64::from(remote_mtime).abs_diff(local_mtime) <= 1,
+        "the modification time is preserved: {remote_mtime} against {local_mtime}"
+    );
+
+    let leftovers = session
+        .sftp
+        .fs()
+        .metadata(&format!("{remote}.uksfta-part"))
+        .await;
+    assert!(leftovers.is_err(), "the temp file was published, not kept");
+}
+
+#[tokio::test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+async fn a_whole_file_send_of_an_empty_file_publishes() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock_async().await;
+    let (dir, pinned) = pin(port());
+    let settings = whole_settings(pinned);
+    let local = local_file(&dir, "empty.pbo", 0);
+    let base = remote_dir("whole-empty");
+    let remote = format!("{base}/empty.pbo");
+    let unit = units(&local, &remote, 0);
+
+    let sent = whole_send(&settings, &unit)
+        .await
+        .expect("the empty whole-file send");
+    assert_eq!(sent.bytes, 0);
+    assert_eq!(
+        sent.hash,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    let session = session(&settings).await;
+    let metadata = session
+        .sftp
+        .fs()
+        .metadata(&remote)
+        .await
+        .expect("the published empty file");
+    assert_eq!(metadata.len(), Some(0));
+}
+
+/// Send one file with a rate limit that leaves the send in flight, and stop
+/// every server session under it.
+fn killed_whole_send(settings: &Settings, unit: &UploadUnit) {
+    let started = std::thread::spawn({
+        let settings = settings.clone();
+        let unit = unit.clone();
+        move || {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            runtime.block_on(async {
+                let session = session(&settings).await;
+                let limiter = settings
+                    .transfer
+                    .limit
+                    .map(crate::server::limit::RateLimiter::new)
+                    .map(std::sync::Arc::new);
+                let mut noop = |_bytes: u64| {};
+                super::whole::send_file(
+                    &session.sftp,
+                    &unit,
+                    "whole-kill",
+                    super::whole::Params {
+                        packet: crate::server::native::NATIVE_BUFFER,
+                        requests: settings.transfer.requests,
+                        workers: 1,
+                        preallocate: true,
+                    },
+                    limiter,
+                    &mut noop,
+                )
+                .await
+            })
+        }
+    });
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    kill_sessions();
+    let _ = started.join().expect("the send thread");
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_killed_whole_file_send_leaves_no_short_final_file() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let (dir, pinned) = pin(port());
+    let mut settings = whole_settings(pinned);
+    const SIZE: u64 = 32 * 1024 * 1024;
+    // Four seconds of data in a 32 MiB file: the kill lands mid-send.
+    settings.transfer.limit = Some(SIZE / 4);
+    let local = local_file(&dir, "killed.pbo", SIZE);
+    let base = remote_dir("whole-kill");
+    let remote = format!("{base}/killed.pbo");
+    let unit = units(&local, &remote, SIZE);
+
+    {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let session = session(&settings).await;
+            make_dir(&session.sftp, &base).await;
+        });
+    }
+    killed_whole_send(&settings, &unit);
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let published = runtime.block_on(async {
+        let session = session(&settings).await;
+        match session.sftp.fs().metadata(&remote).await {
+            Ok(metadata) => Some(metadata.len()),
+            Err(_) => None,
+        }
+    });
+    if let Some(len) = published {
+        assert_eq!(len, Some(SIZE), "a published file is never short");
+    }
+
+    // The next run reuses or replaces the temp file and publishes the file.
+    settings.transfer.limit = None;
+    let sent = runtime
+        .block_on(whole_send(&settings, &unit))
+        .expect("the second send");
+    assert_eq!(sent.hash, crate::util::file_sha256(&local).expect("digest"));
+    let temp = format!("{remote}.uksfta-part");
+    let (len, temp_exists) = runtime.block_on(async {
+        let session = session(&settings).await;
+        let len = session
+            .sftp
+            .fs()
+            .metadata(&remote)
+            .await
+            .expect("the published file")
+            .len();
+        let temp_exists = session.sftp.fs().metadata(&temp).await.is_ok();
+        (len, temp_exists)
+    });
+    assert_eq!(len, Some(SIZE));
+    assert!(
+        !temp_exists,
+        "the next run must leave no temp behind: {temp}"
+    );
+}
+
+/// A temp file older than the orphan age, as a killed run leaves.
+fn write_aged_temp(settings: &Settings, path: &str) {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let session = session(settings).await;
+        let sftp = &session.sftp;
+        super::writer::create_temp(sftp, path)
+            .await
+            .expect("the temp file");
+        let old = openssh_sftp_client::UnixTimeStamp::from_raw(
+            u32::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("the epoch")
+                    .as_secs()
+                    - 2 * 24 * 60 * 60,
+            )
+            .expect("the time"),
+        )
+        .expect("a timestamp");
+        let mut builder = openssh_sftp_client::metadata::MetaDataBuilder::new();
+        builder.time(old, old);
+        sftp.fs()
+            .set_metadata(path, builder.create())
+            .await
+            .expect("the age");
+    });
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn an_orphan_temp_from_a_killed_whole_send_is_removed() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let (_dir, pinned) = pin(port());
+    let settings = whole_settings(pinned);
+    let base = remote_dir("whole-orphan");
+    {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let session = session(&settings).await;
+            make_dir(&session.sftp, &base).await;
+        });
+    }
+    let orphan = format!("{base}/gone.pbo.uksfta-part");
+    let fresh = format!("{base}/live.pbo.uksfta-part");
+    write_aged_temp(&settings, &orphan);
+    write_aged_temp(&settings, &fresh);
+    // The fresh temp carries the age of a live run, so only the old one goes.
+    {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let session = session(&settings).await;
+            super::writer::create_temp(&session.sftp, &fresh)
+                .await
+                .expect("the fresh temp");
+        });
+    }
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let removed = runtime
+        .block_on(async {
+            let session = session(&settings).await;
+            super::writer::clean_orphans(&session.sftp, &base, None).await
+        })
+        .expect("the orphan sweep");
+    assert!(
+        removed
+            .iter()
+            .any(|path| path.ends_with("gone.pbo.uksfta-part")),
+        "the orphan from the killed run is removed: {removed:?}"
+    );
+    runtime.block_on(async {
+        let session = session(&settings).await;
+        assert!(
+            session.sftp.fs().metadata(&orphan).await.is_err(),
+            "the old temp is gone"
+        );
+        assert!(
+            session.sftp.fs().metadata(&fresh).await.is_ok(),
+            "the live temp is kept"
+        );
+    });
+}

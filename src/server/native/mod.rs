@@ -13,6 +13,7 @@ pub mod schedule;
 pub mod secret;
 pub mod segment;
 pub mod verify;
+pub mod whole;
 pub mod writer;
 
 #[cfg(test)]
