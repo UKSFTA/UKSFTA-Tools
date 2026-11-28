@@ -117,10 +117,23 @@ fn version_dates(http: &dyn Http, id: &str) -> Option<String> {
     let url = format!("https://steamcommunity.com/sharedfiles/filedetails/changelog/{id}");
     let body = http.get(&url).ok()?;
     let dates = changelog_dates(&body);
-    if dates.len() < 2 {
+    let total = changelog_total(&body).unwrap_or(dates.len());
+    if total == 0 {
         return None;
     }
-    Some(format!("versions: {} (latest {})", dates.len(), dates[0]))
+    Some(match dates.first() {
+        Some(newest) => format!("versions: {total} (newest {newest})"),
+        None => format!("versions: {total}"),
+    })
+}
+
+/// The number of published versions. The pager line counts every one, while
+/// one page shows ten.
+fn changelog_total(body: &str) -> Option<usize> {
+    let start = body.find("Showing ")? + "Showing ".len();
+    let line = body[start..].split("entries").next()?;
+    let total = line.rsplit(" of ").next()?;
+    total.trim().parse().ok()
 }
 
 /// The upload dates on a change-notes page, newest first. Each entry starts
@@ -314,6 +327,13 @@ mod tests {
             ]
         );
         assert!(changelog_dates("<html>no notes</html>").is_empty());
+    }
+
+    #[test]
+    fn the_pager_gives_the_true_version_count() {
+        assert_eq!(changelog_total("Showing 1-10 of 73 entries"), Some(73));
+        assert_eq!(changelog_total("Showing 1-4 of 4 entries"), Some(4));
+        assert_eq!(changelog_total("no pager here"), None);
     }
 
     #[test]
