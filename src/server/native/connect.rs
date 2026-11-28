@@ -1,6 +1,7 @@
 //! Open the SFTP subsystem with russh, then authenticate with a key file
 //! and the SSH agent. There is no password or keyboard-interactive path.
 
+use std::borrow::Cow;
 use std::num::{NonZeroU16, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -10,6 +11,7 @@ use openssh_sftp_client::{Sftp, SftpOptions};
 use russh::client::{self, Config, Handle};
 use russh::keys::agent::client::AgentClient;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
+use russh::Preferred;
 use tokio::net::TcpStream;
 
 use super::known_hosts::{self, Verdict};
@@ -288,6 +290,16 @@ pub async fn connect_with(
         ))
     })?;
 
+    // `Config::nodelay` is honoured only inside `client::connect`. This path
+    // hands its own socket to `connect_stream`, so Nagle would otherwise hold
+    // each small channel window update for the peer's acknowledgement.
+    enable_nodelay(&stream).map_err(|error| {
+        UksftaError::Input(format!(
+            "cannot set TCP_NODELAY on {}:{}: {error}",
+            settings.destination, settings.port
+        ))
+    })?;
+
     let mut handle = client::connect_stream(Arc::new(client_config()), stream, handler)
         .await
         .map_err(|error| {
@@ -315,18 +327,9 @@ pub async fn connect_with(
         .map_err(|error| UksftaError::Input(format!("cannot start the sftp subsystem: {error}")))?;
     let stream = channel.into_stream();
     let (reader, writer) = tokio::io::split(stream);
-    let requests = NonZeroU16::new(settings.transfer.requests).unwrap_or(NonZeroU16::MIN);
-    let requests_buffer =
-        NonZeroUsize::new(usize::from(requests.get())).unwrap_or(NonZeroUsize::MIN);
-    let sftp = Sftp::new(
-        writer,
-        reader,
-        SftpOptions::default()
-            .max_pending_requests(requests)
-            .requests_buffer_size(requests_buffer),
-    )
-    .await
-    .map_err(|error| UksftaError::Input(format!("cannot start the sftp client: {error}")))?;
+    let sftp = Sftp::new(writer, reader, sftp_options(settings.transfer.requests))
+        .await
+        .map_err(|error| UksftaError::Input(format!("cannot start the sftp client: {error}")))?;
 
     Ok(NativeSession {
         handle,
@@ -347,11 +350,52 @@ fn client_config() -> Config {
         keepalive_interval: Some(Duration::from_secs(15)),
         keepalive_max: 3,
         inactivity_timeout: Some(Duration::from_secs(30)),
+        // Unused by `connect_stream`; `enable_nodelay` sets the socket. Kept
+        // true so both paths state the same intent.
         nodelay: true,
+        preferred: preferred_ciphers(),
         window_size: WINDOW_SIZE,
         maximum_packet_size: MAXIMUM_PACKET_SIZE,
         ..Config::default()
     }
+}
+
+/// Put AES-GCM first. `russh` leaves aes128-gcm out of its default list and
+/// starts at chacha20-poly1305, which is slower than AES-GCM on a host with
+/// AES-NI. OpenSSH servers offer both GCM names, and chacha20 stays as the
+/// first fallback.
+fn preferred_ciphers() -> Preferred {
+    Preferred {
+        cipher: Cow::Owned(vec![
+            russh::cipher::AES_128_GCM,
+            russh::cipher::AES_256_GCM,
+            russh::cipher::CHACHA20_POLY1305,
+            russh::cipher::AES_256_CTR,
+            russh::cipher::AES_192_CTR,
+            russh::cipher::AES_128_CTR,
+        ]),
+        ..Preferred::default()
+    }
+}
+
+/// Disable Nagle so a queued request leaves at once rather than after the
+/// peer acknowledges the previous one.
+fn enable_nodelay(stream: &TcpStream) -> std::io::Result<()> {
+    stream.set_nodelay(true)
+}
+
+/// The SFTP client options for one connection.
+///
+/// The flush defaults stand: a zero interval with 16 or 64 pending requests
+/// moved neither fixture by more than 1 percent. The writer keeps at most 8
+/// requests in flight, so the watermark never binds, and 0.5 ms is under 1.5
+/// percent of a 40 ms round trip.
+fn sftp_options(requests: u16) -> SftpOptions {
+    let pending = NonZeroU16::new(requests).unwrap_or(NonZeroU16::MIN);
+    let buffer = NonZeroUsize::new(usize::from(pending.get())).unwrap_or(NonZeroUsize::MIN);
+    SftpOptions::default()
+        .max_pending_requests(pending)
+        .requests_buffer_size(buffer)
 }
 
 async fn authenticate(
@@ -580,6 +624,44 @@ mod tests {
 
     fn key() -> PublicKey {
         PublicKey::from_openssh(ED25519).expect("a valid test key")
+    }
+
+    #[test]
+    fn the_flush_settings_reach_the_client() {
+        let text = format!("{:?}", sftp_options(64));
+        assert!(text.contains("max_pending_requests: Some(64)"), "{text}");
+        assert!(text.contains("write_end_buffer_size: Some(64)"), "{text}");
+        assert!(text.contains("flush_interval: None"), "{text}");
+    }
+
+    #[test]
+    fn the_cipher_order_starts_with_aes_gcm() {
+        let config = client_config();
+        let names: Vec<&str> = config.preferred.cipher.iter().map(AsRef::as_ref).collect();
+        assert_eq!(
+            names,
+            [
+                "aes128-gcm@openssh.com",
+                "aes256-gcm@openssh.com",
+                "chacha20-poly1305@openssh.com",
+                "aes256-ctr",
+                "aes192-ctr",
+                "aes128-ctr",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_socket_has_nagle_disabled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a listener");
+        let stream = tokio::net::TcpStream::connect(listener.local_addr().expect("an address"))
+            .await
+            .expect("a connection");
+        assert!(!stream.nodelay().expect("the default"));
+        enable_nodelay(&stream).expect("nodelay");
+        assert!(stream.nodelay().expect("the option"));
     }
 
     #[test]
