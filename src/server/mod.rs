@@ -1141,6 +1141,10 @@ fn send_parallel(
     let units = remaining_units(plan, skip);
     let workers = plan_workers(units, jobs);
     let markers = view.is_some();
+    // One worker is a serial phase and rides the run's shared connection. Two
+    // or more keep a connection each: aggregate throughput on a link with
+    // latency comes from the number of streams, not from the handshakes.
+    let share = workers.len() == 1;
     let mut clean = true;
 
     // A single worker also creates the directories in its own batch, so a
@@ -1168,7 +1172,9 @@ fn send_parallel(
             .iter()
             .zip(&batches)
             .map(|(units, lines)| {
-                scope.spawn(move || upload_worker(verifier.settings, lines, units, view, hashes))
+                scope.spawn(move || {
+                    upload_worker(verifier.settings, lines, units, view, hashes, share)
+                })
             })
             .collect();
         handles
@@ -1194,26 +1200,35 @@ fn send_parallel(
     Ok(clean)
 }
 
-/// One worker: a private client, one batch for all of its units, and the
+/// One worker: its own client, one batch for all of its units, and the
 /// progress rows it updates. Each `pwd` marker names the file that has just
 /// completed, so the rows move without a child per file.
+///
+/// `share` is false when the attempt has several workers, and then each one
+/// opens its own connection.
 fn upload_worker(
     settings: &Settings,
     lines: &[String],
     units: &[UploadUnit],
     view: Option<&Arc<progress::UploadProgress>>,
     hashes: &LazyHashes,
+    share: bool,
 ) -> Result<(), UksftaError> {
+    let client = if share {
+        Sftp::new(settings)
+    } else {
+        Sftp::own_connection(settings)
+    };
     let Some(view) = view else {
-        return Sftp::new(settings).batch(lines).map(|_| ());
+        return client.batch(lines).map(|_| ());
     };
     let Some(first) = units.first() else {
-        return Sftp::new(settings).batch(lines).map(|_| ());
+        return client.batch(lines).map(|_| ());
     };
 
     view.file_started(&first.remote);
     let mut completed = 0usize;
-    let sent = Sftp::new(settings).batch_tracked(lines, |line| {
+    let sent = client.batch_tracked(lines, |line| {
         if !parse::is_completion_marker(line) {
             return;
         }

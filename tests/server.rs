@@ -1554,6 +1554,70 @@ fn a_small_file_is_uploaded_the_same_with_and_without_the_flag() {
     assert_eq!(puts(&plain), 2, "both files use the system path");
 }
 
+/// Every child the stub answered, as its arguments and its commands.
+fn children(fixture: &Fixture) -> Vec<(String, String)> {
+    let base = fixture.log.display().to_string();
+    let mut out = Vec::new();
+    for entry in fs::read_dir(fixture.dir.path()).expect("the fixture dir") {
+        let path = entry.expect("an entry").path();
+        if !path.display().to_string().starts_with(&base) {
+            continue;
+        }
+        let text = fs::read_to_string(&path).expect("read a child log");
+        let mut parts = text.splitn(2, "CMDS\n");
+        let args = parts.next().unwrap_or_default().trim().to_string();
+        let commands = parts.next().unwrap_or_default().to_string();
+        out.push((args, commands));
+    }
+    out
+}
+
+#[test]
+fn a_parallel_upload_keeps_one_connection_per_worker() {
+    let parallel = Fixture::new(LISTING_MISSING);
+    parallel
+        .command()
+        .args(["server", "--upload", "--retries", "0", "--jobs", "4"])
+        .assert()
+        .success();
+
+    let seen = children(&parallel);
+    let uploads: Vec<_> = seen
+        .iter()
+        .filter(|(_, commands)| commands.contains("put "))
+        .collect();
+    assert!(uploads.len() > 1, "several workers: {}", uploads.len());
+    assert!(
+        uploads
+            .iter()
+            .all(|(args, _)| !args.contains("ControlPath=")),
+        "each worker opens its own connection"
+    );
+    assert!(
+        seen.iter()
+            .any(|(args, commands)| !commands.contains("put ") && args.contains("ControlPath=")),
+        "a phase that runs alone shares the connection"
+    );
+
+    let serial = Fixture::new(LISTING_MISSING);
+    serial
+        .command()
+        .args(["server", "--upload", "--retries", "0", "--jobs", "1"])
+        .assert()
+        .success();
+
+    let seen = children(&serial);
+    let uploads: Vec<_> = seen
+        .iter()
+        .filter(|(_, commands)| commands.contains("put "))
+        .collect();
+    assert_eq!(uploads.len(), 1, "one worker");
+    assert!(
+        uploads[0].0.contains("ControlPath="),
+        "a lone worker shares the connection"
+    );
+}
+
 /// Standard output with the elapsed and rate fields of an attempt line
 /// replaced, so two runs can be compared byte for byte.
 fn stable_stdout(text: &str) -> String {
