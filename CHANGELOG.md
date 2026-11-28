@@ -7,6 +7,27 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `investigate` no longer resolves a pack's files back to the pack that is
+  being investigated. The current directory's own Workshop item was removed
+  from the folder index only, while the depot manifest index kept it, so every
+  file confirmed against its own manifest. Both indexes now drop the item, and
+  the index counts follow. `identify` had the same leak and is fixed too.
+- An item the Workshop API does not index is no longer reported as removed.
+  The API omits removed, private and unlisted items alike, so the tool now
+  reads the public item page: a rendered title reports `UNLISTED (page is
+  public; the item is absent from the API index)` with the real title, an error
+  page reports `REMOVED OR PRIVATE`, and a transport fault reports that it
+  proves nothing. Items the API omits entirely now get a line instead of
+  disappearing.
+
+### Added
+
+- `investigate --refresh` resolves every PBO again instead of reusing a stored
+  decision. A confirmed decision stands while the file fingerprint matches, so
+  before this the only way past a wrong one was deleting `.uksfta/identities.json`.
+
 ## [0.11.0] - 2026-11-28
 
 ### Added

@@ -22,7 +22,7 @@ use super::plan::build_corpus_stats_many;
 use super::r#match::{Resolution, ResolutionStatus};
 use super::render::{render_all, render_progress, render_summary, summary_of};
 use super::resolve::{
-    resolve_all, split_fresh, KeyedReport, PboResolution, Progress, ResolveContext, SeenItem,
+    resolve_all, split_fresh_with, KeyedReport, PboResolution, Progress, ResolveContext, SeenItem,
 };
 use super::store::{
     load_store, now_secs, record_run, report_resolutions, save_store, store_path, IdentityStore,
@@ -53,6 +53,7 @@ pub fn investigate(
     online: bool,
     report: bool,
     steam_search: bool,
+    refresh: bool,
 ) -> Result<(), UksftaError> {
     if report && !online {
         return investigate_report();
@@ -79,7 +80,8 @@ pub fn investigate(
 
     // If the current directory is itself a Workshop mod folder (e.g. we are
     // investigating a pack's own contents), exclude it as a candidate.
-    if let Some(self_id) = self_workshop_id(&caches) {
+    let self_id = self_workshop_id(&caches);
+    if let Some(self_id) = self_id.as_deref() {
         println!(
             "Investigating Workshop mod {} — excluding it as a candidate.",
             self_id
@@ -123,7 +125,14 @@ pub fn investigate(
 
     // The depot manifest index holds the exact bytes of every installed
     // Workshop file. A name and size find candidates; a hash confirms one.
-    let manifest_index = WorkshopIndex::load();
+    // The item under investigation is dropped from it, or every file would
+    // confirm against the pack's own manifest.
+    let manifest_index = WorkshopIndex::load().map(|mut index| {
+        if let Some(self_id) = self_id.as_deref() {
+            index.exclude_item(self_id);
+        }
+        index
+    });
     let mut hash_hits: HashMap<String, (String, String, usize)> = HashMap::new();
 
     // First pass: prefix origin and candidate discovery read no file body.
@@ -264,7 +273,7 @@ pub fn investigate(
     check_workshop_visibility(&results);
     let source = keyed.as_ref().map(|search| search as &dyn KeyedSearch);
     resolve_identities(
-        &examined, &hash_hits, addons_dir, &mod_dirs, use_colour, source,
+        &examined, &hash_hits, addons_dir, &mod_dirs, use_colour, source, refresh,
     )?;
     Ok(())
 }
@@ -324,6 +333,7 @@ fn resolve_identities(
     mod_dirs: &[ModDir],
     use_colour: bool,
     keyed: Option<&dyn KeyedSearch>,
+    refresh: bool,
 ) -> Result<(), UksftaError> {
     let bikey_names = scan_bikey_names(addons_dir);
     if !bikey_names.is_empty() {
@@ -368,7 +378,10 @@ fn resolve_identities(
 
     let store = load_store(&store_path());
     let now = now_secs();
-    let (kept, pending) = split_fresh(&store, work.evidence, now);
+    let (kept, pending) = split_fresh_with(&store, work.evidence, now, refresh);
+    if refresh && !store.pbo.is_empty() {
+        println!("  --refresh: every stored decision is dropped for this run.");
+    }
     if !kept.is_empty() {
         println!(
             "  {} PBO(s) still hold a fresh record; no request is spent on them.",

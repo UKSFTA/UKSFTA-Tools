@@ -411,6 +411,30 @@ impl WorkshopIndex {
             .unwrap_or(&[])
     }
 
+    /// Remove every entry published by `id`, and keep the counters truthful.
+    /// A caller that investigates one item must not resolve that item's
+    /// files back to itself, and it learns the id only after the index is
+    /// built.
+    pub fn exclude_item(&mut self, id: &str) {
+        let mut removed = 0usize;
+        self.by_content.retain(|_, entries| {
+            let before = entries.len();
+            entries.retain(|entry| entry.published_id != id);
+            removed += before - entries.len();
+            !entries.is_empty()
+        });
+        self.by_name.retain(|_, entries| {
+            entries.retain(|entry| entry.published_id != id);
+            !entries.is_empty()
+        });
+        if removed > 0 {
+            self.files = self.files.saturating_sub(removed);
+            self.manifests = self.manifests.saturating_sub(1);
+            self.pbo_entries = self.by_name.values().map(Vec::len).sum();
+            self.names = self.by_name.len();
+        }
+    }
+
     /// The item to report for a match. A caller with a prefix-derived id
     /// passes it as a hint: when the same bytes are in several items, the
     /// item the prefix named wins. Otherwise the item with the fewest files
@@ -954,6 +978,45 @@ mod tests {
             parse_manifest(&data),
             Err(ManifestError::Trailing(1))
         ));
+    }
+
+    #[test]
+    fn an_excluded_item_stops_matching_its_own_files() {
+        let file = |name: &str, byte: u8| ManifestFile {
+            path: format!("addons\\{name}.pbo"),
+            size: 10,
+            flags: 0,
+            sha_content: sha(byte),
+        };
+        let mut index = from_mappings(vec![
+            ("3549882948".to_string(), vec![file("own", 0xaa)]),
+            (
+                "686802825".to_string(),
+                vec![file("own", 0xaa), file("shared", 0xbb)],
+            ),
+        ]);
+        assert_eq!(index.lookup(&sha(0xaa), 10).len(), 2);
+        assert_eq!(index.files, 3);
+        assert_eq!(index.manifests, 2);
+        assert_eq!(index.pbo_entries, 3);
+
+        index.exclude_item("3549882948");
+
+        // The pack no longer confirms against itself, but a genuine other
+        // publisher of the same bytes still does.
+        let entries = index.lookup(&sha(0xaa), 10);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].published_id, "686802825");
+        assert_eq!(index.lookup(&sha(0xbb), 10).len(), 1);
+        assert_eq!(index.files, 2);
+        assert_eq!(index.manifests, 1);
+        assert_eq!(index.pbo_entries, 2);
+        assert_eq!(index.names, 2);
+
+        // Excluding an item that is not in the index changes nothing.
+        index.exclude_item("999");
+        assert_eq!(index.files, 2);
+        assert_eq!(index.manifests, 1);
     }
 
     #[test]

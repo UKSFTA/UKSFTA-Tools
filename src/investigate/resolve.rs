@@ -356,6 +356,22 @@ pub(crate) fn split_fresh(
     (kept, pending)
 }
 
+/// [`split_fresh`], or every PBO pending when the operator asked for a
+/// refresh. A stored decision can be wrong, and it stands while the
+/// fingerprint matches, so without this the only way past it is deleting
+/// the store.
+pub(crate) fn split_fresh_with(
+    store: &IdentityStore,
+    evidence: Vec<IdentityEvidence>,
+    now: u64,
+    refresh: bool,
+) -> (Vec<PboResolution>, Vec<IdentityEvidence>) {
+    if refresh {
+        return (Vec::new(), evidence);
+    }
+    split_fresh(store, evidence, now)
+}
+
 /// Resolve every pending PBO. Exactly one result per input, sorted by PBO name.
 pub(crate) fn resolve_all(
     evidence: Vec<IdentityEvidence>,
@@ -1577,6 +1593,54 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].resolution.status, ResolutionStatus::Confirmed);
         assert_eq!(http.calls().len(), 1);
+    }
+
+    #[test]
+    fn refresh_drops_a_fresh_record() {
+        let now = 1_700_000_000u64;
+        let evidence = IdentityEvidence {
+            pbo: "ade_core.pbo".to_string(),
+            fingerprint: "fp".to_string(),
+            stem: "ade_core".to_string(),
+            ..Default::default()
+        };
+        let resolution = PboResolution {
+            pbo: "ade_core.pbo".to_string(),
+            fingerprint: "fp".to_string(),
+            evidence: evidence.clone(),
+            attempts: vec![QueryAttempt {
+                text: "ADE diving".to_string(),
+                kind: QueryKind::IdentityName,
+                q: 0.9,
+                total_count: Some(1),
+                outcome: ResolutionStatus::Confirmed,
+            }],
+            resolution: Resolution {
+                status: ResolutionStatus::Confirmed,
+                id: Some("1891978580".to_string()),
+                title: Some("ADE - Advanced Diving Environment".to_string()),
+                m: 1.0,
+                q: 0.9,
+                c: 0.9,
+                margin: 1.0,
+                query: Some("ADE diving".to_string()),
+                matched_by: vec!["title".to_string()],
+            },
+            candidates: Vec::new(),
+        };
+        let mut store = IdentityStore::empty();
+        store.pbo.insert(
+            "ade_core.pbo".to_string(),
+            crate::investigate::store::PboEntry::from_resolution(&resolution, now),
+        );
+
+        let (kept, pending) = split_fresh_with(&store, vec![evidence.clone()], now, false);
+        assert_eq!(kept.len(), 1, "a matching fingerprint keeps its record");
+        assert!(pending.is_empty());
+
+        let (kept, pending) = split_fresh_with(&store, vec![evidence], now, true);
+        assert!(kept.is_empty(), "--refresh must drop the stored record");
+        assert_eq!(pending.len(), 1);
     }
 
     #[test]
