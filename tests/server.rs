@@ -1562,12 +1562,37 @@ fn stable_stdout(text: &str) -> String {
             if line.starts_with("attempt ") {
                 let head = line.split_once(':').map(|(head, _)| head).unwrap_or(line);
                 format!("{head}: <timing>")
+            } else if line.starts_with("total") || line.contains('~') {
+                // A summary row reports wall clock, and the estimate cells carry
+                // it. Two runs of the same work can differ by a tenth of a
+                // second, so the value is normalised and the shape is checked.
+                stable_estimates(line)
             } else {
                 line.to_string()
             }
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn stable_estimates(line: &str) -> String {
+    let cells: Vec<&str> = line.split(' ').collect();
+    cells
+        .iter()
+        .enumerate()
+        .map(|(index, cell)| {
+            let timed = cells.get(index + 1) == Some(&"s");
+            let numeric = cell.parse::<f64>().is_ok();
+            if cell.ends_with('~') || (timed && numeric) {
+                cell.chars()
+                    .map(|c| if c.is_ascii_digit() { '#' } else { c })
+                    .collect()
+            } else {
+                (*cell).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn puts(fixture: &Fixture) -> usize {
