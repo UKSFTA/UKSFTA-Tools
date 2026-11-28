@@ -173,6 +173,9 @@ enum Commands {
         /// Add the keyed Workshop search to the candidate sources (needs STEAM_API_KEY)
         #[arg(long, requires = "online")]
         steam_search: bool,
+        /// Resolve every PBO again instead of reusing a stored decision
+        #[arg(long, requires = "online")]
+        refresh: bool,
     },
     /// Verify the private modpack on a game server over SFTP
     ///
@@ -472,7 +475,8 @@ fn run(cli: Cli) -> Result<(), UksftaError> {
             online,
             report,
             steam_search,
-        } => investigate(all, online, report, steam_search)?,
+            refresh,
+        } => investigate(all, online, report, steam_search, refresh)?,
         Commands::Server {
             config,
             destination,

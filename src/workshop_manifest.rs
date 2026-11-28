@@ -43,7 +43,7 @@ const FLAG_DIRECTORY: u64 = 0x40;
 
 /// Schema of `.uksfta/workshop-index.json`. A different value is discarded
 /// and rebuilt, never converted.
-const CACHE_SCHEMA: u32 = 1;
+const CACHE_SCHEMA: u32 = 2;
 
 /// The legacy manifest value: the item predates manifests and cannot be
 /// indexed.
@@ -388,6 +388,9 @@ pub struct WorkshopIndex {
     pub rebuilt: usize,
     /// Time spent building the index, including any manifest reads.
     pub elapsed: std::time::Duration,
+    /// Items whose published manifest differs from the installed one:
+    /// `id -> (installed, published)`.
+    pub outdated: BTreeMap<String, (String, String)>,
 }
 
 impl WorkshopIndex {
@@ -409,6 +412,30 @@ impl WorkshopIndex {
             .get(&(*sha, size))
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    /// Remove every entry published by `id`, and keep the counters truthful.
+    /// A caller that investigates one item must not resolve that item's
+    /// files back to itself, and it learns the id only after the index is
+    /// built.
+    pub fn exclude_item(&mut self, id: &str) {
+        let mut removed = 0usize;
+        self.by_content.retain(|_, entries| {
+            let before = entries.len();
+            entries.retain(|entry| entry.published_id != id);
+            removed += before - entries.len();
+            !entries.is_empty()
+        });
+        self.by_name.retain(|_, entries| {
+            entries.retain(|entry| entry.published_id != id);
+            !entries.is_empty()
+        });
+        if removed > 0 {
+            self.files = self.files.saturating_sub(removed);
+            self.manifests = self.manifests.saturating_sub(1);
+            self.pbo_entries = self.by_name.values().map(Vec::len).sum();
+            self.names = self.by_name.len();
+        }
     }
 
     /// The item to report for a match. A caller with a prefix-derived id
@@ -449,6 +476,23 @@ impl WorkshopIndex {
         }
     }
 
+    /// The installed and published manifest ids for `id`, when the ACF
+    /// records both and they differ.
+    pub fn update_for(&self, id: &str) -> Option<(&str, &str)> {
+        self.outdated
+            .get(id)
+            .map(|(installed, published)| (installed.as_str(), published.as_str()))
+    }
+
+    /// The entry `id` publishes for a file called `name`. A local PBO is
+    /// compared with this one to say whether it is the installed version.
+    pub fn installed_entry(&self, id: &str, name: &str) -> Option<&IndexEntry> {
+        let entries = self.by_name.get(&name.to_ascii_lowercase())?;
+        entries.iter().find(|entry| {
+            entry.published_id == id && path_basename(&entry.path).eq_ignore_ascii_case(name)
+        })
+    }
+
     /// Candidate discovery for one file: its basename and its size.
     pub fn candidates_for(&self, path: &Path) -> NameCandidates<'_> {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -463,6 +507,117 @@ impl WorkshopIndex {
                 entries: all.iter().collect(),
                 exact_size: false,
             },
+        }
+    }
+}
+
+/// The last path component of a manifest path, either separator.
+fn path_basename(path: &str) -> &str {
+    path.rsplit(['\\', '/']).next().unwrap_or(path)
+}
+
+/// Where archived manifests live: a per-user cache, never the current
+/// directory, so every pack folder does not keep its own copy.
+pub fn archive_dir() -> PathBuf {
+    dirs::cache_dir()
+        .map(|dir| dir.join("uksfta").join("manifests"))
+        .unwrap_or_else(|| std::env::temp_dir().join("uksfta-manifests"))
+}
+
+/// Keep one copy of an item's manifest. Steam deletes the old manifest on
+/// update, so this is the only way a later run can still identify the
+/// previous version's bytes.
+fn archive_manifest(source: &Path, published_id: &str, manifest_id: &str) {
+    let dir = archive_dir();
+    let target = dir.join(format!("{published_id}_{manifest_id}.manifest"));
+    if target.exists() {
+        return;
+    }
+    let copied = fs::create_dir_all(&dir).and_then(|()| fs::copy(source, &target).map(drop));
+    if let Err(error) = copied {
+        eprintln!("Warning: could not archive {}: {error}", source.display());
+    }
+}
+
+/// Every archived manifest as `(item id, manifest id, path)`.
+fn archived_manifests() -> Vec<(String, String, PathBuf)> {
+    let mut out = Vec::new();
+    let Ok(dir) = fs::read_dir(archive_dir()) else {
+        return out;
+    };
+    for entry in dir.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".manifest") else {
+            continue;
+        };
+        let Some((id, manifest)) = stem.split_once('_') else {
+            continue;
+        };
+        out.push((id.to_string(), manifest.to_string(), path));
+    }
+    out.sort();
+    out
+}
+
+/// Parse one manifest file, through the cache. `rebuilt` counts a parse,
+/// `broken` a file that could not be used, and `dirty` records a new cache
+/// entry worth writing.
+fn load_manifest_files(
+    path: &Path,
+    manifest_id: &str,
+    cache: &mut IndexCache,
+    rebuilt: &mut usize,
+    broken: &mut usize,
+    dirty: &mut bool,
+) -> Option<Vec<ManifestFile>> {
+    let stamp = FileStamp::read(path);
+    if let Some(cached) = cache.manifests.get(manifest_id) {
+        if Some(cached.stamp) == stamp {
+            return Some(
+                cached
+                    .files
+                    .iter()
+                    .filter_map(|file| file.to_file())
+                    .collect(),
+            );
+        }
+    }
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!(
+                "Warning: {}: {error}; ignoring this manifest",
+                path.display()
+            );
+            *broken += 1;
+            return None;
+        }
+    };
+    match parse_manifest(&bytes) {
+        Ok(files) => {
+            *rebuilt += 1;
+            if let Some(stamp) = stamp {
+                cache.manifests.insert(
+                    manifest_id.to_string(),
+                    CachedManifest {
+                        stamp,
+                        files: files.iter().map(CachedFile::from_file).collect(),
+                    },
+                );
+                *dirty = true;
+            }
+            Some(files)
+        }
+        Err(error) => {
+            eprintln!(
+                "Warning: {}: {error}; ignoring this manifest",
+                path.display()
+            );
+            *broken += 1;
+            None
         }
     }
 }
@@ -483,6 +638,7 @@ pub fn build_from(acfs: &[PathBuf], depot_caches: &[PathBuf], cache_path: &Path)
     let mut stamps = BTreeMap::new();
     let mut published: Vec<(String, String)> = Vec::new();
     let mut legacy = 0usize;
+    let mut outdated: BTreeMap<String, (String, String)> = BTreeMap::new();
 
     for acf in acfs {
         if let Some(stamp) = FileStamp::read(acf) {
@@ -499,6 +655,12 @@ pub fn build_from(acfs: &[PathBuf], depot_caches: &[PathBuf], cache_path: &Path)
             if item.manifest == LEGACY_MANIFEST {
                 legacy += 1;
                 continue;
+            }
+            if !item.latest_manifest.is_empty()
+                && item.latest_manifest != item.manifest
+                && item.latest_manifest != LEGACY_MANIFEST
+            {
+                outdated.insert(id.clone(), (item.manifest.clone(), item.latest_manifest));
             }
             published.push((id, item.manifest));
         }
@@ -525,50 +687,38 @@ pub fn build_from(acfs: &[PathBuf], depot_caches: &[PathBuf], cache_path: &Path)
             continue;
         };
         used.push(manifest_id.clone());
-
-        let stamp = FileStamp::read(&path);
-        if let Some(cached) = cache.manifests.get(manifest_id) {
-            if Some(cached.stamp) == stamp {
-                mappings.push((
-                    published_id.clone(),
-                    cached.files.iter().filter_map(|f| f.to_file()).collect(),
-                ));
-                continue;
-            }
+        archive_manifest(&path, published_id, manifest_id);
+        if let Some(files) = load_manifest_files(
+            &path,
+            manifest_id,
+            &mut cache,
+            &mut rebuilt,
+            &mut broken,
+            &mut dirty,
+        ) {
+            mappings.push((published_id.clone(), files));
         }
+    }
 
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                eprintln!(
-                    "Warning: {}: {error}; ignoring this manifest",
-                    path.display()
-                );
-                broken += 1;
-                continue;
-            }
-        };
-        match parse_manifest(&bytes) {
-            Ok(files) => {
-                rebuilt += 1;
-                if let Some(stamp) = stamp {
-                    cache.manifests.insert(
-                        manifest_id.clone(),
-                        CachedManifest {
-                            stamp,
-                            files: files.iter().map(CachedFile::from_file).collect(),
-                        },
-                    );
-                    dirty = true;
-                }
-                mappings.push((published_id.clone(), files));
-            }
-            Err(error) => {
-                eprintln!(
-                    "Warning: {}: {error}; ignoring this manifest",
-                    path.display()
-                );
-                broken += 1;
+    // A previous version of an installed item is still identifiable from
+    // its archived manifest, which is the only record of that version's
+    // bytes once Steam deletes the manifest on update.
+    for (published_id, manifest_id, path) in archived_manifests() {
+        if published.iter().any(|(id, _)| id == &published_id)
+            && !published
+                .iter()
+                .any(|(id, current)| id == &published_id && current == &manifest_id)
+        {
+            used.push(manifest_id.clone());
+            if let Some(files) = load_manifest_files(
+                &path,
+                &manifest_id,
+                &mut cache,
+                &mut rebuilt,
+                &mut broken,
+                &mut dirty,
+            ) {
+                mappings.push((published_id, files));
             }
         }
     }
@@ -663,6 +813,7 @@ pub fn from_mappings(mappings: Vec<(String, Vec<ManifestFile>)>) -> WorkshopInde
         names,
         rebuilt: 0,
         elapsed: std::time::Duration::ZERO,
+        outdated: BTreeMap::new(),
     }
 }
 
@@ -954,6 +1105,105 @@ mod tests {
             parse_manifest(&data),
             Err(ManifestError::Trailing(1))
         ));
+    }
+
+    #[test]
+    fn the_acf_names_the_installed_and_the_published_manifest() {
+        let acf = r#"
+"AppWorkshop"
+{
+	"WorkshopItemsInstalled"
+	{
+		"3549882948"
+		{
+			"size"		"27057463048"
+			"timeupdated"		"1795109392"
+			"manifest"		"5059267380163170271"
+		}
+	}
+	"WorkshopItemDetails"
+	{
+		"3549882948"
+		{
+			"manifest"		"5059267380163170271"
+			"timeupdated"		"1795109392"
+			"latest_timeupdated"		"1796000000"
+			"latest_manifest"		"5699377319592524584"
+		}
+	}
+}
+"#;
+        let items = crate::steam::parse_acf(acf);
+        let item = items.get("3549882948").expect("the item is parsed");
+        assert_eq!(item.manifest, "5059267380163170271");
+        assert_eq!(item.latest_manifest, "5699377319592524584");
+    }
+
+    #[test]
+    fn the_installed_copy_is_found_by_item_and_name() {
+        let file = |path: &str, size: u64, byte: u8| ManifestFile {
+            path: path.to_string(),
+            size,
+            flags: 0,
+            sha_content: sha(byte),
+        };
+        let index = from_mappings(vec![
+            (
+                "3549882948".to_string(),
+                vec![file("addons\\pdt_envg.pbo", 99, 0xaa)],
+            ),
+            (
+                "686802825".to_string(),
+                vec![file("Addons\\pdt_envg.pbo", 12, 0xbb)],
+            ),
+        ]);
+        let own = index.installed_entry("3549882948", "pdt_envg.pbo").unwrap();
+        assert_eq!(own.size, 99);
+        // The name compare ignores case and the separator style.
+        assert!(index
+            .installed_entry("686802825", "PDT_ENVG.pbo")
+            .is_some_and(|entry| entry.size == 12));
+        assert!(index.installed_entry("3549882948", "absent.pbo").is_none());
+        assert!(index.installed_entry("999", "pdt_envg.pbo").is_none());
+    }
+
+    #[test]
+    fn an_excluded_item_stops_matching_its_own_files() {
+        let file = |name: &str, byte: u8| ManifestFile {
+            path: format!("addons\\{name}.pbo"),
+            size: 10,
+            flags: 0,
+            sha_content: sha(byte),
+        };
+        let mut index = from_mappings(vec![
+            ("3549882948".to_string(), vec![file("own", 0xaa)]),
+            (
+                "686802825".to_string(),
+                vec![file("own", 0xaa), file("shared", 0xbb)],
+            ),
+        ]);
+        assert_eq!(index.lookup(&sha(0xaa), 10).len(), 2);
+        assert_eq!(index.files, 3);
+        assert_eq!(index.manifests, 2);
+        assert_eq!(index.pbo_entries, 3);
+
+        index.exclude_item("3549882948");
+
+        // The pack no longer confirms against itself, but a genuine other
+        // publisher of the same bytes still does.
+        let entries = index.lookup(&sha(0xaa), 10);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].published_id, "686802825");
+        assert_eq!(index.lookup(&sha(0xbb), 10).len(), 1);
+        assert_eq!(index.files, 2);
+        assert_eq!(index.manifests, 1);
+        assert_eq!(index.pbo_entries, 2);
+        assert_eq!(index.names, 2);
+
+        // Excluding an item that is not in the index changes nothing.
+        index.exclude_item("999");
+        assert_eq!(index.files, 2);
+        assert_eq!(index.manifests, 1);
     }
 
     #[test]

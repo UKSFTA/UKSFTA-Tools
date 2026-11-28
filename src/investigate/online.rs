@@ -22,7 +22,7 @@ use super::plan::build_corpus_stats_many;
 use super::r#match::{Resolution, ResolutionStatus};
 use super::render::{render_all, render_progress, render_summary, summary_of};
 use super::resolve::{
-    resolve_all, split_fresh, KeyedReport, PboResolution, Progress, ResolveContext, SeenItem,
+    resolve_all, split_fresh_with, KeyedReport, PboResolution, Progress, ResolveContext, SeenItem,
 };
 use super::store::{
     load_store, now_secs, record_run, report_resolutions, save_store, store_path, IdentityStore,
@@ -53,6 +53,7 @@ pub fn investigate(
     online: bool,
     report: bool,
     steam_search: bool,
+    refresh: bool,
 ) -> Result<(), UksftaError> {
     if report && !online {
         return investigate_report();
@@ -79,7 +80,8 @@ pub fn investigate(
 
     // If the current directory is itself a Workshop mod folder (e.g. we are
     // investigating a pack's own contents), exclude it as a candidate.
-    if let Some(self_id) = self_workshop_id(&caches) {
+    let self_id = self_workshop_id(&caches);
+    if let Some(self_id) = self_id.as_deref() {
         println!(
             "Investigating Workshop mod {} — excluding it as a candidate.",
             self_id
@@ -123,7 +125,14 @@ pub fn investigate(
 
     // The depot manifest index holds the exact bytes of every installed
     // Workshop file. A name and size find candidates; a hash confirms one.
-    let manifest_index = WorkshopIndex::load();
+    // The item under investigation is dropped from it, or every file would
+    // confirm against the pack's own manifest.
+    let manifest_index = WorkshopIndex::load().map(|mut index| {
+        if let Some(self_id) = self_id.as_deref() {
+            index.exclude_item(self_id);
+        }
+        index
+    });
     let mut hash_hits: HashMap<String, (String, String, usize)> = HashMap::new();
 
     // First pass: prefix origin and candidate discovery read no file body.
@@ -194,8 +203,21 @@ pub fn investigate(
     let use_colour = stdout_is_tty();
     println!("Untracked PBO Investigation:");
     println!("  {} PBO(s) examined", results.len());
+    if let Some(index) = manifest_index.as_ref() {
+        let mut ids: Vec<&str> = results
+            .iter()
+            .filter_map(|(_, _, origin)| origin.as_ref().map(|origin| origin.id.as_str()))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            if let Some((installed, published)) = index.update_for(id) {
+                println!("  update available: {id}: installed {installed}, published {published}");
+            }
+        }
+    }
     let mut unknown_count = 0;
-    for (pbo, _, origin) in &results {
+    for (pbo, path, origin) in &results {
         let Some(origin) = origin else {
             unknown_count += 1;
             println!("  {} {}", paint(use_colour, C_RED, "[UNKNOWN]"), pbo);
@@ -212,15 +234,28 @@ pub fn investigate(
         } else {
             meta.name
         };
+        let differs = manifest_index
+            .as_ref()
+            .map(|index| {
+                version_note(
+                    index,
+                    origin,
+                    pbo,
+                    path,
+                    digests.get(path).map(|(sha, _)| sha),
+                )
+            })
+            .unwrap_or_default();
         if origin.is_pack {
             println!(
-                "  {} {} -> {} ({}) {} [pack: prefix {} — verify source]",
+                "  {} {} -> {} ({}) {} [pack: prefix {} — verify source]{}",
                 paint(use_colour, C_GREEN, "[PACK]"),
                 pbo,
                 name,
                 id,
                 workshop_url(id),
-                origin.prefix.as_deref().unwrap_or("unknown")
+                origin.prefix.as_deref().unwrap_or("unknown"),
+                differs
             );
         } else {
             let confirmed = hash_hits
@@ -235,13 +270,14 @@ pub fn investigate(
                 })
                 .unwrap_or_default();
             println!(
-                "  {} {} -> {} ({}) {}{}",
+                "  {} {} -> {} ({}) {}{}{}",
                 paint(use_colour, C_GREEN, "[RESOLVED]"),
                 pbo,
                 name,
                 id,
                 workshop_url(id),
-                confirmed
+                confirmed,
+                differs
             );
         }
     }
@@ -264,9 +300,49 @@ pub fn investigate(
     check_workshop_visibility(&results);
     let source = keyed.as_ref().map(|search| search as &dyn KeyedSearch);
     resolve_identities(
-        &examined, &hash_hits, addons_dir, &mod_dirs, use_colour, source,
+        &examined,
+        &hash_hits,
+        addons_dir,
+        &mod_dirs,
+        use_colour,
+        source,
+        OnlineOptions {
+            refresh,
+            self_id: self_id.as_deref(),
+        },
     )?;
     Ok(())
+}
+
+/// A note for a file whose bytes are not the copy Steam installed for its
+/// item: a different size, or a different hash when one is already known.
+/// A file can legitimately differ, because an item may publish one version
+/// per game branch.
+fn version_note(
+    index: &WorkshopIndex,
+    origin: &ResolvedOrigin,
+    pbo: &str,
+    path: &Path,
+    digest: Option<&[u8; 20]>,
+) -> String {
+    let Some(entry) = index.installed_entry(&origin.id, pbo) else {
+        return String::new();
+    };
+    let size = std::fs::metadata(path).map(|metadata| metadata.len()).ok();
+    if size.is_some_and(|size| size != entry.size) {
+        return " [differs from the installed copy]".to_string();
+    }
+    match (digest, size) {
+        (Some(digest), Some(size))
+            if index
+                .lookup(digest, size)
+                .iter()
+                .all(|entry| entry.published_id != origin.id) =>
+        {
+            " [differs from the installed copy]".to_string()
+        }
+        _ => String::new(),
+    }
 }
 
 /// Print the status lines from the store, offline.
@@ -316,6 +392,13 @@ fn examined_fingerprints(addons_dir: &Path) -> Vec<(String, String)> {
     examined
 }
 
+/// The switches one online run needs: whether to drop stored decisions, and
+/// the id of the pack being investigated, which is never a candidate.
+struct OnlineOptions<'a> {
+    refresh: bool,
+    self_id: Option<&'a str>,
+}
+
 /// Print the online phase: identity resolution and summary.
 fn resolve_identities(
     pbos: &[(String, PathBuf)],
@@ -324,7 +407,9 @@ fn resolve_identities(
     mod_dirs: &[ModDir],
     use_colour: bool,
     keyed: Option<&dyn KeyedSearch>,
+    options: OnlineOptions<'_>,
 ) -> Result<(), UksftaError> {
+    let OnlineOptions { refresh, self_id } = options;
     let bikey_names = scan_bikey_names(addons_dir);
     if !bikey_names.is_empty() {
         println!("  Signing keys found: {}", bikey_names.join(", "));
@@ -368,7 +453,10 @@ fn resolve_identities(
 
     let store = load_store(&store_path());
     let now = now_secs();
-    let (kept, pending) = split_fresh(&store, work.evidence, now);
+    let (kept, pending) = split_fresh_with(&store, work.evidence, now, refresh);
+    if refresh && !store.pbo.is_empty() {
+        println!("  --refresh: every stored decision is dropped for this run.");
+    }
     if !kept.is_empty() {
         println!(
             "  {} PBO(s) still hold a fresh record; no request is spent on them.",
@@ -379,6 +467,9 @@ fn resolve_identities(
     let http = LiveHttp::new();
     let mut limiter = RateLimiter::new(std::thread::sleep);
     let mut ctx = ResolveContext::new(&http, &mut limiter, &corpus, Some(&work.pool));
+    if let Some(self_id) = self_id {
+        ctx.exclude_item(self_id.to_string());
+    }
     if let Some(source) = keyed {
         ctx.use_keyed_search(source);
     }

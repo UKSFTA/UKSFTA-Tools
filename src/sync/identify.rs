@@ -34,7 +34,8 @@ pub fn identify() -> Result<(), UksftaError> {
     let mut mod_dirs = build_mod_dirs(&caches);
 
     // If the current directory is itself a Workshop mod folder, exclude it.
-    if let Some(self_id) = self_workshop_id(&caches) {
+    let self_id = self_workshop_id(&caches);
+    if let Some(self_id) = self_id.as_deref() {
         mod_dirs.retain(|d| d.id != self_id);
     }
 
@@ -43,7 +44,14 @@ pub fn identify() -> Result<(), UksftaError> {
 
     // The depot manifest index holds the exact bytes of every installed
     // Workshop file. A name and size find candidates; a hash confirms one.
-    let manifest_index = WorkshopIndex::load();
+    // The item under investigation is dropped from it, or every file would
+    // confirm against the pack's own manifest.
+    let manifest_index = WorkshopIndex::load().map(|mut index| {
+        if let Some(self_id) = self_id.as_deref() {
+            index.exclude_item(self_id);
+        }
+        index
+    });
 
     // First pass: prefix origin and candidate discovery read no file body.
     let mut rows = Vec::new();

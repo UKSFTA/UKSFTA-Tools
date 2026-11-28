@@ -19,6 +19,9 @@ pub struct WorkshopItem {
     /// The depot manifest id, or [`crate::workshop_manifest::LEGACY_MANIFEST`]
     /// for an item that predates manifests.
     pub manifest: String,
+    /// The newest published manifest id, from `WorkshopItemDetails`. Empty
+    /// when the ACF does not record one.
+    pub latest_manifest: String,
 }
 
 pub fn parse_acf(content: &str) -> HashMap<String, WorkshopItem> {
@@ -26,7 +29,10 @@ pub fn parse_acf(content: &str) -> HashMap<String, WorkshopItem> {
     let mut current_id: Option<String> = None;
     let mut current_item = WorkshopItem::default();
     let mut in_installed = false;
+    let mut in_details = false;
     let mut brace_depth = 0;
+    let mut details: HashMap<String, String> = HashMap::new();
+    let mut details_id: Option<String> = None;
 
     for line in content.lines() {
         let line = line.trim();
@@ -34,6 +40,43 @@ pub fn parse_acf(content: &str) -> HashMap<String, WorkshopItem> {
         if line.contains("\"WorkshopItemsInstalled\"") {
             in_installed = true;
             brace_depth = 0;
+            continue;
+        }
+
+        if line.contains("\"WorkshopItemDetails\"") {
+            in_details = true;
+            brace_depth = 0;
+            continue;
+        }
+
+        if in_details {
+            if line.starts_with('{') {
+                brace_depth += 1;
+                continue;
+            }
+            if line.starts_with('}') {
+                brace_depth -= 1;
+                if brace_depth == 0 {
+                    in_details = false;
+                    details_id = None;
+                }
+                continue;
+            }
+            if brace_depth == 1 {
+                if let Some(val) = extract_quoted(line) {
+                    if val.chars().all(|c| c.is_ascii_digit()) {
+                        details_id = Some(val);
+                    }
+                }
+            }
+            if brace_depth == 2 {
+                let tokens = extract_quoted_tokens(line);
+                if tokens.len() >= 2 && tokens[0] == "latest_manifest" {
+                    if let Some(id) = &details_id {
+                        details.insert(id.clone(), tokens[1].clone());
+                    }
+                }
+            }
             continue;
         }
 
@@ -90,6 +133,10 @@ pub fn parse_acf(content: &str) -> HashMap<String, WorkshopItem> {
     // Save last item
     if let Some(id) = &current_id {
         items.insert(id.clone(), current_item);
+    }
+
+    for (id, latest) in details {
+        items.entry(id).or_default().latest_manifest = latest;
     }
 
     items

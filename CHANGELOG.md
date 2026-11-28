@@ -7,6 +7,47 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-28
+
+### Fixed
+
+- `investigate` no longer resolves a pack's files back to the pack that is
+  being investigated. The current directory's own Workshop item was removed
+  from the folder index only, while the depot manifest index kept it, so every
+  file confirmed against its own manifest. Both indexes now drop the item, and
+  the index counts follow. `identify` had the same leak and is fixed too.
+- An item withdrawn from the community is now reported as
+  `REMOVED (the page says it was removed from the community)`. The page can
+  render a removed item's title, so the removal notice is read before the
+  title; the earlier title-first order reported such an item as unlisted.
+  Both ids in the UKSF pack are withdrawn: `3549882948` with 10 versions and
+  `3645230323` with 4.
+- An item the Workshop API does not index is no longer reported as removed.
+  The API omits removed, private and unlisted items alike, so the tool now
+  reads the public item page: a rendered title reports `UNLISTED (page is
+  public; the item is absent from the API index)` with the real title, an error
+  page reports `REMOVED OR PRIVATE`, and a transport fault reports that it
+  proves nothing. Items the API omits entirely now get a line instead of
+  disappearing.
+
+### Added
+
+- `investigate` marks a resolved file `[differs from the installed copy]` when
+  its size, or its hash once known, is not the copy Steam installed for that
+  item. A file can differ legitimately, because an item may publish one
+  version per game branch, so the line states the fact and not a conclusion.
+- Every Workshop manifest is archived under the user cache as
+  `<item>_<manifest>.manifest`, and the index reads archived versions beside
+  the current one. Steam deletes a manifest when the item updates, so this is
+  the only way the previous version's bytes stay identifiable. The first run
+  archived 284 manifests in 8.1 MB.
+- The visibility check reads the item's change-notes page and prints
+  `versions: N (latest <date>)`, so a differing file can be placed against
+  the item's upload history.
+- `investigate --refresh` resolves every PBO again instead of reusing a stored
+  decision. A confirmed decision stands while the file fingerprint matches, so
+  before this the only way past a wrong one was deleting `.uksfta/identities.json`.
+
 ## [0.11.0] - 2026-11-28
 
 ### Added

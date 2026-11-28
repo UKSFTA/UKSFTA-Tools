@@ -40,6 +40,7 @@ pub fn modlist_size(modlist_file: &Path, online: bool) -> Result<(), UksftaError
                 items.insert(
                     id,
                     WorkshopItem {
+                        latest_manifest: String::new(),
                         size,
                         time_updated: 0,
                         manifest: String::new(),

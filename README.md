@@ -506,6 +506,9 @@ uksfta investigate --all
 # Add the keyed Steam Workshop search to the candidate sources
 uksfta investigate --online --steam-search
 
+# Resolve every PBO again, ignoring the stored decisions
+uksfta investigate --online --refresh
+
 # Refresh the online resolution, then print the status lines
 uksfta investigate --report --online
 ```
@@ -523,9 +526,18 @@ Such a PBO may come from a deleted or private mod, or a manual copy. The tool
 flags a result whose best match is itself a pack as `[pack: verify source]`.
 
 With `--online`, the tool also calls Steam's `GetPublishedFileDetails` API (no key
-required) to report whether each origin still exists and is publicly visible. An
-item that is not publicly visible is either removed or set private. The API
-cannot tell the two apart without the owner authenticating.
+required) to report whether each origin still exists and who published it. The
+API omits the items it does not index, and that covers a removed item, a private
+one and an unlisted one alike. For every id the API does not describe, the tool
+reads the public item page. A page that renders the title reports `UNLISTED
+(page is public; the item is absent from the API index)`, an error page or a
+failed request reports `REMOVED OR PRIVATE`, and a transport fault reports that
+it proves nothing, so a timeout never becomes a removal verdict.
+
+The run stores each decision with the file fingerprint it was reached under, and
+reuses it while the fingerprint matches. `--refresh` drops every stored decision
+for that run and resolves the whole pack again, so a wrong answer does not have
+to be deleted by hand. It needs `--online`.
 
 The same run then resolves the identity of every examined PBO from its own content.
 It reads the `CfgMods` name, a bracketed author tag, the `CfgPatches` class and

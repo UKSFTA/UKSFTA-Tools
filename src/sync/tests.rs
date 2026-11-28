@@ -55,6 +55,7 @@ fn lookup_sizes_marks_missing_mods_as_unknown() {
     items.insert(
         "111".to_string(),
         WorkshopItem {
+            latest_manifest: String::new(),
             size: 500,
             time_updated: 0,
             manifest: String::new(),
@@ -80,6 +81,7 @@ fn missing_size_ids_skips_known_and_dedupes() {
     items.insert(
         "111".to_string(),
         WorkshopItem {
+            latest_manifest: String::new(),
             size: 500,
             time_updated: 0,
             manifest: String::new(),
@@ -89,6 +91,7 @@ fn missing_size_ids_skips_known_and_dedupes() {
     items.insert(
         "333".to_string(),
         WorkshopItem {
+            latest_manifest: String::new(),
             size: 0,
             time_updated: 0,
             manifest: String::new(),
