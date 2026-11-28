@@ -9,8 +9,10 @@ use openssh_sftp_client::Sftp;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncSeekExt, SeekFrom};
 
+use super::connect;
 use super::fanout;
 use crate::error::UksftaError;
+use crate::server::config::Settings;
 
 /// The buffer one read-back request uses. It is deliberately not the
 /// transfer buffer: the read-back is one stream and benefits from a large
@@ -46,6 +48,46 @@ pub async fn hash_remote_prefix(
     buffer: u32,
 ) -> Result<String, UksftaError> {
     hash(sftp, path, len, buffer).await
+}
+
+/// The digest of each remote path in the order it was asked for. `None` is a
+/// file that could not be read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamedHashes {
+    pub digests: Vec<Option<String>>,
+}
+
+/// Hash the remote paths in order over one native session, with no local
+/// copy on disk. Each path carries the length the listing reported, and the
+/// same pipelined reader the completion hash uses does the work.
+///
+/// # Errors
+/// Returns the connection error when the session cannot be opened, so the
+/// caller can fall back. A path that cannot be read is `None` in the result.
+pub fn stream_hashes(
+    settings: &Settings,
+    paths: &[(String, u64)],
+) -> Result<StreamedHashes, UksftaError> {
+    if paths.is_empty() {
+        return Ok(StreamedHashes::default());
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .map_err(UksftaError::Io)?;
+    runtime.block_on(async {
+        let session = connect::connect(settings).await?;
+        let mut digests = Vec::with_capacity(paths.len());
+        for (path, len) in paths {
+            digests.push(
+                hash_remote(&session.sftp, path, *len, READBACK_BUFFER)
+                    .await
+                    .ok(),
+            );
+        }
+        Ok(StreamedHashes { digests })
+    })
 }
 
 async fn hash(sftp: &Sftp, path: &str, len: u64, buffer: u32) -> Result<String, UksftaError> {

@@ -13,6 +13,8 @@ use assert_cmd::cargo::cargo_bin;
 
 /// The pack id in the test `meta.cpp`.
 const PACK_ID: &str = "3662499431";
+/// A pack id the deep tests own.
+const DEEP_PACK: &str = "3662499433";
 /// The size of the test PBO. Large enough that a kill lands mid-transfer.
 const SIZE: u64 = 80 * 1024 * 1024;
 /// The remote root the fixture serves.
@@ -67,13 +69,18 @@ impl Setup {
     }
 
     fn at_size(tag: &str, host: &str, port: u16, size: u64) -> Self {
+        Self::at_size_id(tag, host, port, size, PACK_ID)
+    }
+
+    /// A setup under its own pack id, so it ignores another test's residue.
+    fn at_size_id(tag: &str, host: &str, port: u16, size: u64, id: &str) -> Self {
         let repo = tempfile::TempDir::new().expect("a repository");
         let release = repo.path().join(".hemttout/release");
         let addons = release.join("addons");
         std::fs::create_dir_all(&addons).expect("addons");
         std::fs::write(
             repo.path().join("meta.cpp"),
-            format!("protocol = 1;\npublishedid = {PACK_ID};\nname = \"Live Test\";\n"),
+            format!("protocol = 1;\npublishedid = {id};\nname = \"Live Test\";\n"),
         )
         .expect("meta.cpp");
 
@@ -84,7 +91,7 @@ impl Setup {
         std::fs::write(&known_hosts, format!("[{host}]:{port} {}\n", host_key()))
             .expect("known_hosts");
 
-        let remote_dir = format!("{ROOT}/@{PACK_ID}/addons");
+        let remote_dir = format!("{ROOT}/@{id}/addons");
         let name = pbo
             .file_name()
             .expect("a name")
@@ -139,6 +146,28 @@ impl Setup {
 
     fn run(&self, extra: &[&str]) -> Output {
         self.command(extra).output().expect("run the command")
+    }
+
+    /// A deep verification of the same fixture. It never uploads.
+    fn deep(&self) -> Output {
+        let mut command = Command::new(cargo_bin("uksfta"));
+        command.current_dir(self.repo.path()).args([
+            "server",
+            "--deep",
+            "--destination",
+            &format!("uksfta@{}", self.host),
+            "--port",
+            &self.port.to_string(),
+            "--root",
+            ROOT,
+            "--identity",
+            &client_key().display().to_string(),
+            "--known-hosts",
+            &self.known_hosts.display().to_string(),
+            "--retries",
+            "0",
+        ]);
+        command.output().expect("run the deep verification")
     }
 
     fn run_with_env(&self, extra: &[&str], envs: &[(&str, &std::ffi::OsStr)]) -> Output {
@@ -312,6 +341,26 @@ fn prepare_remote(setup: &Setup) {
     let out = fixture(&["mkdir", "-p", &setup.remote_dir]);
     assert!(out.status.success(), "cannot create the remote directory");
     let _ = fixture(&["rm", "-f", &setup.remote_pbo, &setup.remote_temp]);
+}
+
+/// Put the local pack on the server without the upload path, so the deep
+/// phase is the only step under test.
+fn seed_remote(setup: &Setup) {
+    let pack = setup
+        .remote_dir
+        .rsplit_once('/')
+        .map(|(dir, _)| dir.to_string())
+        .expect("the pack directory");
+    let out = fixture(&["mkdir", "-p", &setup.remote_dir, &pack]);
+    assert!(out.status.success(), "cannot create the remote pack");
+
+    let meta = std::fs::read(setup.repo.path().join("meta.cpp")).expect("the local meta.cpp");
+    let out = fixture_input(&["sh", "-c", &format!("cat > {}/meta.cpp", pack)], &meta);
+    assert!(out.status.success(), "cannot seed the remote meta.cpp");
+
+    let body = std::fs::read(&setup.pbo).expect("the local PBO");
+    let out = fixture_input(&["sh", "-c", &format!("cat > {}", setup.remote_pbo)], &body);
+    assert!(out.status.success(), "cannot seed the remote PBO");
 }
 
 fn stderr(output: &Output) -> String {
@@ -980,4 +1029,71 @@ fn a_second_run_is_refused_while_the_lock_is_held() {
     );
     assert!(!lock.exists(), "the lock is released");
     assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_deep_run_hashes_every_pbo_without_a_local_copy() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::at_size_id("deepstream", "127.0.0.1", 2222, 8 * 1024 * 1024, DEEP_PACK);
+    seed_remote(&setup);
+
+    let output = setup.deep();
+    let errors = stderr(&output);
+    assert!(output.status.success(), "the deep run failed: {errors}");
+    assert!(
+        !errors.contains("Warning: deep:"),
+        "the native session must stream, not fall back to scratch: {errors}"
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("plan: no changes"),
+        "a matching pack plans nothing: {text}"
+    );
+    let _ = fixture(&["rm", "-f", &setup.remote_pbo]);
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_deep_run_reports_a_remote_hash_mismatch() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::at_size_id(
+        "deepmismatch",
+        "127.0.0.1",
+        2222,
+        8 * 1024 * 1024,
+        DEEP_PACK,
+    );
+    seed_remote(&setup);
+
+    // One byte in the local copy, same length: only the content differs.
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&setup.pbo)
+            .expect("open the local PBO");
+        file.seek(SeekFrom::Start(1)).expect("seek");
+        file.write_all(&[0xff]).expect("change one byte");
+    }
+
+    let output = setup.deep();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a mismatch must fail: {}",
+        stderr(&output)
+    );
+    assert!(
+        text.contains("contents differ"),
+        "the finding names the file: {text}"
+    );
+    let _ = fixture(&["rm", "-f", &setup.remote_pbo]);
 }

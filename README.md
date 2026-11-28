@@ -868,8 +868,7 @@ stays inside `addons/` and removes `.pbo` files only, so an included
 file, a key, a signature, `meta.cpp` and `mod.cpp` are never removed.
 `meta.cpp` and `mod.cpp` keep their own id and size checks.
 
-The default comparison is size only. `--deep` downloads and hashes
-`addons/*.pbo` only.
+The default comparison is size only. `--deep` hashes `addons/*.pbo` only.
 
 A name that differs only by case is the same file. One warning gives the number of
 such names, and uploads reuse the server name, so the command creates no case
@@ -886,9 +885,14 @@ The command reads the authority from the first 4096 bytes of a key. It does not
 verify a signature, a hash or a PBO. A key that does not parse is a warning, and
 its authority is unknown.
 
-`--deep` downloads each remote PBO into a temporary directory and compares
-its SHA-256 with the local file. It is slow, because it transfers every PBO
-in the pack. Use it when a size match is not enough.
+`--deep` compares the SHA-256 of each local PBO with the remote copy. It
+reads the remote copy over the native SFTP session and hashes it as the
+bytes arrive, so it writes no copy to disk. It is slow, because it reads
+every PBO in the pack. Use it when a size match is not enough.
+
+A setup the native session cannot reach, such as a password prompt or an
+`ssh_config` proxy, falls back to downloading each PBO into a temporary
+directory.
 
 `--upload` puts every missing or stale file into the pack folder at its relative
 path, including files outside `addons/` and `keys/`. It creates each directory
@@ -1339,8 +1343,9 @@ command does not use the `-b` batch-file mode, because that mode suppresses the
 prompt. The command reads and stores no password.
 
 One `sftp` process runs per phase. The phases are the listing, the `meta.cpp` and
-`mod.cpp` fetch, the deep download, the upload and the prune. A password prompt
-therefore appears at most once per phase.
+`mod.cpp` fetch, the upload and the prune. A password prompt therefore appears at
+most once per phase. The deep phase reads over its own native session, so it
+opens one more connection.
 
 Each run uses `-R 64` and a 32 KB buffer. See Upload performance for the reasons
 and the retry behaviour.
