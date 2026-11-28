@@ -7,6 +7,8 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-28
+
 ### Added
 
 - `investigate --online --steam-search` adds Steam's keyed
@@ -162,6 +164,23 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 
 ### Changed
+
+- The link probe runs for the default upload, so the whole-file native path
+  is chosen by measurement instead of the `--native-whole` flag. The probe
+  measures the largest pending file at or above `max(--segment-min,
+  256 MiB)` and compares the native whole-file sender with the system
+  batch. When native wins, the digest comes from the send and the second
+  local read of the pack disappears. On the 15.46 GB pack the default run
+  takes 43.9 s against 101.8 s for the segmented fallback and 129.0 s for
+  the system client, and the device read falls from 46.4 GB to 18.9 GB.
+  `--no-native-whole`, `--legacy-sftp`, `--segmented` and
+  `--no-segment-probe` keep their existing behaviour.
+- `--jobs` takes one worker per core when the flag is absent, capped at 8.
+  On two client cores one worker costs 44 percent more wall time than two
+  for the same CPU, because the hash waits behind the send; above one worker
+  per core the wall time stops falling and the CPU rises. An explicit
+  `--jobs` value still wins, and a single worker keeps the automatic
+  progress meter.
 
 - The native transport is faster. A 16 MiB receive window and matching
   request buffer raise a 977 MB segmented upload from 34.4 s to a 14.7 s
