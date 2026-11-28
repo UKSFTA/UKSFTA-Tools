@@ -2168,7 +2168,8 @@ mod tests {
     }
 
     #[test]
-    fn a_single_worker_caps_the_hash_pool_at_two() {        assert!(hash_threads(1) >= 1);
+    fn a_single_worker_caps_the_hash_pool_at_two() {
+        assert!(hash_threads(1) >= 1);
         assert!(
             hash_threads(1) <= 2,
             "one worker must not start four threads"
