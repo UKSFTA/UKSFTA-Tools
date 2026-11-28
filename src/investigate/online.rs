@@ -122,10 +122,7 @@ pub fn investigate(
     // Match each untracked PBO against the index and arbitrate the origin
     for (pbo_name, pbo_path, origin) in &mut results {
         let target_prefix = pbo_prefix(pbo_path);
-        let candidates = index
-            .get(pbo_name.as_str())
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
+        let candidates = index.candidates(pbo_name);
         *origin = resolve_pbo_from_index(pbo_path, candidates, target_prefix.as_deref());
     }
 
@@ -267,7 +264,7 @@ fn resolve_identities(
     let mut corpus_dirs: BTreeSet<PathBuf> = BTreeSet::new();
     corpus_dirs.insert(addons_dir.to_path_buf());
     for pbo in mod_dirs.iter().flat_map(|dir| dir.pbos.iter()) {
-        if let Some(parent) = pbo.parent() {
+        if let Some(parent) = pbo.path.parent() {
             corpus_dirs.insert(parent.to_path_buf());
         }
     }

@@ -902,6 +902,7 @@ mod tests {
                 .map(|(text, kind)| EvidenceString {
                     pbo: pbo.to_string(),
                     text: (*text).to_string(),
+                    key: normalise(text).text,
                     kind: *kind,
                     token_df: 1,
                     pbo_df: 1,

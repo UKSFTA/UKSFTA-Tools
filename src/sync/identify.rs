@@ -32,10 +32,7 @@ pub fn identify() -> Result<(), UksftaError> {
             continue;
         };
         let target_prefix = pbo_prefix(&pbo);
-        let candidates = index
-            .get(name.as_str())
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
+        let candidates = index.candidates(&name);
         let origin = resolve_pbo_from_index(&pbo, candidates, target_prefix.as_deref())
             .map(|r| r.id)
             .unwrap_or_else(|| "Unknown".to_string());
