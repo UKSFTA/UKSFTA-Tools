@@ -110,13 +110,25 @@ impl Setup {
     }
 
     fn command(&self, extra: &[&str]) -> Command {
+        self.command_on(true, extra)
+    }
+
+    /// The fixture without `--segmented`, so the default whole-file path
+    /// carries the upload.
+    fn default_command(&self, extra: &[&str]) -> Command {
+        self.command_on(false, extra)
+    }
+
+    fn command_on(&self, segmented: bool, extra: &[&str]) -> Command {
         let mut command = Command::new(cargo_bin("uksfta"));
         command
             .current_dir(self.repo.path())
+            .args(["server", "--upload"]);
+        if segmented {
+            command.arg("--segmented");
+        }
+        command
             .args([
-                "server",
-                "--upload",
-                "--segmented",
                 "--destination",
                 &format!("uksfta@{}", self.host),
                 "--port",
@@ -146,6 +158,12 @@ impl Setup {
 
     fn run(&self, extra: &[&str]) -> Output {
         self.command(extra).output().expect("run the command")
+    }
+
+    fn run_default(&self, extra: &[&str]) -> Output {
+        self.default_command(extra)
+            .output()
+            .expect("run the command")
     }
 
     /// A deep verification of the same fixture. It never uploads.
@@ -880,21 +898,29 @@ fn a_probe_chooses_a_whole_path_on_a_fast_link() {
         "the probe run failed: {}",
         stderr(&output)
     );
-    assert!(
-        stdout.contains("native whole faster") || stdout.contains("whole-file faster"),
-        "the fast link must choose a whole path: {stdout}"
-    );
-    assert!(
-        !stdout.contains("published in"),
-        "the whole-file path must carry it: {stdout}"
-    );
-    if stdout.contains("native whole faster") {
+    // The probe now runs for the default path too, so the shared fixture
+    // carries more probe traffic. A refused probe keeps the segmented path
+    // by design; the default-path case enforces a measured system rate, so
+    // this case only judges the choice when a measurement exists.
+    if stderr(&output).contains("Warning: probe:") {
+        eprintln!("skipped: the fixture refused the probe");
+    } else {
         assert!(
-            !stdout
-                .lines()
-                .any(|line| line.contains("live_probe.pbo") && line.contains('~')),
-            "the native whole path must give exact seconds: {stdout}"
+            stdout.contains("native whole faster") || stdout.contains("whole-file faster"),
+            "the fast link must choose a whole path: {stdout}"
         );
+        assert!(
+            !stdout.contains("published in"),
+            "the whole-file path must carry it: {stdout}"
+        );
+        if stdout.contains("native whole faster") {
+            assert!(
+                !stdout
+                    .lines()
+                    .any(|line| line.contains("live_probe.pbo") && line.contains('~')),
+                "the native whole path must give exact seconds: {stdout}"
+            );
+        }
     }
     assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
     for line in stdout.lines().filter(|line| line.starts_with("probe: ")) {
@@ -924,6 +950,117 @@ fn a_disabled_probe_keeps_the_segmented_path() {
         "the segmented path must run: {stdout}"
     );
     assert!(!stdout.contains("probe:"), "no probe line: {stdout}");
+    assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn the_default_path_probes_the_link_and_names_the_choice() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::with_size("defaultprobe", 300 * 1024 * 1024);
+    prepare_remote(&setup);
+
+    // One job keeps the probe on one system stream, which leaves the shared
+    // fixture free for the next case.
+    let output = setup.run_default(&["--jobs", "1"]);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        output.status.success(),
+        "the default run failed: {}",
+        stderr(&output)
+    );
+    let errors = stderr(&output);
+    if errors.contains("Warning: probe:") {
+        // The fixture occasionally refuses the probe's connections. The
+        // documented fallback then keeps the system path, never a segmented
+        // path the run never offered.
+        eprintln!("skipped: the fixture refused the probe");
+        assert!(
+            errors.contains("keeping the system path"),
+            "without --segmented the fallback keeps the system path: {errors}"
+        );
+    } else {
+        assert!(
+            stdout.contains("probe: "),
+            "the probe must run without --segmented: {stdout}"
+        );
+        let decision = stdout
+            .lines()
+            .find(|line| line.contains("using the"))
+            .unwrap_or_default();
+        assert!(
+            decision.contains("using the native whole-file path")
+                || decision.contains("using the whole-file path"),
+            "the decision is native whole or the system batch: {decision}"
+        );
+        assert!(
+            !stdout.contains("using the segmented path"),
+            "segmentation is not on offer: {stdout}"
+        );
+        assert!(
+            !stdout.contains("published in"),
+            "the segmented path must not run: {stdout}"
+        );
+    }
+    assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
+    let _ = fixture(&["rm", "-f", &setup.remote_pbo]);
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn the_default_path_skips_the_probe_when_it_is_off() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::with_size("defaultnoprobe", 300 * 1024 * 1024);
+    prepare_remote(&setup);
+
+    for extra in [
+        ["--no-segment-probe"],
+        ["--legacy-sftp"],
+        ["--no-native-whole"],
+    ] {
+        let output = setup.run_default(&extra);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success(),
+            "the run with {extra:?} failed: {}",
+            stderr(&output)
+        );
+        assert!(
+            !stdout.contains("probe:"),
+            "no probe line with {extra:?}: {stdout}"
+        );
+        assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
+        let _ = fixture(&["rm", "-f", &setup.remote_pbo]);
+    }
+}
+
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_small_default_pack_skips_the_probe() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::with_size("smalldefault", 8 * 1024 * 1024);
+    prepare_remote(&setup);
+
+    let output = setup.run_default(&[]);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        output.status.success(),
+        "the default run failed: {}",
+        stderr(&output)
+    );
+    assert!(
+        !stdout.contains("probe:"),
+        "a small pack must not pay the probe: {stdout}"
+    );
     assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
 }
 

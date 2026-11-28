@@ -364,6 +364,16 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
     } else {
         None
     };
+    // The probe runs for the whole-file path too, so the choice is made on
+    // every upload rather than only when segmentation is on.
+    let probe = probe_target(
+        &plan,
+        &settings,
+        native::probe::Options {
+            segment: settings.segment.enabled,
+            native_whole: !opts.no_native_whole && !opts.native_whole && !opts.legacy_sftp,
+        },
+    );
     outcome.segment_choice = segment
         .as_ref()
         .map(|choice| (choice.unit.remote.clone(), settings.segment.connections));
@@ -397,9 +407,9 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
                 sent: &mut outcome.sent,
             },
             segment.as_ref(),
+            probe.as_ref(),
             opts.password_prompt,
             opts.native_whole,
-            !opts.no_native_whole,
         )?;
         outcome.upload_ms = Some(millis(upload_started.elapsed()));
     }
@@ -768,6 +778,35 @@ fn remote_name(remote: &str) -> &str {
     remote.rsplit('/').next().unwrap_or(remote)
 }
 
+/// The file the probe measures, and the paths it may choose.
+struct ProbeTarget {
+    unit: UploadUnit,
+    options: native::probe::Options,
+}
+
+/// The largest file the probe measures, if any. The probe moves about 12 MiB
+/// before the transfer, so a file below the segment minimum or below the
+/// probe minimum is not worth it. It never requires `--segmented`, and it is
+/// skipped when it has no second path to choose.
+fn probe_target(
+    plan: &Plan,
+    settings: &Settings,
+    options: native::probe::Options,
+) -> Option<ProbeTarget> {
+    if !settings.segment.probe || (!options.segment && !options.native_whole) {
+        return None;
+    }
+    let floor = settings
+        .segment
+        .min_bytes
+        .max(native::probe::MIN_PROBE_BYTES);
+    let unit = upload_units(plan)
+        .into_iter()
+        .filter(|unit| unit.size >= floor)
+        .max_by(|a, b| a.size.cmp(&b.size).then_with(|| b.remote.cmp(&a.remote)))?;
+    Some(ProbeTarget { unit, options })
+}
+
 /// The digest the summary shows for a file that cannot be read.
 const MISSING_HASH: &str = "-";
 
@@ -873,9 +912,9 @@ fn upload_with_retries(
     jobs: u8,
     mut report: UploadReport<'_>,
     segment: Option<&SegmentChoice>,
+    probe: Option<&ProbeTarget>,
     password_prompt: bool,
     whole: bool,
-    probe_whole: bool,
 ) -> Result<Plan, UksftaError> {
     let units = upload_units(&plan);
     let view = report
@@ -883,7 +922,7 @@ fn upload_with_retries(
         .is_on()
         .then(|| progress::UploadProgress::new(&units, report.mode));
     // The prompt owns the terminal, so the view is hidden while it runs.
-    let password = if password_prompt && (segment.is_some() || whole) {
+    let password = if password_prompt && (segment.is_some() || whole || probe.is_some()) {
         if let Some(view) = &view {
             view.hide();
         }
@@ -902,10 +941,10 @@ fn upload_with_retries(
         jobs,
         &mut report,
         segment,
+        probe,
         password,
         view.clone(),
         whole,
-        probe_whole,
     );
     if let Some(view) = &view {
         view.finish();
@@ -931,18 +970,19 @@ fn upload_loop(
     jobs: u8,
     report: &mut UploadReport<'_>,
     segment: Option<&SegmentChoice>,
+    probe: Option<&ProbeTarget>,
     password: Option<Arc<native::secret::Secret>>,
     view: Option<Arc<progress::UploadProgress>>,
     whole: bool,
-    probe_whole: bool,
 ) -> Result<(), UksftaError> {
     let mut whole = whole;
+    let mut use_segment = segment.is_some();
     let upload_started = Instant::now();
     let mut skip: HashSet<String> = HashSet::new();
-    if let Some(choice) = segment {
-        // The native writer opens the temp file inside the pack folder, so
-        // the directories must exist first. The batch below repeats the
-        // mkdir lines, which a batch client tolerates.
+    // The probe and the native writer open files inside the pack folder, so
+    // the directories must exist first. The batch below repeats the mkdir
+    // lines, which a batch client tolerates.
+    if segment.is_some() || probe.is_some() {
         match upload_dirs(plan) {
             Ok(dirs) if !dirs.is_empty() => {
                 if let Err(error) = verifier.client.batch(&dirs) {
@@ -952,44 +992,47 @@ fn upload_loop(
             Ok(_) => {}
             Err(error) => eprintln!("Warning: {error}"),
         }
+    }
 
-        let mut use_segment = true;
-        if verifier.settings.segment.probe && choice.unit.size >= native::probe::MIN_PROBE_BYTES {
-            match native::probe::run_blocking(
-                verifier.settings,
-                Path::new("."),
-                &verifier.local.id,
-                &choice.unit,
-                password.as_ref(),
-                jobs,
-            ) {
-                Ok(decision) => {
-                    let decision = if probe_whole {
-                        decision
+    if let Some(target) = probe {
+        match native::probe::run_blocking(
+            verifier.settings,
+            Path::new("."),
+            &verifier.local.id,
+            &target.unit,
+            password.as_ref(),
+            jobs,
+            target.options,
+        ) {
+            Ok(decision) => {
+                use_segment = decision.segmented();
+                whole = decision.native_whole();
+                if decision.probe.system_mbps > 0.0 {
+                    say(report.json, &decision.rates_line());
+                    say(report.json, &decision.decision_line());
+                } else {
+                    let keeping = if decision.segmented() {
+                        "segmented"
+                    } else if decision.native_whole() {
+                        "native whole-file"
                     } else {
-                        decision.without_native_whole()
+                        "system"
                     };
-                    if decision.probe.system_mbps > 0.0 {
-                        say(report.json, &decision.rates_line());
-                        say(report.json, &decision.decision_line());
-                        use_segment = decision.segmented();
-                        if decision.native_whole() {
-                            whole = true;
-                        }
-                    } else {
-                        eprintln!(
-                            "Warning: probe: the system path could not authenticate; keeping the segmented path"
-                        );
-                    }
-                    *report.probe = Some(decision);
+                    eprintln!(
+                        "Warning: probe: the system path could not authenticate; keeping the {keeping} path"
+                    );
                 }
-                Err(UksftaError::Auth(message)) => return Err(UksftaError::Auth(message)),
-                Err(error) => {
-                    eprintln!("Warning: probe: {error}; keeping the segmented path");
-                }
+                *report.probe = Some(decision);
+            }
+            Err(UksftaError::Auth(message)) => return Err(UksftaError::Auth(message)),
+            Err(error) => {
+                let keeping = if use_segment { "segmented" } else { "system" };
+                eprintln!("Warning: probe: {error}; keeping the {keeping} path");
             }
         }
+    }
 
+    if let Some(choice) = segment {
         if use_segment {
             if let Some(view) = &view {
                 view.file_started(&choice.unit.remote);
@@ -1956,6 +1999,81 @@ mod tests {
 
         let choice = segment_target(&plan, &settings).expect("a target");
         assert_eq!(remote_name(&choice.unit.remote), "a.pbo");
+    }
+
+    const MIB: u64 = 1024 * 1024;
+    const PROBE_FLOOR: u64 = native::probe::MIN_PROBE_BYTES;
+
+    fn whole_file(min_bytes: u64) -> Settings {
+        let overrides = Overrides {
+            destination: Some("user@host".to_string()),
+            root: Some("/srv".to_string()),
+            ..Overrides::default()
+        };
+        let mut settings = config::resolve(None, &overrides).unwrap();
+        settings.segment = config::Segment {
+            enabled: false,
+            min_bytes,
+            ..config::Segment::default()
+        };
+        settings
+    }
+
+    fn whole_choices() -> native::probe::Options {
+        native::probe::Options {
+            segment: false,
+            native_whole: true,
+        }
+    }
+
+    #[test]
+    fn the_probe_targets_the_largest_file_without_segmentation() {
+        let plan = plan_with(vec![
+            upload("small.pbo", 8 * MIB),
+            upload("big.pbo", PROBE_FLOOR + 64 * MIB),
+            upload("mid.pbo", PROBE_FLOOR),
+        ]);
+        let settings = whole_file(64 * MIB);
+
+        let target = probe_target(&plan, &settings, whole_choices()).expect("a target");
+        assert_eq!(remote_name(&target.unit.remote), "big.pbo");
+        assert!(!target.options.segment);
+        assert!(target.options.native_whole);
+    }
+
+    #[test]
+    fn a_disabled_probe_has_no_target() {
+        let plan = plan_with(vec![upload("big.pbo", PROBE_FLOOR)]);
+        let mut settings = whole_file(64 * MIB);
+        settings.segment.probe = false;
+        assert!(probe_target(&plan, &settings, whole_choices()).is_none());
+    }
+
+    #[test]
+    fn a_probe_without_a_second_path_has_no_target() {
+        let plan = plan_with(vec![upload("big.pbo", PROBE_FLOOR)]);
+        let settings = whole_file(64 * MIB);
+        let forced = native::probe::Options {
+            segment: false,
+            native_whole: false,
+        };
+        assert!(probe_target(&plan, &settings, forced).is_none());
+    }
+
+    #[test]
+    fn a_small_pack_has_no_target() {
+        // The largest file clears the segment minimum but not the probe
+        // minimum, so the 12 MiB measurement would cost more than it saves.
+        let plan = plan_with(vec![upload("single.pbo", 100 * MIB)]);
+        let settings = whole_file(64 * MIB);
+        assert!(probe_target(&plan, &settings, whole_choices()).is_none());
+    }
+
+    #[test]
+    fn a_raised_segment_minimum_skips_the_probe() {
+        let plan = plan_with(vec![upload("big.pbo", PROBE_FLOOR)]);
+        let settings = whole_file(2 * PROBE_FLOOR);
+        assert!(probe_target(&plan, &settings, whole_choices()).is_none());
     }
 
     #[test]

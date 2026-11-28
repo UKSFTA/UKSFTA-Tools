@@ -65,6 +65,16 @@ pub enum Choice {
     SystemBatch,
 }
 
+/// The paths the caller allows. A run without `--segmented` offers no
+/// segmented choice, and `--no-native-whole` offers no native one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Options {
+    /// The segmented path may take the largest file.
+    pub segment: bool,
+    /// The native whole-file path may carry the batch.
+    pub native_whole: bool,
+}
+
 /// The time estimate for one file under each path.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Decision {
@@ -85,7 +95,10 @@ impl Decision {
     /// Otherwise the segmented path takes the file when it beats the system
     /// batch by 10 percent, and the system batch carries it when it does not.
     /// A failed system probe keeps the segmented path.
-    pub fn decide(probe: Probe, size: u64) -> Self {
+    ///
+    /// Only the paths in `options` are on offer. Without segmentation the
+    /// native whole and system batch paths compete under the same margin.
+    pub fn decide_with(probe: Probe, size: u64, options: Options) -> Self {
         let bytes = size as f64;
         let write_rate =
             (probe.native_one_mbps.max(probe.native_two_mbps) * 1_000_000.0).max(f64::EPSILON);
@@ -96,22 +109,34 @@ impl Decision {
         } else {
             f64::INFINITY
         };
+        let native_whole = options.native_whole && probe.native_whole_mbps > 0.0;
+        // A failed system probe keeps the segmented path when it was asked
+        // for; without segmentation the native whole path is the only one
+        // that can authenticate.
         if probe.system_mbps <= 0.0 {
+            let choice = if options.segment {
+                Choice::Segmented
+            } else if native_whole {
+                Choice::NativeWhole
+            } else {
+                Choice::SystemBatch
+            };
             return Self {
                 probe,
                 whole_seconds: 0.0,
                 native_whole_seconds,
                 segmented_seconds,
-                choice: Choice::Segmented,
+                choice,
             };
         }
         let whole_seconds = bytes / (probe.system_mbps * 1_000_000.0);
         // The native check comes first: the requirement is a 10 percent rate
         // gain over the system batch, not over the segmented estimate. The
         // segmented rule stays as it was, against the system batch.
-        let choice = if probe.native_whole_mbps / probe.system_mbps >= NATIVE_MARGIN {
+        let choice = if native_whole && probe.native_whole_mbps / probe.system_mbps >= NATIVE_MARGIN
+        {
             Choice::NativeWhole
-        } else if segmented_seconds <= whole_seconds * SEGMENT_MARGIN {
+        } else if options.segment && segmented_seconds <= whole_seconds * SEGMENT_MARGIN {
             Choice::Segmented
         } else {
             Choice::SystemBatch
@@ -135,26 +160,14 @@ impl Decision {
         self.choice == Choice::NativeWhole
     }
 
-    /// Drop the native whole option when the user forced the system client.
-    /// The segmented rule then applies as it did before the probe could pick
-    /// native whole.
-    pub fn without_native_whole(mut self) -> Self {
-        if self.choice == Choice::NativeWhole {
-            self.choice = if self.segmented_seconds <= self.whole_seconds * SEGMENT_MARGIN {
-                Choice::Segmented
-            } else {
-                Choice::SystemBatch
-            };
-        }
-        self
-    }
-
     /// The line the user sees once the decision is made.
     pub fn decision_line(&self) -> String {
         if self.probe.system_mbps <= 0.0 {
             return format!(
-                "probe: system path unavailable; segmented estimate {:.1} s; using the segmented path",
-                self.segmented_seconds
+                "probe: system path unavailable; segmented estimate {:.1} s; using the {} path{}",
+                self.segmented_seconds,
+                self.path_name(),
+                self.send_digest()
             );
         }
         let (kind, path) = match self.choice {
@@ -163,13 +176,33 @@ impl Decision {
             Choice::SystemBatch => ("whole-file faster", "whole-file"),
         };
         format!(
-            "probe: {kind} (system whole {:.1} s, native whole {:.1} s, segmented {:.1} s, system {:.2} MB/s at {} jobs); using the {path} path",
+            "probe: {kind} (system whole {:.1} s, native whole {:.1} s, segmented {:.1} s, system {:.2} MB/s at {} jobs); using the {path} path{}",
             self.whole_seconds,
             self.native_whole_seconds,
             self.segmented_seconds,
             self.probe.system_mbps,
             self.probe.system_jobs,
+            self.send_digest(),
         )
+    }
+
+    /// The path the decision names.
+    fn path_name(&self) -> &'static str {
+        match self.choice {
+            Choice::Segmented => "segmented",
+            Choice::NativeWhole => "native whole-file",
+            Choice::SystemBatch => "whole-file",
+        }
+    }
+
+    /// The native whole path hashes each file as it sends it, so the summary
+    /// needs no second local read. The line states that saving.
+    fn send_digest(&self) -> &'static str {
+        if self.native_whole() {
+            " (digest from the send, no second local read)"
+        } else {
+            ""
+        }
     }
 
     /// The measured rates, one line.
@@ -256,17 +289,21 @@ pub fn run_blocking(
     unit: &UploadUnit,
     password: Option<&Arc<Secret>>,
     jobs: u8,
+    options: Options,
 ) -> Result<Decision, UksftaError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .map_err(UksftaError::Io)?;
-    runtime.block_on(measure(settings, state_root, pack_id, unit, password, jobs))
+    runtime.block_on(measure(
+        settings, state_root, pack_id, unit, password, jobs, options,
+    ))
 }
 
 /// Run the probe and return the decision. The caller keeps or drops the
-/// segmented path from `decision.choice`.
+/// segmented path from `decision.choice`, and limits the choice with
+/// `options`.
 ///
 /// # Errors
 /// Returns `Auth` when the typed password is refused. Returns `Input` when a
@@ -279,6 +316,7 @@ pub async fn measure(
     unit: &UploadUnit,
     password: Option<&Arc<Secret>>,
     jobs: u8,
+    options: Options,
 ) -> Result<Decision, UksftaError> {
     // The probe writes into the pack folder, so it holds the run lock. The
     // fixed probe names then cannot collide with a second run.
@@ -323,6 +361,7 @@ pub async fn measure(
         &names[..usize::from(jobs)],
         unit.size,
         jobs,
+        options,
     )
     .await;
     let (result, session) = match result {
@@ -357,6 +396,7 @@ async fn probe_inner(
     sys_names: &[String],
     size: u64,
     jobs: u8,
+    options: Options,
 ) -> Result<(Decision, connect::NativeSession), UksftaError> {
     let (system, second, native) = tokio::join!(
         measure_system(settings, local_sys, sys_names),
@@ -385,7 +425,7 @@ async fn probe_inner(
         native_whole_mbps: rate(PROBE_BYTES, whole_time),
         read_mbps: rate(PROBE_BYTES, read),
     };
-    Ok((Decision::decide(probe, size), session))
+    Ok((Decision::decide_with(probe, size, options), session))
 }
 
 /// Upload one small file on each system stream at the same time.
@@ -563,6 +603,17 @@ fn local_system_probe() -> PathBuf {
 mod tests {
     use super::*;
 
+    fn decide(probe: Probe, size: u64) -> Decision {
+        Decision::decide_with(
+            probe,
+            size,
+            Options {
+                segment: true,
+                native_whole: true,
+            },
+        )
+    }
+
     fn probe(system: f64, one: f64, two: f64, read: f64) -> Probe {
         probe_whole(system, 0.0, one, two, read)
     }
@@ -580,7 +631,7 @@ mod tests {
 
     #[test]
     fn a_fast_single_stream_keeps_the_whole_file_path() {
-        let decision = Decision::decide(probe(100.0, 60.0, 70.0, 300.0), 977 * 1024 * 1024);
+        let decision = decide(probe(100.0, 60.0, 70.0, 300.0), 977 * 1024 * 1024);
         assert_eq!(decision.choice, Choice::SystemBatch);
         assert!(decision.segmented_seconds > decision.whole_seconds);
         assert!(decision.decision_line().contains("whole-file faster"));
@@ -588,16 +639,16 @@ mod tests {
 
     #[test]
     fn a_slow_single_stream_takes_the_segmented_path() {
-        let decision = Decision::decide(probe(20.0, 40.0, 80.0, 300.0), 977 * 1024 * 1024);
+        let decision = decide(probe(20.0, 40.0, 80.0, 300.0), 977 * 1024 * 1024);
         assert!(decision.segmented());
         assert!(decision.decision_line().contains("segmented faster"));
     }
 
     #[test]
     fn a_ten_percent_gain_is_needed() {
-        let decision = Decision::decide(probe(100.0, 100.0, 100.0, 10_000.0), 1_000_000_000);
+        let decision = decide(probe(100.0, 100.0, 100.0, 10_000.0), 1_000_000_000);
         assert!(!decision.segmented(), "{decision:?}");
-        let just = Decision::decide(probe(100.0, 120.0, 120.0, 10_000.0), 1_000_000_000);
+        let just = decide(probe(100.0, 120.0, 120.0, 10_000.0), 1_000_000_000);
         assert!(just.segmented(), "{just:?}");
     }
 
@@ -606,11 +657,11 @@ mod tests {
         // A one-stream write and read make the segmented path far slower, so
         // only the native whole and system batch estimates compete.
         let size = 1_000_000_000;
-        let nine = Decision::decide(probe_whole(100.0, 109.0, 1.0, 1.0, 1.0), size);
+        let nine = decide(probe_whole(100.0, 109.0, 1.0, 1.0, 1.0), size);
         assert_eq!(nine.choice, Choice::SystemBatch, "{nine:?}");
-        let ten = Decision::decide(probe_whole(100.0, 110.0, 1.0, 1.0, 1.0), size);
+        let ten = decide(probe_whole(100.0, 110.0, 1.0, 1.0, 1.0), size);
         assert_eq!(ten.choice, Choice::NativeWhole, "{ten:?}");
-        let eleven = Decision::decide(probe_whole(100.0, 111.0, 1.0, 1.0, 1.0), size);
+        let eleven = decide(probe_whole(100.0, 111.0, 1.0, 1.0, 1.0), size);
         assert_eq!(eleven.choice, Choice::NativeWhole, "{eleven:?}");
     }
 
@@ -619,7 +670,7 @@ mod tests {
         // Segmented would beat the system batch on its own, but native whole
         // clears the 10 percent rate margin over the system batch, and the
         // requirement tests that gain against the system estimate first.
-        let decision = Decision::decide(
+        let decision = decide(
             probe_whole(100.0, 120.0, 200.0, 200.0, 1_000.0),
             1_000_000_000,
         );
@@ -627,27 +678,32 @@ mod tests {
     }
 
     #[test]
-    fn forcing_the_system_client_drops_native_whole() {
-        let decision = Decision::decide(probe_whole(100.0, 120.0, 1.0, 1.0, 1.0), 1_000_000_000);
+    fn forbidding_native_whole_keeps_the_system_batch() {
+        let probe = probe_whole(100.0, 120.0, 1.0, 1.0, 1.0);
+        let decision = decide(probe, 1_000_000_000);
         assert!(decision.native_whole());
-        let forced = decision.without_native_whole();
+        let forced = Decision::decide_with(
+            probe,
+            1_000_000_000,
+            Options {
+                segment: true,
+                native_whole: false,
+            },
+        );
         assert_eq!(forced.choice, Choice::SystemBatch);
         assert!(!forced.native_whole());
     }
 
     #[test]
     fn the_waiting_rate_uses_the_faster_write_probe() {
-        let decision = Decision::decide(probe(50.0, 10.0, 40.0, 400.0), 400_000_000);
+        let decision = decide(probe(50.0, 10.0, 40.0, 400.0), 400_000_000);
         let expected = 400.0 / 40.0 + 400.0 / 400.0;
         assert!((decision.segmented_seconds - expected).abs() < 1e-9);
     }
 
     #[test]
     fn a_failed_system_probe_keeps_the_segmented_path() {
-        let decision = Decision::decide(
-            probe_whole(0.0, 120.0, 60.0, 70.0, 300.0),
-            977 * 1024 * 1024,
-        );
+        let decision = decide(probe(0.0, 60.0, 70.0, 300.0), 977 * 1024 * 1024);
         assert!(decision.segmented());
         assert_eq!(decision.whole_seconds, 0.0);
         assert!(decision.decision_line().contains("system path unavailable"));
@@ -663,7 +719,7 @@ mod tests {
 
     #[test]
     fn the_lines_name_the_job_count_and_the_numbers() {
-        let decision = Decision::decide(probe(100.0, 60.0, 70.0, 300.0), 256 * 1024 * 1024);
+        let decision = decide(probe(100.0, 60.0, 70.0, 300.0), 256 * 1024 * 1024);
         let rates = decision.rates_line();
         assert_eq!(
             rates,
@@ -680,12 +736,60 @@ mod tests {
 
     #[test]
     fn the_native_decision_line_names_both_whole_rates() {
-        let decision =
-            Decision::decide(probe_whole(100.0, 120.0, 1.0, 1.0, 1.0), 256 * 1024 * 1024);
+        let decision = decide(probe_whole(100.0, 120.0, 1.0, 1.0, 1.0), 256 * 1024 * 1024);
         let line = decision.decision_line();
         assert_eq!(
             line,
-            "probe: native whole faster (system whole 2.7 s, native whole 2.2 s, segmented 536.9 s, system 100.00 MB/s at 4 jobs); using the native whole-file path"
+            "probe: native whole faster (system whole 2.7 s, native whole 2.2 s, segmented 536.9 s, system 100.00 MB/s at 4 jobs); using the native whole-file path (digest from the send, no second local read)"
         );
+    }
+
+    #[test]
+    fn without_segmentation_only_the_whole_paths_compete() {
+        // The segmented estimate would win on this link, but a run without
+        // --segmented cannot choose it.
+        let probe = probe(20.0, 40.0, 80.0, 300.0);
+        assert!(decide(probe, 977 * 1024 * 1024).segmented());
+        let decision = Decision::decide_with(
+            probe,
+            977 * 1024 * 1024,
+            Options {
+                segment: false,
+                native_whole: true,
+            },
+        );
+        assert_eq!(decision.choice, Choice::SystemBatch, "{decision:?}");
+        assert!(decision
+            .decision_line()
+            .contains("using the whole-file path"));
+
+        let whole = Decision::decide_with(
+            probe_whole(100.0, 120.0, 1.0, 1.0, 1.0),
+            1 << 30,
+            Options {
+                segment: false,
+                native_whole: true,
+            },
+        );
+        assert_eq!(whole.choice, Choice::NativeWhole, "{whole:?}");
+        assert!(whole.decision_line().contains(
+            "using the native whole-file path (digest from the send, no second local read)"
+        ));
+    }
+
+    #[test]
+    fn a_failed_system_probe_without_segmentation_takes_native_whole() {
+        let decision = Decision::decide_with(
+            probe_whole(0.0, 120.0, 60.0, 70.0, 300.0),
+            977 * 1024 * 1024,
+            Options {
+                segment: false,
+                native_whole: true,
+            },
+        );
+        assert_eq!(decision.choice, Choice::NativeWhole, "{decision:?}");
+        assert!(decision
+            .decision_line()
+            .contains("using the native whole-file path"));
     }
 }
