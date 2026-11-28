@@ -388,10 +388,11 @@ async fn four_connections_write_a_sixteen_mebibyte_file() {
             let session = session(&settings).await;
             let mut file = super::writer::RangeWriter::open(&session.sftp, &remote, 4).await?;
             assert_eq!(file.depth(), 4, "four writes per connection");
+            let mut readers = super::writer::LocalReaders::open(&local, 32_768, 4).await?;
             loop {
                 let next = scheduler.lock().expect("scheduler").take();
                 let Some(chunk) = next else { break };
-                file.write(&chunk, &local, 32_768, None, &mut |_| {})
+                file.write(&chunk, &mut readers, 32_768, None, &mut |_| {})
                     .await?;
                 scheduler.lock().expect("scheduler").complete(chunk.index);
             }
@@ -445,8 +446,11 @@ async fn a_short_local_file_is_refused_by_name() {
         start: 0,
         len: 4096,
     };
+    let mut readers = super::writer::LocalReaders::open(&local, 4096, 1)
+        .await
+        .expect("the reader");
     let error = writer
-        .write(&chunk, &local, 4096, None, &mut |_| {})
+        .write(&chunk, &mut readers, 4096, None, &mut |_| {})
         .await
         .expect_err("the local file is short");
     let text = error.to_string();
@@ -483,8 +487,11 @@ async fn a_missing_range_makes_finish_refuse_and_publish_never_run() {
         .await
         .expect("handle");
     let mut writer = super::writer::RangeWriter::from_handle(file);
+    let mut readers = super::writer::LocalReaders::open(&local, 32_768, 1)
+        .await
+        .expect("the reader");
     writer
-        .write(&plan.chunks[0], &local, 32_768, None, &mut |_| {})
+        .write(&plan.chunks[0], &mut readers, 32_768, None, &mut |_| {})
         .await
         .expect("the first range");
     writer.close().await.expect("close");
@@ -670,8 +677,11 @@ async fn the_readback_buffer_rate_is_measurable() {
         start: 0,
         len: SIZE as u32,
     };
+    let mut readers = super::writer::LocalReaders::open(&local, 32_768, 1)
+        .await
+        .expect("the reader");
     writer
-        .write(&chunk, &local, 32_768, None, &mut |_| {})
+        .write(&chunk, &mut readers, 32_768, None, &mut |_| {})
         .await
         .expect("the write");
     writer.close().await.expect("close");

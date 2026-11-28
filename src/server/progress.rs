@@ -1,7 +1,8 @@
 //! The whole-upload progress view: one total, one row per planned file, and
 //! the per-connection rows that the segmented file expands into.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -97,7 +98,7 @@ pub fn resume_line(from: u64, total: u64) -> String {
     )
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum State {
     Waiting,
     Uploading,
@@ -112,39 +113,40 @@ impl State {
             State::Done => "done",
         }
     }
-}
 
-struct Row {
-    remote: String,
-    name: String,
-    size: u64,
-    done: u64,
-    state: State,
-}
-
-struct Shared {
-    rows: Vec<Row>,
-    total: u64,
-    done: u64,
-    started: Instant,
-}
-
-impl Shared {
-    fn active(&self) -> usize {
-        self.rows
-            .iter()
-            .filter(|row| row.state == State::Uploading)
-            .count()
+    const fn code(self) -> u8 {
+        match self {
+            State::Waiting => 0,
+            State::Uploading => 1,
+            State::Done => 2,
+        }
     }
 
-    fn eta(&self) -> Option<Duration> {
-        let elapsed = self.started.elapsed().as_secs_f64();
-        if self.done == 0 || elapsed <= f64::EPSILON {
-            return None;
+    const fn from_code(code: u8) -> Self {
+        match code {
+            1 => State::Uploading,
+            2 => State::Done,
+            _ => State::Waiting,
         }
-        let rate = self.done as f64 / elapsed;
-        let left = self.total.saturating_sub(self.done) as f64 / rate;
-        Some(Duration::from_secs_f64(left.max(0.0)))
+    }
+}
+
+/// One planned file. Every field a sender writes is atomic, so a range ack
+/// costs no lock and every mode sees the same counters.
+struct RowData {
+    name: String,
+    size: u64,
+    done: AtomicU64,
+    state: AtomicU8,
+}
+
+impl RowData {
+    fn state(&self) -> State {
+        State::from_code(self.state.load(Ordering::Relaxed))
+    }
+
+    fn set_state(&self, state: State) {
+        self.state.store(state.code(), Ordering::Relaxed);
     }
 }
 
@@ -282,11 +284,15 @@ pub fn clear_bars(bars: &[ProgressBar]) {
 /// The whole-upload view shared by every sender in one run.
 pub struct UploadProgress {
     mode: Mode,
-    shared: Mutex<Shared>,
+    data: Vec<RowData>,
+    index: HashMap<String, usize>,
+    total: u64,
+    done: AtomicU64,
+    started: Instant,
     multi: Option<MultiProgress>,
     total_bar: Option<ProgressBar>,
-    rows: Vec<ProgressBar>,
-    last_json: Mutex<Instant>,
+    bars: Vec<ProgressBar>,
+    last_json: AtomicI64,
     stop: AtomicBool,
     finished: AtomicBool,
     ticker: Mutex<Option<JoinHandle<()>>>,
@@ -295,17 +301,23 @@ pub struct UploadProgress {
 impl UploadProgress {
     /// Build the view. Nothing is drawn for [`Mode::Off`].
     pub fn new(units: &[UploadUnit], mode: Mode) -> Arc<Self> {
-        let rows: Vec<Row> = units
+        let data: Vec<RowData> = units
             .iter()
-            .map(|unit| Row {
-                remote: unit.remote.clone(),
+            .map(|unit| RowData {
                 name: name_of(&unit.remote),
                 size: unit.size,
-                done: 0,
-                state: State::Waiting,
+                done: AtomicU64::new(0),
+                state: AtomicU8::new(State::Waiting.code()),
             })
             .collect();
-        let total = rows.iter().map(|row| row.size).sum();
+        // The remote name maps to its row once, so a byte ack is one lookup
+        // rather than a scan.
+        let index: HashMap<String, usize> = units
+            .iter()
+            .enumerate()
+            .map(|(position, unit)| (unit.remote.clone(), position))
+            .collect();
+        let total = data.iter().map(|row| row.size).sum();
 
         let (multi, total_bar, bars) = if mode == Mode::Terminal {
             let multi = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
@@ -319,7 +331,7 @@ impl UploadProgress {
                 .progress_chars("=>-"),
             );
             total_bar.enable_steady_tick(Duration::from_millis(250));
-            let bars = rows
+            let bars = data
                 .iter()
                 .map(|row| {
                     let bar = multi.add(ProgressBar::new(row.size));
@@ -330,7 +342,7 @@ impl UploadProgress {
                         .expect("the file progress template is valid")
                         .progress_chars("=>-"),
                     );
-                    bar.set_prefix(row.state.label());
+                    bar.set_prefix(row.state().label());
                     bar.set_message(format!("{}  {}", row.name, human_size(row.size)));
                     // A ticker starts only when the row begins to upload, so
                     // a 114-file pack does not run 114 of them at once.
@@ -344,16 +356,15 @@ impl UploadProgress {
 
         let view = Arc::new(Self {
             mode,
-            shared: Mutex::new(Shared {
-                rows,
-                total,
-                done: 0,
-                started: Instant::now(),
-            }),
+            data,
+            index,
+            total,
+            done: AtomicU64::new(0),
+            started: Instant::now(),
             multi,
             total_bar,
-            rows: bars,
-            last_json: Mutex::new(Instant::now() - JSON_INTERVAL),
+            bars,
+            last_json: AtomicI64::new(-(JSON_INTERVAL.as_millis() as i64)),
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             ticker: Mutex::new(None),
@@ -368,15 +379,11 @@ impl UploadProgress {
     }
 
     fn emit_start(&self) {
-        let shared = self
-            .shared
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let event = StartEvent {
             schema_version: 1,
             event: "start",
-            files: shared.rows.len(),
-            bytes: shared.total,
+            files: self.data.len(),
+            bytes: self.total,
         };
         emit(&event);
     }
@@ -389,19 +396,11 @@ impl UploadProgress {
                 std::thread::sleep(Duration::from_millis(250));
                 if printed.elapsed() >= PLAIN_INTERVAL {
                     printed = Instant::now();
-                    let (done, total, elapsed, eta) = {
-                        let shared = view
-                            .shared
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner());
-                        (
-                            shared.done,
-                            shared.total,
-                            shared.started.elapsed(),
-                            shared.eta(),
-                        )
-                    };
-                    eprintln!("{}", plain_line(done, total, elapsed, eta));
+                    let (done, total) = view.totals();
+                    eprintln!(
+                        "{}",
+                        plain_line(done, total, view.started.elapsed(), view.eta())
+                    );
                 }
             }
         });
@@ -411,13 +410,32 @@ impl UploadProgress {
             .unwrap_or_else(|error| error.into_inner()) = Some(handle);
     }
 
-    fn index(&self, remote: &str) -> Option<usize> {
-        self.shared
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .rows
+    /// The whole-upload bytes counted and expected.
+    fn totals(&self) -> (u64, u64) {
+        (self.done.load(Ordering::Relaxed), self.total)
+    }
+
+    /// The rows currently sending bytes.
+    fn active(&self) -> usize {
+        self.data
             .iter()
-            .position(|row| row.remote == remote)
+            .filter(|row| row.state() == State::Uploading)
+            .count()
+    }
+
+    fn eta(&self) -> Option<Duration> {
+        let done = self.done.load(Ordering::Relaxed);
+        let elapsed = self.started.elapsed().as_secs_f64();
+        if done == 0 || elapsed <= f64::EPSILON {
+            return None;
+        }
+        let rate = done as f64 / elapsed;
+        let left = self.total.saturating_sub(done) as f64 / rate;
+        Some(Duration::from_secs_f64(left.max(0.0)))
+    }
+
+    fn index(&self, remote: &str) -> Option<usize> {
+        self.index.get(remote).copied()
     }
 
     /// Hide the view while a password prompt owns the terminal.
@@ -439,14 +457,8 @@ impl UploadProgress {
         let Some(index) = self.index(remote) else {
             return;
         };
-        {
-            let mut shared = self
-                .shared
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            shared.rows[index].state = State::Uploading;
-        }
-        if let Some(bar) = self.rows.get(index) {
+        self.data[index].set_state(State::Uploading);
+        if let Some(bar) = self.bars.get(index) {
             bar.set_prefix(State::Uploading.label());
             bar.enable_steady_tick(Duration::from_millis(250));
         }
@@ -457,60 +469,45 @@ impl UploadProgress {
         let Some(index) = self.index(remote) else {
             return;
         };
-        let (done, total, elapsed, eta, active, name) = {
-            let mut shared = self
-                .shared
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            shared.rows[index].done = shared.rows[index].done.saturating_add(bytes);
-            shared.rows[index].state = State::Uploading;
-            shared.done = shared.done.saturating_add(bytes);
-            let name = shared.rows[index].name.clone();
-            let done = shared.rows[index].done;
-            (
-                done,
-                shared.done,
-                shared.started.elapsed(),
-                shared.eta(),
-                shared.active(),
-                name,
-            )
-        };
-        if let Some(bar) = self.rows.get(index) {
+        let row = &self.data[index];
+        let done = add(&row.done, bytes);
+        row.set_state(State::Uploading);
+        let total = add(&self.done, bytes);
+        if let Some(bar) = self.bars.get(index) {
             bar.set_prefix(State::Uploading.label());
             bar.inc(bytes);
         }
         if let Some(bar) = &self.total_bar {
             bar.inc(bytes);
         }
-        if self.mode == Mode::Json {
-            let due = {
-                let mut last = self
-                    .last_json
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                if last.elapsed() < JSON_INTERVAL {
-                    false
-                } else {
-                    *last = Instant::now();
-                    true
-                }
-            };
-            if due {
-                let seconds = elapsed.as_secs_f64().max(f64::EPSILON);
-                let event = ProgressEvent {
-                    schema_version: 1,
-                    event: "progress",
-                    file: name,
-                    bytes: done,
-                    total,
-                    rate: total as f64 / seconds,
-                    eta_seconds: eta.map_or(0, |eta| eta.as_secs()),
-                    active,
-                };
-                emit(&event);
-            }
+        if self.mode != Mode::Json || !self.json_due() {
+            return;
         }
+        let seconds = self.started.elapsed().as_secs_f64().max(f64::EPSILON);
+        let event = ProgressEvent {
+            schema_version: 1,
+            event: "progress",
+            file: row.name.clone(),
+            bytes: done,
+            total,
+            rate: total as f64 / seconds,
+            eta_seconds: self.eta().map_or(0, |eta| eta.as_secs()),
+            active: self.active(),
+        };
+        emit(&event);
+    }
+
+    /// True once per [`JSON_INTERVAL`], for one caller only.
+    fn json_due(&self) -> bool {
+        let now = self.started.elapsed().as_millis() as i64;
+        let interval = JSON_INTERVAL.as_millis() as i64;
+        let previous = self.last_json.load(Ordering::Relaxed);
+        if now - previous < interval {
+            return false;
+        }
+        self.last_json
+            .compare_exchange(previous, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
     }
 
     /// Mark one file as complete.
@@ -518,25 +515,19 @@ impl UploadProgress {
         let Some(index) = self.index(remote) else {
             return;
         };
-        let (name, size) = {
-            let mut shared = self
-                .shared
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            shared.rows[index].state = State::Done;
-            (shared.rows[index].name.clone(), shared.rows[index].size)
-        };
-        if let Some(bar) = self.rows.get(index) {
+        let row = &self.data[index];
+        row.set_state(State::Done);
+        if let Some(bar) = self.bars.get(index) {
             bar.set_prefix(State::Done.label());
             bar.disable_steady_tick();
-            bar.set_position(bar.length().unwrap_or(size));
+            bar.set_position(bar.length().unwrap_or(row.size));
         }
         if self.mode == Mode::Json {
             let event = FileDoneEvent {
                 schema_version: 1,
                 event: "file_done",
-                file: name,
-                bytes: size,
+                file: row.name.clone(),
+                bytes: row.size,
                 sha256: sha256.map(ToString::to_string),
             };
             emit(&event);
@@ -548,14 +539,8 @@ impl UploadProgress {
         let Some(index) = self.index(remote) else {
             return;
         };
-        {
-            let mut shared = self
-                .shared
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            shared.rows[index].state = State::Waiting;
-        }
-        if let Some(bar) = self.rows.get(index) {
+        self.data[index].set_state(State::Waiting);
+        if let Some(bar) = self.bars.get(index) {
             bar.set_prefix(State::Waiting.label());
             bar.disable_steady_tick();
         }
@@ -569,7 +554,7 @@ impl UploadProgress {
         let Some(index) = self.index(remote) else {
             return Vec::new();
         };
-        let Some(row) = self.rows.get(index) else {
+        let Some(row) = self.bars.get(index) else {
             return Vec::new();
         };
         (0..connections.max(1))
@@ -611,23 +596,14 @@ impl UploadProgress {
         let Some(index) = self.index(remote) else {
             return;
         };
-        let done = {
-            let mut shared = self
-                .shared
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let Some(row) = shared.rows.get_mut(index) else {
-                return;
-            };
-            row.done = from.min(row.size);
-            let added = row.done;
-            shared.done = shared.done.saturating_add(added);
-            shared.done
-        };
+        let row = &self.data[index];
+        let done = from.min(row.size);
+        row.done.store(done, Ordering::Relaxed);
+        let total = add(&self.done, done);
         if let Some(total_bar) = &self.total_bar {
-            total_bar.set_position(done);
+            total_bar.set_position(total);
         }
-        if let Some(bar) = self.rows.get(index) {
+        if let Some(bar) = self.bars.get(index) {
             bar.set_position(from);
         }
     }
@@ -662,13 +638,8 @@ impl UploadProgress {
         {
             let _ = handle.join();
         }
-        let (done, total, elapsed) = {
-            let shared = self
-                .shared
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            (shared.done, shared.total, shared.started.elapsed())
-        };
+        let (done, total) = self.totals();
+        let elapsed = self.started.elapsed();
         if self.mode == Mode::Plain {
             eprintln!("{}", plain_line(done, total, elapsed, Some(Duration::ZERO)));
         }
@@ -706,6 +677,19 @@ impl Drop for UploadProgress {
 fn emit(event: &impl Serialize) {
     if let Ok(text) = serde_json::to_string(event) {
         eprintln!("{text}");
+    }
+}
+
+/// Add bytes to a counter and stop at the maximum. A compare-exchange loop
+/// keeps the MSRV, because `fetch_update` is deprecated in newer compilers.
+fn add(counter: &AtomicU64, bytes: u64) -> u64 {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let next = current.saturating_add(bytes);
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(previous) => return previous.saturating_add(bytes),
+            Err(actual) => current = actual,
+        }
     }
 }
 
@@ -857,5 +841,67 @@ mod tests {
         view.file_done("/srv/@1/addons/a.pbo", Some("ab"));
         view.file_failed("/srv/@1/addons/b.pbo");
         view.finish();
+    }
+
+    /// Every mode counts the same bytes and the same states; only the output
+    /// differs.
+    #[test]
+    fn every_mode_keeps_the_same_view() {
+        let mut views = Vec::new();
+        for mode in [Mode::Off, Mode::Plain, Mode::Json] {
+            let view = UploadProgress::new(&[unit("a.pbo", 100), unit("b.pbo", 50)], mode);
+            view.file_started("/srv/@1/addons/a.pbo");
+            view.advance("/srv/@1/addons/a.pbo", 40);
+            view.advance("/srv/@1/addons/a.pbo", 60);
+            view.file_done("/srv/@1/addons/a.pbo", Some("ab"));
+            view.advance("/srv/@1/addons/b.pbo", 25);
+            views.push((view.totals(), row_state(&view, 0), row_state(&view, 1)));
+        }
+        assert_eq!(
+            views[0],
+            ((125, 150), (100, State::Done), (25, State::Uploading))
+        );
+        assert_eq!(views[0], views[1]);
+        assert_eq!(views[1], views[2]);
+    }
+
+    fn row_state(view: &UploadProgress, index: usize) -> (u64, State) {
+        let row = &view.data[index];
+        (row.done.load(Ordering::Relaxed), row.state())
+    }
+
+    #[test]
+    fn the_active_count_follows_the_row_states() {
+        let view = UploadProgress::new(
+            &[unit("a.pbo", 10), unit("b.pbo", 10), unit("c.pbo", 10)],
+            Mode::Off,
+        );
+        assert_eq!(view.active(), 0);
+        view.file_started("/srv/@1/addons/a.pbo");
+        view.file_started("/srv/@1/addons/b.pbo");
+        assert_eq!(view.active(), 2);
+        view.advance("/srv/@1/addons/a.pbo", 5);
+        assert_eq!(view.active(), 2, "an ack keeps the row active");
+        view.file_done("/srv/@1/addons/a.pbo", None);
+        assert_eq!(view.active(), 1);
+        view.file_failed("/srv/@1/addons/b.pbo");
+        assert_eq!(view.active(), 0);
+    }
+
+    #[test]
+    fn an_unknown_remote_changes_nothing() {
+        let view = UploadProgress::new(&[unit("a.pbo", 10)], Mode::Off);
+        view.advance("/srv/@1/addons/other.pbo", 5);
+        view.file_started("/srv/@1/addons/other.pbo");
+        view.file_done("/srv/@1/addons/other.pbo", None);
+        assert_eq!(view.totals(), (0, 10));
+        assert_eq!(row_state(&view, 0), (0, State::Waiting));
+    }
+
+    #[test]
+    fn one_json_event_per_interval() {
+        let view = UploadProgress::new(&[unit("a.pbo", 10)], Mode::Off);
+        assert!(view.json_due(), "the first ack is always due");
+        assert!(!view.json_due(), "the next ack is inside the interval");
     }
 }

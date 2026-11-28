@@ -157,6 +157,14 @@ This project uses [Semantic Versioning](https://semver.org/).
 - The minimum supported Rust version is 1.89, for the native transport
   dependencies.
 
+### Fixed
+
+- A segmented publish is recorded in the plan at the moment the file is
+  published, so the post-upload report counts it and clears its finding.
+  Before this, a run whose batch held only the `meta.cpp` reported the
+  remote pack as empty, kept the PBO as missing, and exited 1 although the
+  file was on the server.
+
 ### Security
 
 - Pin the sftp host key on every run: `StrictHostKeyChecking=yes` by

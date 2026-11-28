@@ -6,7 +6,9 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use openssh_sftp_client::Sftp;
 use serde::{Deserialize, Serialize};
@@ -20,6 +22,8 @@ use crate::server::report::UploadUnit;
 
 /// The only checkpoint format this build reads.
 pub const VERSION: u8 = 1;
+/// How long a caller waits for a checkpoint write it asked to complete.
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What one interrupted run leaves behind.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
@@ -153,31 +157,208 @@ pub fn load(path: &Path) -> Option<Checkpoint> {
     serde_json::from_str(&text).ok()
 }
 
-/// Write the checkpoint atomically: a temp file, fsync, rename, fsync the
-/// directory.
+/// Writes checkpoints on its own thread, so an acknowledged range never
+/// waits for a sync.
 ///
-/// # Errors
-/// Returns `Input` when the directory or the file cannot be written.
-pub fn save(path: &Path, checkpoint: &Checkpoint) -> Result<(), UksftaError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| UksftaError::Input(format!("no directory for {}", path.display())))?;
-    fs::create_dir_all(parent).map_err(UksftaError::Io)?;
-    let temp = path.with_file_name(format!(
+/// One snapshot is in flight at a time: a later submit replaces a snapshot
+/// that has not started. The temp path is fixed at construction and reused,
+/// so a write and a rename cannot interleave.
+pub struct Writer {
+    inner: Arc<Inner>,
+    thread: Option<JoinHandle<()>>,
+}
+
+struct Inner {
+    queue: Mutex<Queue>,
+    wake: Condvar,
+}
+
+struct Queue {
+    snapshot: Option<(u64, Checkpoint)>,
+    next: u64,
+    written: u64,
+    stopped: bool,
+    #[cfg(test)]
+    gate: Option<Gate>,
+}
+
+/// Test seam: holds the writer thread before one write it is about to do.
+#[cfg(test)]
+struct Gate {
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+impl Writer {
+    /// Start the writer. The directory and the temp path are made once.
+    ///
+    /// # Errors
+    /// Returns `Input` when the path has no directory, or `Io` when the
+    /// directory or the thread cannot be made.
+    pub fn new(path: &Path) -> Result<Self, UksftaError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| UksftaError::Input(format!("no directory for {}", path.display())))?
+            .to_path_buf();
+        fs::create_dir_all(&parent).map_err(UksftaError::Io)?;
+        let temp = temp_path(path);
+        let inner = Arc::new(Inner {
+            queue: Mutex::new(Queue {
+                snapshot: None,
+                next: 0,
+                written: 0,
+                stopped: false,
+                #[cfg(test)]
+                gate: None,
+            }),
+            wake: Condvar::new(),
+        });
+        let worker = Arc::clone(&inner);
+        let owned = path.to_path_buf();
+        let thread = std::thread::Builder::new()
+            .name("uksfta-checkpoint".to_string())
+            .spawn(move || run(&worker, &owned, &temp, &parent))
+            .map_err(UksftaError::Io)?;
+        Ok(Self {
+            inner,
+            thread: Some(thread),
+        })
+    }
+
+    /// Queue a snapshot. This does no input or output.
+    pub fn submit(&self, checkpoint: Checkpoint) {
+        let _ = self.queue(checkpoint);
+    }
+
+    /// Queue a snapshot and wait until it is on disk.
+    pub fn flush(&self, checkpoint: Checkpoint) {
+        let sequence = self.queue(checkpoint);
+        let mut queue = lock(&self.inner);
+        let deadline = Instant::now() + FLUSH_TIMEOUT;
+        while queue.written < sequence {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                eprintln!("Warning: cannot save the checkpoint: the write did not finish");
+                return;
+            }
+            queue = self
+                .inner
+                .wake
+                .wait_timeout(queue, left)
+                .unwrap_or_else(|error| error.into_inner())
+                .0;
+        }
+    }
+
+    fn queue(&self, checkpoint: Checkpoint) -> u64 {
+        let mut queue = lock(&self.inner);
+        queue.next += 1;
+        let sequence = queue.next;
+        queue.snapshot = Some((sequence, checkpoint));
+        self.inner.wake.notify_all();
+        sequence
+    }
+
+    /// Hold the writer thread before its next write. Tests only.
+    #[cfg(test)]
+    fn set_gate(
+        &self,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        lock(&self.inner).gate = Some(Gate { entered, release });
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        {
+            let mut queue = lock(&self.inner);
+            queue.stopped = true;
+        }
+        self.inner.wake.notify_all();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn lock(inner: &Inner) -> MutexGuard<'_, Queue> {
+    inner
+        .queue
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+/// Write snapshots until the queue is empty and the writer is stopped.
+fn run(inner: &Arc<Inner>, path: &Path, temp: &Path, parent: &Path) {
+    loop {
+        let next = {
+            let mut queue = lock(inner);
+            loop {
+                if let Some(item) = queue.snapshot.take() {
+                    break Some(item);
+                }
+                if queue.stopped {
+                    break None;
+                }
+                queue = inner
+                    .wake
+                    .wait(queue)
+                    .unwrap_or_else(|error| error.into_inner());
+            }
+        };
+        let Some((sequence, checkpoint)) = next else {
+            return;
+        };
+        #[cfg(test)]
+        hold(inner);
+        if let Err(error) = write_durable(path, temp, parent, &checkpoint) {
+            eprintln!("Warning: cannot save the checkpoint: {error}");
+        }
+        lock(inner).written = sequence;
+        inner.wake.notify_all();
+    }
+}
+
+/// Stop the writer thread before one write so a test can prove that the
+/// caller path does not wait for it.
+#[cfg(test)]
+fn hold(inner: &Arc<Inner>) {
+    let gate = lock(inner).gate.take();
+    if let Some(gate) = gate {
+        let _ = gate.entered.send(());
+        let _ = gate.release.recv();
+    }
+}
+
+/// The temp file beside the checkpoint, fixed for the life of the writer.
+fn temp_path(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
         "{}.tmp-{}",
         path.file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "checkpoint".to_string()),
         std::process::id()
-    ));
+    ))
+}
+
+/// Write the checkpoint atomically: a temp file, fsync, rename, fsync the
+/// directory.
+fn write_durable(
+    path: &Path,
+    temp: &Path,
+    parent: &Path,
+    checkpoint: &Checkpoint,
+) -> Result<(), UksftaError> {
     let text = serde_json::to_string(checkpoint)
         .map_err(|error| UksftaError::Input(format!("cannot encode the checkpoint: {error}")))?;
     {
-        let mut file = fs::File::create(&temp).map_err(UksftaError::Io)?;
+        let mut file = fs::File::create(temp).map_err(UksftaError::Io)?;
         file.write_all(text.as_bytes()).map_err(UksftaError::Io)?;
         file.sync_all().map_err(UksftaError::Io)?;
     }
-    fs::rename(&temp, path).map_err(UksftaError::Io)?;
+    fs::rename(temp, path).map_err(UksftaError::Io)?;
     if let Ok(directory) = fs::File::open(parent) {
         let _ = directory.sync_all();
     }
@@ -426,20 +607,72 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("cp.json");
         let original = checkpoint(8 * 1024 * 1024, 1024 * 1024, 2 * 1024 * 1024);
-        save(&path, &original).unwrap();
+        let writer = Writer::new(&path).unwrap();
+        writer.flush(original.clone());
+        drop(writer);
         assert_eq!(load(&path), Some(original));
     }
 
     #[test]
-    fn save_leaves_no_temporary_file() {
+    fn a_write_leaves_no_temporary_file() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("cp.json");
-        save(&path, &checkpoint(1024, 1024, 0)).unwrap();
+        let writer = Writer::new(&path).unwrap();
+        writer.flush(checkpoint(1024, 1024, 0));
+        drop(writer);
         let names: Vec<String> = fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["cp.json".to_string()], "{names:?}");
+    }
+
+    /// The ack path only queues a snapshot: while the writer is held inside a
+    /// write, a further submit still returns and nothing is on disk yet.
+    #[test]
+    fn a_submit_does_not_wait_for_the_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("cp.json");
+        let writer = Arc::new(Writer::new(&path).unwrap());
+        let (entered, reached) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        writer.set_gate(entered, held);
+
+        let first = checkpoint(4 * 1024 * 1024, 1024 * 1024, 0);
+        writer.submit(first.clone());
+        reached
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the writer reached its first write");
+
+        let mut second = first;
+        second.acked_prefix = 1024 * 1024;
+        let (done, submitted) = std::sync::mpsc::channel();
+        let queued = Arc::clone(&writer);
+        let snapshot = second.clone();
+        std::thread::spawn(move || {
+            queued.submit(snapshot);
+            let _ = done.send(());
+        });
+        submitted
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the ack path returned while the writer was held");
+        assert!(!path.exists(), "the first write is still inside its sync");
+
+        release.send(()).unwrap();
+        writer.flush(second.clone());
+        assert_eq!(load(&path), Some(second));
+    }
+
+    #[test]
+    fn a_flush_writes_the_newest_snapshot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("cp.json");
+        let writer = Writer::new(&path).unwrap();
+        let mut first = checkpoint(4 * 1024 * 1024, 1024 * 1024, 0);
+        writer.submit(first.clone());
+        first.acked_prefix = 2 * 1024 * 1024;
+        writer.flush(first.clone());
+        assert_eq!(load(&path), Some(first));
     }
 
     #[test]

@@ -262,13 +262,15 @@ struct Acks {
     /// The checkpoint, once the local identity is known. Acks before then are
     /// kept in `done`, and the first save carries them.
     checkpoint: Option<Checkpoint>,
-    path: std::path::PathBuf,
     done: BTreeSet<u32>,
     last_saved: Instant,
     /// Ranges completed since the last save. The temp file is synced only
     /// when a save follows, so `--segment-fsync-every` gates the save.
     since_save: u32,
     fsync_every: u32,
+    /// The file writes run on this writer's thread, so the acks lock covers
+    /// only the state update.
+    writer: Arc<checkpoint::Writer>,
 }
 
 impl Acks {
@@ -321,22 +323,33 @@ impl Acks {
         checkpoint::recompute_prefix(checkpoint, &self.done, size);
         self.last_saved = Instant::now();
         self.since_save = 0;
-        if let Err(error) = checkpoint::save(&self.path, checkpoint) {
-            eprintln!("Warning: cannot save the checkpoint: {error}");
-        }
+        self.writer.submit(checkpoint.clone());
         true
     }
 
-    /// Attach the local identity and save at once.
+    /// Write the checkpoint and wait until it is on disk.
+    fn save_now(&mut self, size: u64) -> bool {
+        let Some(checkpoint) = self.checkpoint.as_mut() else {
+            return false;
+        };
+        checkpoint::recompute_prefix(checkpoint, &self.done, size);
+        self.last_saved = Instant::now();
+        self.since_save = 0;
+        self.writer.flush(checkpoint.clone());
+        true
+    }
+
+    /// Attach the local identity and save at once. The first checkpoint is
+    /// the one an early kill resumes from, so it lands before the run goes on.
     fn attach(&mut self, checkpoint: Checkpoint, size: u64) {
         self.checkpoint = Some(checkpoint);
-        self.save(size);
+        self.save_now(size);
     }
 
     /// Replace the acknowledged ranges with the scheduler's set and save.
     fn finish(&mut self, done: BTreeSet<u32>, size: u64) {
         self.done = done;
-        self.save(size);
+        self.save_now(size);
     }
 }
 
@@ -360,7 +373,6 @@ async fn send_ranges(job: &Job<'_>) -> Result<u8, UksftaError> {
         .collect();
     let acks = Arc::new(Mutex::new(Acks {
         checkpoint: None,
-        path: checkpoint::path_for(job.state_root, job.pack_id, &job.unit.remote),
         done: BTreeSet::from_iter(
             job.plan
                 .chunks
@@ -371,6 +383,11 @@ async fn send_ranges(job: &Job<'_>) -> Result<u8, UksftaError> {
         last_saved: Instant::now(),
         since_save: 0,
         fsync_every: u32::from(job.settings.segment.fsync_every),
+        writer: Arc::new(checkpoint::Writer::new(&checkpoint::path_for(
+            job.state_root,
+            job.pack_id,
+            &job.unit.remote,
+        ))?),
     }));
 
     let max_connections = job.settings.segment.connections.max(1);
@@ -642,6 +659,9 @@ async fn run_worker(
     let handles = writer::pipeline_depth(settings.transfer.requests);
     let mut attempts: u8 = 0;
     let mut session: Option<(NativeSession, writer::RangeWriter)> = None;
+    // One local handle and one buffer per pipelined handle, held for every
+    // piece this worker sends, so a range costs a seek and reads.
+    let mut readers = writer::LocalReaders::open(local, buffer, handles).await?;
 
     loop {
         connection_active(bars, worker, false);
@@ -696,7 +716,7 @@ async fn run_worker(
         };
         range_started(bars, worker, chunk.index, chunk.len);
         let written = file
-            .write(&chunk, local, buffer, limiter, &mut advance)
+            .write(&chunk, &mut readers, buffer, limiter, &mut advance)
             .await;
         // The sync follows the checkpoint, not every range: the server flushes
         // the file just before the checkpoint claims the bytes.
@@ -911,7 +931,7 @@ mod backoff_tests {
         let path = dir.path().join("cp.json");
         let mut acks = Acks {
             checkpoint: None,
-            path: path.clone(),
+            writer: Arc::new(checkpoint::Writer::new(&path).expect("a checkpoint writer")),
             done: BTreeSet::new(),
             last_saved: Instant::now(),
             since_save: 0,
