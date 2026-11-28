@@ -19,6 +19,7 @@ mod sync;
 mod util;
 mod version;
 mod workshop_api;
+mod workshop_manifest;
 
 use crate::error::UksftaError;
 

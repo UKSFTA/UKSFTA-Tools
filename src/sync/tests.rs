@@ -57,6 +57,7 @@ fn lookup_sizes_marks_missing_mods_as_unknown() {
         WorkshopItem {
             size: 500,
             time_updated: 0,
+            manifest: String::new(),
         },
     );
     let sizes = lookup_sizes(&mods, &items);
@@ -81,6 +82,7 @@ fn missing_size_ids_skips_known_and_dedupes() {
         WorkshopItem {
             size: 500,
             time_updated: 0,
+            manifest: String::new(),
         },
     );
     // 333 has a zero size, which counts as unknown and is included.
@@ -89,6 +91,7 @@ fn missing_size_ids_skips_known_and_dedupes() {
         WorkshopItem {
             size: 0,
             time_updated: 0,
+            manifest: String::new(),
         },
     );
     assert_eq!(missing_size_ids(&mods, &items), vec!["222", "333"]);

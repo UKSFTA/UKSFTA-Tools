@@ -19,7 +19,7 @@ use super::http::{LiveHttp, RateLimiter};
 use super::identity::{extract_identity, extract_identity_from, IdentityEvidence};
 use super::keyed::{KeyedSearch, LiveKeyedSearch};
 use super::plan::build_corpus_stats_many;
-use super::r#match::ResolutionStatus;
+use super::r#match::{Resolution, ResolutionStatus};
 use super::render::{render_all, render_progress, render_summary, summary_of};
 use super::resolve::{
     resolve_all, split_fresh, KeyedReport, PboResolution, Progress, ResolveContext, SeenItem,
@@ -39,6 +39,7 @@ use crate::steam::find_all_workshop_caches;
 use crate::util::{
     find_pbos, paint, sanitize_for_terminal, stdout_is_tty, workshop_url, C_GREEN, C_RED,
 };
+use crate::workshop_manifest::WorkshopIndex;
 
 /// Trace the Workshop origin of untracked PBOs in addons/, then, when
 /// `online` is set, resolve each PBO's identity and print one line per PBO.
@@ -119,11 +120,45 @@ pub fn investigate(
     // Build a single-pass index of every cached PBO name to its folders
     let index = build_pbo_index(&mod_dirs);
 
+    // The depot manifest index holds the exact bytes of every installed
+    // Workshop file. A name and size find candidates; a hash confirms one.
+    let manifest_index = WorkshopIndex::load();
+    let mut hash_hits: HashMap<String, (String, String, usize)> = HashMap::new();
+
     // Match each untracked PBO against the index and arbitrate the origin
     for (pbo_name, pbo_path, origin) in &mut results {
         let target_prefix = pbo_prefix(pbo_path);
         let candidates = index.candidates(pbo_name);
         *origin = resolve_pbo_from_index(pbo_path, candidates, target_prefix.as_deref());
+
+        let Some(index) = manifest_index.as_ref() else {
+            continue;
+        };
+        let Some(entries) = index.confirm_named(pbo_path) else {
+            continue;
+        };
+        let chosen = index
+            .pick(entries, origin.as_ref().map(|o| o.id.as_str()))
+            .expect("a confirmed match has at least one entry");
+        // The prefix still decides whether the file belongs to an
+        // aggregate pack, but only while the hash confirms that same item.
+        let confirmed_prefix = origin
+            .as_ref()
+            .is_some_and(|resolved| resolved.id == chosen.published_id);
+        let is_pack = confirmed_prefix && origin.as_ref().is_some_and(|resolved| resolved.is_pack);
+        hash_hits.insert(
+            pbo_name.clone(),
+            (
+                chosen.published_id.clone(),
+                chosen.path.clone(),
+                crate::workshop_manifest::distinct_items(entries),
+            ),
+        );
+        *origin = Some(ResolvedOrigin {
+            id: chosen.published_id.clone(),
+            prefix: target_prefix.clone(),
+            is_pack,
+        });
     }
 
     // Report
@@ -159,13 +194,25 @@ pub fn investigate(
                 origin.prefix.as_deref().unwrap_or("unknown")
             );
         } else {
+            let confirmed = hash_hits
+                .get(pbo)
+                .map(|(_, path, shared)| {
+                    let extra = if *shared > 1 {
+                        format!(", shared by {} items", shared)
+                    } else {
+                        String::new()
+                    };
+                    format!(" [content hash: {path}{extra}]")
+                })
+                .unwrap_or_default();
             println!(
-                "  {} {} -> {} ({}) {}",
+                "  {} {} -> {} ({}) {}{}",
                 paint(use_colour, C_GREEN, "[RESOLVED]"),
                 pbo,
                 name,
                 id,
-                workshop_url(id)
+                workshop_url(id),
+                confirmed
             );
         }
     }
@@ -187,7 +234,9 @@ pub fn investigate(
         .collect();
     check_workshop_visibility(&results);
     let source = keyed.as_ref().map(|search| search as &dyn KeyedSearch);
-    resolve_identities(&examined, addons_dir, &mod_dirs, use_colour, source)?;
+    resolve_identities(
+        &examined, &hash_hits, addons_dir, &mod_dirs, use_colour, source,
+    )?;
     Ok(())
 }
 
@@ -241,6 +290,7 @@ fn examined_fingerprints(addons_dir: &Path) -> Vec<(String, String)> {
 /// Print the online phase: identity resolution and summary.
 fn resolve_identities(
     pbos: &[(String, PathBuf)],
+    hash_hits: &HashMap<String, (String, String, usize)>,
     addons_dir: &Path,
     mod_dirs: &[ModDir],
     use_colour: bool,
@@ -250,6 +300,34 @@ fn resolve_identities(
     if !bikey_names.is_empty() {
         println!("  Signing keys found: {}", bikey_names.join(", "));
     }
+
+    // The origin phase already hashed every PBO that has a name candidate.
+    // A hit needs no browse request and no corpus read, so a pack whose
+    // files are all installed can finish without either.
+    let mut confirmed: Vec<PboResolution> = Vec::new();
+    let mut unresolved: Vec<(String, PathBuf)> = Vec::new();
+    for pbo in pbos {
+        match hash_hits.get(&pbo.0) {
+            Some((id, path, shared)) => {
+                confirmed.push(hash_resolution(pbo, id, path, *shared, mod_dirs));
+            }
+            None => unresolved.push(pbo.clone()),
+        }
+    }
+    if !confirmed.is_empty() {
+        println!(
+            "  {} PBO(s) confirmed by content hash; no request is spent on them.",
+            confirmed.len()
+        );
+    }
+    if unresolved.is_empty() {
+        let now = now_secs();
+        let rendered = persist(&confirmed, &[], now, Vec::new());
+        println!("\n{}", render_all(&rendered, use_colour));
+        println!("\n{}", render_summary(&summary_of(&rendered), use_colour));
+        return Ok(());
+    }
+    let pbos = &unresolved;
 
     println!(
         "\nResolving {} PBO(s) online. The evidence read takes about a minute and \
@@ -348,17 +426,61 @@ fn resolve_identities(
         return Err(UksftaError::Input(error.message()));
     }
 
-    let resolutions = persist(&resolutions, &items, now, kept);
+    let mut all = confirmed;
+    all.extend(resolutions);
+    let rendered = persist(&all, &items, now, kept);
 
-    println!("\n{}", render_all(&resolutions, use_colour));
-    println!(
-        "\n{}",
-        render_summary(&summary_of(&resolutions), use_colour)
-    );
+    println!("\n{}", render_all(&rendered, use_colour));
+    println!("\n{}", render_summary(&summary_of(&rendered), use_colour));
     if !keyed_report.is_empty() {
-        print_keyed_report(&keyed_report, &resolutions);
+        print_keyed_report(&keyed_report, &rendered);
     }
     Ok(())
+}
+
+/// A decision from the depot manifest index: the PBO's bytes are exactly a
+/// file of the item, so no search is needed.
+fn hash_resolution(
+    pbo: &(String, PathBuf),
+    id: &str,
+    path: &str,
+    shared: usize,
+    mod_dirs: &[ModDir],
+) -> PboResolution {
+    let fingerprint = pbo_fingerprint(&pbo.1).unwrap_or_default();
+    let title = mod_dirs
+        .iter()
+        .find(|dir| dir.id == id)
+        .map(|dir| get_mod_metadata(&dir.path).name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("Mod {id}"));
+    let mut matched_by = vec!["manifest_hash".to_string(), format!("path:{path}")];
+    if shared > 1 {
+        matched_by.push(format!("shared:{shared}"));
+    }
+
+    PboResolution {
+        pbo: pbo.0.clone(),
+        fingerprint: fingerprint.clone(),
+        evidence: IdentityEvidence {
+            pbo: pbo.0.clone(),
+            fingerprint,
+            ..Default::default()
+        },
+        attempts: Vec::new(),
+        resolution: Resolution {
+            status: ResolutionStatus::Confirmed,
+            id: Some(id.to_string()),
+            title: Some(title),
+            m: 1.0,
+            q: 0.0,
+            c: 0.0,
+            margin: 0.0,
+            query: None,
+            matched_by,
+        },
+        candidates: Vec::new(),
+    }
 }
 
 /// The keyed search per PBO: queries sent, ranked candidates, and the

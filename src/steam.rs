@@ -16,6 +16,9 @@ pub const STEAM_APP_ID: &str = "107410";
 pub struct WorkshopItem {
     pub size: u64,
     pub time_updated: u64,
+    /// The depot manifest id, or [`crate::workshop_manifest::LEGACY_MANIFEST`]
+    /// for an item that predates manifests.
+    pub manifest: String,
 }
 
 pub fn parse_acf(content: &str) -> HashMap<String, WorkshopItem> {
@@ -76,6 +79,8 @@ pub fn parse_acf(content: &str) -> HashMap<String, WorkshopItem> {
                         current_item.size = tokens[1].parse().unwrap_or(0);
                     } else if tokens[0] == "timeupdated" {
                         current_item.time_updated = tokens[1].parse().unwrap_or(0);
+                    } else if tokens[0] == "manifest" {
+                        current_item.manifest = tokens[1].clone();
                     }
                 }
             }
