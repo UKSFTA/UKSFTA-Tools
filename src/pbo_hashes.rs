@@ -42,10 +42,14 @@ struct CacheFile {
 }
 
 /// The cache for one run: loaded once, written once.
+///
+/// One key function serves insert, lookup and removal, so a Windows
+/// canonical form cannot be stored under one spelling and looked up under
+/// another.
 #[derive(Debug)]
 pub struct PboHashes {
     path: PathBuf,
-    entries: BTreeMap<PathBuf, Entry>,
+    entries: BTreeMap<String, Entry>,
     dirty: bool,
     /// Files hashed this run.
     pub hashed: usize,
@@ -65,13 +69,7 @@ impl PboHashes {
     pub fn load(path: &Path) -> Self {
         let entries = match fs::read_to_string(path) {
             Ok(text) => match serde_json::from_str::<CacheFile>(&text) {
-                Ok(cache) if cache.schema == SCHEMA => {
-                    let mut entries = BTreeMap::new();
-                    for (path, entry) in cache.entries {
-                        entries.insert(PathBuf::from(path), entry);
-                    }
-                    entries
-                }
+                Ok(cache) if cache.schema == SCHEMA => cache.entries,
                 Ok(_) => BTreeMap::new(),
                 Err(error) => {
                     eprintln!(
@@ -99,17 +97,16 @@ impl PboHashes {
     pub fn digests(&mut self, paths: &[PathBuf]) -> Vec<Option<Digest>> {
         let mut out: Vec<Option<Digest>> = vec![None; paths.len()];
         let mut slots: Vec<usize> = Vec::new();
-        let mut jobs: Vec<(PathBuf, u64, u64)> = Vec::new();
+        let mut jobs: Vec<(PathBuf, String, u64, u64)> = Vec::new();
 
         for (index, path) in paths.iter().enumerate() {
-            let Some((canonical, size, mtime_ns)) = stamp(path) else {
+            let key = cache_key(path);
+            let Some((size, mtime_ns)) = stamp(path) else {
                 self.unreadable += 1;
-                if self.entries.remove(path).is_some() {
-                    self.dirty = true;
-                }
+                self.forget(path);
                 continue;
             };
-            if let Some(entry) = self.entries.get(&canonical) {
+            if let Some(entry) = self.entries.get(&key) {
                 if entry.size == size && entry.mtime_ns == mtime_ns {
                     if let Some(digest) = sha1_from_hex(&entry.sha1) {
                         out[index] = Some((digest, size));
@@ -119,12 +116,11 @@ impl PboHashes {
                 }
             }
             slots.push(index);
-            jobs.push((canonical, size, mtime_ns));
+            jobs.push((path.clone(), key, size, mtime_ns));
         }
 
         let computed = hash_parallel(&jobs);
-        for ((slot, (canonical, size, mtime_ns)), digest) in
-            slots.into_iter().zip(jobs).zip(computed)
+        for ((slot, (_, key, size, mtime_ns)), digest) in slots.into_iter().zip(jobs).zip(computed)
         {
             let Some(digest) = digest else {
                 self.unreadable += 1;
@@ -132,7 +128,7 @@ impl PboHashes {
             };
             out[slot] = Some((digest, size));
             self.entries.insert(
-                canonical,
+                key,
                 Entry {
                     size,
                     mtime_ns,
@@ -143,6 +139,20 @@ impl PboHashes {
             self.dirty = true;
         }
         out
+    }
+
+    /// Drop the entries that could name this path.
+    ///
+    /// A file that has gone can no longer be canonicalised, so the key is
+    /// rebuilt from its parent directory, which still exists. The path as
+    /// given is removed too, for an entry written before this rule.
+    fn forget(&mut self, path: &Path) -> bool {
+        let mut removed = self.entries.remove(&cache_key(path)).is_some();
+        removed |= self.entries.remove(&normalise(path)).is_some();
+        if removed {
+            self.dirty = true;
+        }
+        removed
     }
 
     /// Report what the run did and persist the cache. A write failure warns
@@ -166,14 +176,9 @@ impl PboHashes {
     }
 
     fn save(&self) -> Result<(), UksftaError> {
-        let entries = self
-            .entries
-            .iter()
-            .map(|(path, entry)| (path.display().to_string(), entry.clone()))
-            .collect();
         let cache = CacheFile {
             schema: SCHEMA,
-            entries,
+            entries: self.entries.clone(),
         };
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir).map_err(UksftaError::Io)?;
@@ -184,18 +189,41 @@ impl PboHashes {
     }
 }
 
-/// The canonical path, size and mtime in nanoseconds, or `None` when the
-/// file cannot be read.
-fn stamp(path: &Path) -> Option<(PathBuf, u64, u64)> {
-    let canonical = fs::canonicalize(path).ok()?;
-    let metadata = fs::metadata(&canonical).ok()?;
+/// The size and mtime in nanoseconds, or `None` when the file cannot be
+/// read.
+fn stamp(path: &Path) -> Option<(u64, u64)> {
+    let metadata = fs::metadata(path).ok()?;
     let modified = metadata.modified().ok()?;
     let mtime_ns = modified.duration_since(UNIX_EPOCH).ok()?.as_nanos() as u64;
-    Some((canonical, metadata.len(), mtime_ns))
+    Some((metadata.len(), mtime_ns))
+}
+
+/// The one cache key, used for insert, lookup and removal.
+///
+/// The canonical path resolves symlinks and drive mappings while the file
+/// exists. When the file is gone, the canonical parent plus the file name
+/// rebuilds the same string, so removal still finds the entry. Windows
+/// canonical forms carry a `\\?\` prefix, which is why the key must never
+/// be recomputed differently on the way out.
+fn cache_key(path: &Path) -> String {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return normalise(&canonical);
+    }
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        if let Ok(parent) = fs::canonicalize(parent) {
+            return normalise(&parent.join(name));
+        }
+    }
+    normalise(path)
+}
+
+/// A path as the cache text spells it.
+fn normalise(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 /// Hash the jobs with at most [`MAX_THREADS`] readers, preserving order.
-fn hash_parallel(jobs: &[(PathBuf, u64, u64)]) -> Vec<Option<[u8; 20]>> {
+fn hash_parallel(jobs: &[(PathBuf, String, u64, u64)]) -> Vec<Option<[u8; 20]>> {
     let mut out: Vec<Option<[u8; 20]>> = vec![None; jobs.len()];
     if jobs.is_empty() {
         return out;
@@ -307,15 +335,46 @@ mod tests {
         let mut cache = PboHashes::load(&cache_path);
         cache.digests(std::slice::from_ref(&pbo));
         cache.finish();
+        assert_eq!(cache.entries.len(), 1);
 
         fs::remove_file(&pbo).unwrap();
         let mut cache = PboHashes::load(&cache_path);
         assert_eq!(cache.digests(std::slice::from_ref(&pbo)), vec![None]);
         assert_eq!(cache.unreadable, 1);
+        assert!(cache.entries.is_empty(), "the stale entry survived");
         cache.finish();
 
-        let text = fs::read_to_string(&cache_path).unwrap();
-        assert!(!text.contains("a.pbo"), "the stale entry survived: {text}");
+        // The written text is empty whatever spelling the platform uses
+        // for a canonical path.
+        let written: CacheFile =
+            serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+        assert!(written.entries.is_empty(), "the stale entry survived");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_path_that_no_longer_canonicalises_is_still_forgotten() {
+        let dir = scratch("forget");
+        let pbo = dir.join("a.pbo");
+        fs::write(&pbo, b"bytes").unwrap();
+        let cache_path = dir.join("pbo-hashes.json");
+        let mut cache = PboHashes::load(&cache_path);
+        cache.digests(std::slice::from_ref(&pbo));
+        cache.finish();
+
+        // The entry was keyed while the file existed, in the platform's
+        // canonical form. Removal now runs with that form unavailable.
+        fs::remove_file(&pbo).unwrap();
+        let mut cache = PboHashes::load(&cache_path);
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.forget(&pbo));
+        assert!(cache.entries.is_empty());
+        assert!(!cache.forget(&pbo), "a second removal reports nothing");
+        cache.finish();
+
+        let written: CacheFile =
+            serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+        assert!(written.entries.is_empty(), "the stale entry survived");
         fs::remove_dir_all(&dir).unwrap();
     }
 
