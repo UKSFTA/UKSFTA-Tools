@@ -600,3 +600,109 @@ fn a_clean_batch_resolves_meta_and_mod_cpp() {
     )));
     assert_eq!(plan.status(), Status::Ok);
 }
+
+/// The report after a clean run must read like a re-listing. A segmented
+/// publish is one file on its own, with no batch beside it.
+#[test]
+fn a_segmented_publish_alone_updates_the_report() {
+    let mut fixture = Fixture::new();
+    fixture
+        .remote
+        .files
+        .retain(|file| file.rel != format!("addons/{PBO}"));
+    let mut plan = fixture.plan();
+    assert_eq!(plan.status(), Status::Missing);
+
+    plan.mark_uploaded(&HashSet::from([format!("{DIR}/addons/{PBO}")]));
+
+    assert_eq!(plan.remote_pbos, 1, "the remote folder gained the PBO");
+    assert!(
+        plan.findings
+            .iter()
+            .all(|finding| !matches!(finding, Finding::Missing { name } if name == PBO)),
+        "the published file is no longer missing: {:?}",
+        plan.findings
+    );
+    assert!(
+        !remote_targets(&plan).contains(&format!("{DIR}/addons/{PBO}")),
+        "the published file has no upload action left: {:?}",
+        remote_targets(&plan)
+    );
+    assert_eq!(plan.status(), Status::Ok);
+    assert!(!plan.failed());
+}
+
+/// A fresh remote: the PBO a segment published, and the whole-file
+/// `meta.cpp` that names the pack.
+#[test]
+fn a_fresh_remote_reports_what_a_relisting_would() {
+    let mut fixture = Fixture::new();
+    fixture.remote = RemotePack::default();
+    let mut plan = fixture.plan();
+    assert!(plan.failed(), "an empty remote fails before the upload");
+    assert_eq!(plan.remote_pbos, 0);
+    assert!(!plan.remote_exists);
+
+    plan.mark_uploaded(&HashSet::from([format!("{DIR}/addons/{PBO}")]));
+    plan.mark_uploaded(&HashSet::from([
+        format!("{DIR}/meta.cpp"),
+        format!("{DIR}/mod.cpp"),
+        format!("{DIR}/addons/{SIG}"),
+        format!("{DIR}/keys/{KEY}"),
+    ]));
+
+    assert!(plan.remote_exists, "the meta.cpp creates the pack folder");
+    assert_eq!(plan.remote_pbos, 1, "one PBO on the server");
+    assert_eq!(plan.remote_keys, 1, "one key on the server");
+    assert!(
+        plan.findings.iter().all(|finding| !finding.failed()),
+        "no finding fails after a clean run: {:?}",
+        plan.findings
+    );
+    assert!(plan.actions.is_empty(), "{:?}", plan.actions);
+    assert_eq!(plan.status(), Status::Ok);
+    assert!(!plan.failed());
+}
+
+/// A file that was already on the server is counted once, whether it was
+/// present or stale, so a second recording changes nothing.
+#[test]
+fn a_file_already_on_the_server_is_counted_once() {
+    let fixture = Fixture::new();
+    let mut plan = fixture.plan();
+    plan.mark_uploaded(&HashSet::from([format!("{DIR}/addons/{PBO}")]));
+    assert_eq!(plan.remote_pbos, 1, "a present file does not count twice");
+    assert_eq!(plan.status(), Status::Ok);
+
+    let mut stale = Fixture::new();
+    for file in &mut stale.remote.files {
+        if file.rel == format!("addons/{PBO}") {
+            file.size = 90;
+        }
+    }
+    let mut plan = stale.plan();
+    assert_eq!(plan.status(), Status::Stale);
+    assert_eq!(plan.remote_pbos, 1, "the server holds the PBO already");
+
+    plan.mark_uploaded(&HashSet::from([format!("{DIR}/addons/{PBO}")]));
+
+    assert_eq!(plan.remote_pbos, 1, "the file counts once");
+    assert_eq!(plan.status(), Status::Ok);
+}
+
+#[test]
+fn an_unsent_missing_file_still_fails() {
+    let mut fixture = Fixture::new();
+    fixture
+        .remote
+        .files
+        .retain(|file| file.rel != format!("addons/{PBO}"));
+    let mut plan = fixture.plan();
+
+    plan.mark_uploaded(&HashSet::new());
+
+    assert_eq!(plan.remote_pbos, 0);
+    assert_eq!(plan.status(), Status::Missing);
+    assert!(plan.failed());
+    assert_eq!(plan.problems(), 1);
+}

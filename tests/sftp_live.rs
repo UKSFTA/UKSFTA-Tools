@@ -708,6 +708,65 @@ fn a_first_segmented_upload_creates_the_pack_folder() {
     assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
 }
 
+/// After a clean run the report must read like a re-listing of the server:
+/// the segment that was published counts, and no file stays missing.
+#[test]
+#[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
+fn a_segmented_publish_reports_the_remote_pack() {
+    if !live() {
+        return;
+    }
+    let _serial = live_lock();
+    let setup = Setup::with_size("report", 8 * 1024 * 1024);
+    let pack_root = format!("{ROOT}/@{PACK_ID}");
+    let removed = fixture(&["rm", "-rf", &pack_root]);
+    assert!(removed.status.success(), "cannot remove the pack folder");
+
+    let output = setup.run(&["--no-segment-probe"]);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let errors = stderr(&output);
+    assert!(
+        output.status.success(),
+        "a clean upload must pass: {errors}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("published in"),
+        "the segmented path must run: {stdout}"
+    );
+    let after = stdout
+        .split_once("after upload:")
+        .map_or("", |(_, tail)| tail);
+    assert!(
+        after.contains(&format!("remote {pack_root}: 1 PBO(s)")),
+        "the report counts the published PBO: {after}"
+    );
+    assert!(
+        !after.contains("missing "),
+        "the published file is not missing: {after}"
+    );
+    assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
+
+    // The second run finds every file in place, sends nothing, and reports
+    // the same pack.
+    let again = setup.run(&["--no-segment-probe"]);
+    let again_stdout = String::from_utf8_lossy(&again.stdout).into_owned();
+    assert!(
+        again.status.success(),
+        "a repeat run must pass: {}\n{again_stdout}",
+        stderr(&again)
+    );
+    assert!(
+        again_stdout.contains(&format!("remote {pack_root}: 1 PBO(s)")),
+        "{again_stdout}"
+    );
+    assert!(
+        !again_stdout.contains("published in"),
+        "nothing is sent twice: {again_stdout}"
+    );
+    assert!(!again_stdout.contains("missing "), "{again_stdout}");
+    assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
+}
+
 #[test]
 #[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
 fn json_reports_the_published_segmented_file() {
