@@ -2,14 +2,16 @@
 //!
 //! Commands travel on standard input. `sftp -b` puts the client in
 //! non-interactive mode and suppresses the password prompt, so the prompt
-//! and askpass paths stay available here. One run is one phase, so a
-//! prompt appears at most once per phase.
+//! and askpass paths stay available here. One run opens one multiplexed
+//! connection, so a prompt appears at most once per run.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use super::config::{Settings, Transfer};
 use super::hostkey::{self, HostKeyPolicy};
@@ -27,6 +29,120 @@ const LIVENESS: [&str; 3] = [
     "ConnectTimeout=15",
 ];
 
+/// Multiplexing. The master holds the connection, and every child names the
+/// socket so it rides that connection rather than opening its own. The
+/// persist window is the backstop for a run that is killed.
+#[cfg(unix)]
+const CONTROL_PERSIST: &str = "ControlPersist=60";
+
+/// The longest control socket path that is safe to pass. `sun_path` holds 108
+/// bytes with its terminator, and a longer path fails at connect time.
+#[cfg(unix)]
+const MAX_SOCKET_PATH: usize = 100;
+
+/// The master binary. It ships with the client.
+#[cfg(unix)]
+const SSH: &str = "ssh";
+
+/// The run's control socket. One process is one run, so every child in the
+/// upload and verification phases shares it.
+#[cfg(unix)]
+struct ControlSocket {
+    path: PathBuf,
+    destination: String,
+    /// Held while the first child of the run starts the master, so the
+    /// children that follow wait for it instead of racing it.
+    started: Mutex<bool>,
+}
+
+#[cfg(unix)]
+impl ControlSocket {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Stop the master and remove the socket. Cleanup never fails a command
+    /// and never waits long: the persist window is the backstop.
+    fn stop(&self) {
+        let live = *self.started.lock().unwrap_or_else(PoisonError::into_inner);
+        if live {
+            self.ask_master_to_exit();
+        }
+        let _ = fs::remove_file(&self.path);
+    }
+
+    fn ask_master_to_exit(&self) {
+        let Ok(mut child) = Command::new(SSH)
+            .args([
+                "-O".to_string(),
+                "exit".to_string(),
+                "-o".to_string(),
+                format!("ControlPath={}", self.path.display()),
+                self.destination.clone(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return;
+        };
+        for _ in 0..CLEANUP_POLLS {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(CLEANUP_POLL),
+                Err(_) => break,
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// A master that has not answered the exit request in a second is left to
+/// its persist window.
+#[cfg(unix)]
+const CLEANUP_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+#[cfg(unix)]
+const CLEANUP_POLLS: usize = 50;
+
+/// Stop the master, then remove the socket. A socket that has already gone
+/// is not an error.
+#[cfg(unix)]
+impl Drop for ControlSocket {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// The options that make one connection the master, or that make a child ride
+/// it. `sftp` forces `ControlMaster=no` on its own child, so a child can never
+/// become the master: the run starts one with `ssh -N` and the children point
+/// at its socket.
+#[cfg(unix)]
+fn control_options(path: &std::path::Path, master: bool) -> Vec<String> {
+    let role = if master {
+        "ControlMaster=yes"
+    } else {
+        "ControlMaster=auto"
+    };
+    vec![
+        "-o".to_string(),
+        role.to_string(),
+        "-o".to_string(),
+        CONTROL_PERSIST.to_string(),
+        "-o".to_string(),
+        format!("ControlPath={}", path.display()),
+    ]
+}
+
+/// The control handle for one child. Windows has no multiplexing, so the
+/// handle holds nothing there.
+#[cfg(unix)]
+type Control = Arc<ControlSocket>;
+#[cfg(not(unix))]
+type Control = ();
+
 /// The client. It holds no credentials: `sftp` reads the key, the agent or
 /// the terminal prompt itself.
 pub struct Sftp {
@@ -39,9 +155,15 @@ pub struct Sftp {
     policy: HostKeyPolicy,
     /// Refuse to prompt. The probe must never ask for a second password.
     batch_mode: bool,
+    /// The run's multiplexing socket, when the platform and the mode allow.
+    control: Option<Control>,
 }
 
 impl Sftp {
+    /// A client for a phase that runs alone: it starts or rides the run's
+    /// shared connection. A parallel upload worker must use `own_connection`
+    /// instead, because one TCP stream per worker is what gives the upload
+    /// its throughput on a link with latency.
     pub fn new(settings: &Settings) -> Self {
         let binary = std::env::var(BINARY_ENV).unwrap_or_else(|_| "sftp".to_string());
         Self {
@@ -53,12 +175,34 @@ impl Sftp {
             known_hosts: settings.known_hosts.clone(),
             policy: settings.host_key_policy,
             batch_mode: false,
+            #[cfg(unix)]
+            control: Some(run_socket(&settings.destination)),
+            #[cfg(not(unix))]
+            control: None,
         }
     }
 
-    /// A client that never prompts, for the link probe.
+    /// A client that opens its own connection, for a phase that runs beside
+    /// its peers. The run's shared connection is left alone, so a group of
+    /// workers keeps one TCP stream each.
+    pub fn own_connection(settings: &Settings) -> Self {
+        #[cfg(unix)]
+        {
+            let mut client = Self::new(settings);
+            client.control = None;
+            client
+        }
+        #[cfg(not(unix))]
+        {
+            Self::new(settings)
+        }
+    }
+
+    /// A client that never prompts, for the link probe. It times one
+    /// connection to one stream, so a shared master would hide the handshake
+    /// it measures.
     pub fn probe(settings: &Settings) -> Self {
-        let mut client = Self::new(settings);
+        let mut client = Self::own_connection(settings);
         client.batch_mode = true;
         client
     }
@@ -70,10 +214,6 @@ impl Sftp {
         let mut args = Vec::new();
         args.push("-P".to_string());
         args.push(self.port.to_string());
-        if let Some(path) = &self.identity {
-            args.push("-i".to_string());
-            args.push(path.display().to_string());
-        }
         args.extend([
             "-R".to_string(),
             self.transfer.requests.to_string(),
@@ -84,15 +224,37 @@ impl Sftp {
             args.push("-l".to_string());
             args.push(limit_kbit(rate).to_string());
         }
+        args.extend(self.link_options());
+        #[cfg(unix)]
+        if let Some(control) = &self.control {
+            args.extend(control_options(control.path(), false));
+        }
+        #[cfg(not(unix))]
+        debug_assert!(
+            self.control.is_none(),
+            "windows has no control socket to pass"
+        );
+        args.push(self.destination.clone());
+        args
+    }
+
+    /// The options that set up the link. The master uses the same set, so the
+    /// identity, the liveness window and the pinned host key hold for both.
+    fn link_options(&self) -> Vec<String> {
+        let mut options = Vec::new();
+        if let Some(path) = &self.identity {
+            options.push("-i".to_string());
+            options.push(path.display().to_string());
+        }
         for option in LIVENESS {
-            args.push("-o".to_string());
-            args.push(option.to_string());
+            options.push("-o".to_string());
+            options.push(option.to_string());
         }
-        args.extend(["-o".to_string(), "LogLevel=ERROR".to_string()]);
+        options.extend(["-o".to_string(), "LogLevel=ERROR".to_string()]);
         if self.batch_mode {
-            args.extend(["-o".to_string(), "BatchMode=yes".to_string()]);
+            options.extend(["-o".to_string(), "BatchMode=yes".to_string()]);
         }
-        args.extend([
+        options.extend([
             "-o".to_string(),
             format!("StrictHostKeyChecking={}", self.policy.as_str()),
             "-o".to_string(),
@@ -100,8 +262,54 @@ impl Sftp {
             "-o".to_string(),
             "UpdateHostKeys=no".to_string(),
         ]);
+        options
+    }
+
+    /// The master's argument list. It carries the same link options and no
+    /// transfer option, because it moves no file.
+    #[cfg(unix)]
+    fn master_args(&self) -> Vec<String> {
+        let mut args = vec![
+            "-N".to_string(),
+            "-f".to_string(),
+            "-p".to_string(),
+            self.port.to_string(),
+        ];
+        args.extend(self.link_options());
+        if let Some(control) = &self.control {
+            args.extend(control_options(control.path(), true));
+        }
         args.push(self.destination.clone());
         args
+    }
+
+    /// Start the run's master, once. A failure is silent: the children then
+    /// open their own connections, which is the behaviour without a socket.
+    #[cfg(unix)]
+    fn ensure_master(&self) {
+        let Some(control) = &self.control else {
+            return;
+        };
+        if std::env::var_os(BINARY_ENV).is_some() {
+            return;
+        }
+        let mut started = control
+            .started
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if *started {
+            return;
+        }
+        *started = true;
+        let mut command = Command::new(SSH);
+        command.args(self.master_args());
+        // A passphrase or password prompt still reaches the terminal; the
+        // link itself writes nothing the caller needs.
+        command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let _ = command.status();
     }
 
     /// A client run with its commands on standard input.
@@ -165,6 +373,8 @@ impl Sftp {
             return Ok(String::new());
         }
 
+        #[cfg(unix)]
+        self.ensure_master();
         let mut command = self.command();
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = self.spawn(command)?;
@@ -273,6 +483,58 @@ fn unique_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}{}-{id}", std::process::id()))
 }
 
+/// The socket of this run. A fresh path per process keeps two concurrent runs
+/// apart, and keeps a socket left by a killed run from blocking the next one.
+#[cfg(unix)]
+fn run_socket(destination: &str) -> Arc<ControlSocket> {
+    static LIVE: OnceLock<Mutex<Weak<ControlSocket>>> = OnceLock::new();
+    static NEXT_RUN: AtomicU64 = AtomicU64::new(0);
+
+    let slot = LIVE.get_or_init(|| Mutex::new(Weak::new()));
+    let mut live = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(socket) = live.upgrade() {
+        if socket.destination == destination {
+            return socket;
+        }
+    }
+    let run = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+    let socket = Arc::new(ControlSocket {
+        path: socket_path(run),
+        destination: destination.to_string(),
+        started: Mutex::new(false),
+    });
+    *live = Arc::downgrade(&socket);
+    socket
+}
+
+/// The control socket path: a short runtime directory, a fixed prefix, the
+/// process id and a run counter. A path over the socket limit loses the
+/// runtime directory first.
+#[cfg(unix)]
+fn socket_path(run: u64) -> PathBuf {
+    let name = format!("uksfta-cm-{}-{run}", std::process::id());
+    let fallback = PathBuf::from("/tmp");
+    for dir in runtime_dirs() {
+        let candidate = dir.join(&name);
+        if candidate.as_os_str().len() <= MAX_SOCKET_PATH {
+            return candidate;
+        }
+    }
+    fallback.join(name)
+}
+
+/// The directories that may hold a socket, most private first.
+#[cfg(unix)]
+fn runtime_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .into_iter()
+        .collect();
+    dirs.push(std::env::temp_dir());
+    dirs.retain(|dir| dir.is_dir());
+    dirs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +549,33 @@ mod tests {
             known_hosts: PathBuf::from("/home/user/.ssh/known_hosts"),
             policy: HostKeyPolicy::Yes,
             batch_mode: false,
+            control: None,
+        }
+    }
+
+    /// The control path of a client, when it has one.
+    #[cfg(unix)]
+    fn control_path(client: &Sftp) -> Option<String> {
+        client
+            .args()
+            .windows(2)
+            .find(|pair| pair[0] == "-o" && pair[1].starts_with("ControlPath="))
+            .map(|pair| pair[1].clone())
+    }
+
+    /// Settings that reach a real client constructor.
+    fn settings() -> Settings {
+        Settings {
+            destination: "tester@example.invalid".to_string(),
+            port: 2022,
+            root: "/srv".to_string(),
+            identity: Some(PathBuf::from("/home/user/.ssh/id_ed25519")),
+            transfer: Transfer::default(),
+            known_hosts: PathBuf::from("/home/user/.ssh/known_hosts"),
+            host_key_policy: HostKeyPolicy::Yes,
+            launch_line: None,
+            server_cfg: None,
+            segment: crate::server::config::Segment::default(),
         }
     }
 
@@ -468,5 +757,169 @@ mod tests {
     fn last_line_skips_blank_and_keeps_text() {
         assert_eq!(last_line("a\n\nb\n").as_deref(), Some("b"));
         assert_eq!(last_line("   \n"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_run_multiplexes_its_children_over_one_socket() {
+        let first = Sftp {
+            control: Some(run_socket("tester@example.invalid")),
+            ..client(Transfer::default())
+        };
+        let second = Sftp {
+            control: Some(run_socket("tester@example.invalid")),
+            ..client(Transfer::default())
+        };
+
+        let path = control_path(&first).expect("a control path on unix");
+        assert_eq!(
+            Some(path.clone()),
+            control_path(&second),
+            "every child of a run rides the same socket"
+        );
+        let socket = path.trim_start_matches("ControlPath=");
+        assert!(
+            socket.contains(&std::process::id().to_string()),
+            "the path names the run: {socket}"
+        );
+        assert!(
+            !socket.contains("tester@example.invalid"),
+            "the path must not carry the destination: {socket}"
+        );
+        assert!(
+            socket.len() <= MAX_SOCKET_PATH,
+            "the socket path stays short: {socket}"
+        );
+
+        let args = first.args();
+        for pair in [
+            ["-o", "ControlMaster=auto"],
+            ["-o", CONTROL_PERSIST],
+            ["-o", path.as_str()],
+            ["-o", "LogLevel=ERROR"],
+            ["-o", "StrictHostKeyChecking=yes"],
+            ["-o", "UpdateHostKeys=no"],
+            ["-i", "/home/user/.ssh/id_ed25519"],
+            ["-B", "32768"],
+        ] {
+            assert!(
+                args.windows(2).any(|seen| seen == pair),
+                "{pair:?} is missing"
+            );
+        }
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("tester@example.invalid"),
+            "the destination stays last: {args:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_master_takes_the_same_link_options_and_no_transfer_option() {
+        let client = Sftp {
+            control: Some(run_socket("tester@example.invalid")),
+            ..client(Transfer::default())
+        };
+        let path = control_path(&client).expect("a control path on unix");
+        let master = client.master_args();
+
+        for flag in ["-N", "-f"] {
+            assert!(master.iter().any(|arg| arg == flag), "{flag} is missing");
+        }
+        for pair in [
+            ["-p", "2022"],
+            ["-o", "ControlMaster=yes"],
+            ["-o", CONTROL_PERSIST],
+            ["-o", path.as_str()],
+            ["-o", "StrictHostKeyChecking=yes"],
+            ["-i", "/home/user/.ssh/id_ed25519"],
+            ["-o", "UserKnownHostsFile=/home/user/.ssh/known_hosts"],
+        ] {
+            assert!(
+                master.windows(2).any(|seen| seen == pair),
+                "{pair:?} is missing: {master:?}"
+            );
+        }
+        assert!(
+            !master
+                .iter()
+                .any(|arg| arg == "-R" || arg == "-B" || arg == "-l" || arg == "-P"),
+            "the master moves no file: {master:?}"
+        );
+        assert_eq!(
+            master.last().map(String::as_str),
+            Some("tester@example.invalid"),
+            "the destination stays last: {master:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_parallel_worker_opens_its_own_connection() {
+        let alone = Sftp::new(&settings());
+        assert!(control_path(&alone).is_some(), "a lone phase shares");
+
+        let worker = Sftp::own_connection(&settings());
+        assert!(
+            control_path(&worker).is_none(),
+            "a worker beside its peers keeps a stream of its own"
+        );
+        for pair in [
+            ["-o", "StrictHostKeyChecking=yes"],
+            ["-o", "UpdateHostKeys=no"],
+            ["-i", "/home/user/.ssh/id_ed25519"],
+        ] {
+            assert!(
+                worker.args().windows(2).any(|seen| seen == pair),
+                "{pair:?} is missing"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_carries_no_socket() {
+        let run = Sftp::new(&settings());
+        assert!(control_path(&run).is_some(), "a run has a socket");
+        let probe = Sftp::probe(&settings());
+        assert!(
+            control_path(&probe).is_none(),
+            "the probe measures one link, so it opens its own"
+        );
+        assert!(probe
+            .args()
+            .windows(2)
+            .any(|pair| pair == ["-o", "BatchMode=yes"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_control_socket_removes_its_file_and_tolerates_its_absence() {
+        let path = std::env::temp_dir().join(format!("uksfta-test-cm-{}", std::process::id()));
+        fs::write(&path, b"x").unwrap();
+        drop(ControlSocket {
+            path: path.clone(),
+            destination: "tester@example.invalid".to_string(),
+            started: Mutex::new(false),
+        });
+        assert!(!path.exists());
+        drop(ControlSocket {
+            path,
+            destination: "tester@example.invalid".to_string(),
+            started: Mutex::new(false),
+        });
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn windows_passes_no_multiplexing_options() {
+        let args = Sftp::new(&settings()).args();
+        assert!(
+            !args.iter().any(|arg| arg.contains("ControlMaster")
+                || arg.contains("ControlPersist")
+                || arg.contains("ControlPath")),
+            "{args:?}"
+        );
     }
 }
