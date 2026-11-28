@@ -865,7 +865,7 @@ fn json_reports_the_published_segmented_file() {
 
 #[test]
 #[ignore = "needs the Docker fixture and UKSFTA_SFTP_LIVE=1"]
-fn a_probe_chooses_the_whole_file_path_on_a_fast_link() {
+fn a_probe_chooses_a_whole_path_on_a_fast_link() {
     if !live() {
         return;
     }
@@ -881,13 +881,21 @@ fn a_probe_chooses_the_whole_file_path_on_a_fast_link() {
         stderr(&output)
     );
     assert!(
-        stdout.contains("probe: whole-file faster"),
-        "the fast link must choose whole: {stdout}"
+        stdout.contains("native whole faster") || stdout.contains("whole-file faster"),
+        "the fast link must choose a whole path: {stdout}"
     );
     assert!(
         !stdout.contains("published in"),
         "the whole-file path must carry it: {stdout}"
     );
+    if stdout.contains("native whole faster") {
+        assert!(
+            !stdout
+                .lines()
+                .any(|line| line.contains("live_probe.pbo") && line.contains('~')),
+            "the native whole path must give exact seconds: {stdout}"
+        );
+    }
     assert_eq!(remote_sha256(&setup.remote_pbo), local_sha256(&setup.pbo));
     for line in stdout.lines().filter(|line| line.starts_with("probe: ")) {
         println!("{line}");

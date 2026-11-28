@@ -102,6 +102,8 @@ pub struct ServerOptions {
     pub segmented: bool,
     /// Use the native whole-file transport.
     pub native_whole: bool,
+    /// Keep the system client even when the probe finds native whole faster.
+    pub no_native_whole: bool,
     /// Force the system sftp path for one release.
     pub legacy_sftp: bool,
     /// Read a password from the controlling terminal for the native path.
@@ -397,6 +399,7 @@ fn run_verify(opts: &ServerOptions, outcome: &mut Outcome) -> Result<(), UksftaE
             segment.as_ref(),
             opts.password_prompt,
             opts.native_whole,
+            !opts.no_native_whole,
         )?;
         outcome.upload_ms = Some(millis(upload_started.elapsed()));
     }
@@ -872,6 +875,7 @@ fn upload_with_retries(
     segment: Option<&SegmentChoice>,
     password_prompt: bool,
     whole: bool,
+    probe_whole: bool,
 ) -> Result<Plan, UksftaError> {
     let units = upload_units(&plan);
     let view = report
@@ -901,6 +905,7 @@ fn upload_with_retries(
         password,
         view.clone(),
         whole,
+        probe_whole,
     );
     if let Some(view) = &view {
         view.finish();
@@ -929,7 +934,9 @@ fn upload_loop(
     password: Option<Arc<native::secret::Secret>>,
     view: Option<Arc<progress::UploadProgress>>,
     whole: bool,
+    probe_whole: bool,
 ) -> Result<(), UksftaError> {
+    let mut whole = whole;
     let upload_started = Instant::now();
     let mut skip: HashSet<String> = HashSet::new();
     if let Some(choice) = segment {
@@ -957,10 +964,18 @@ fn upload_loop(
                 jobs,
             ) {
                 Ok(decision) => {
+                    let decision = if probe_whole {
+                        decision
+                    } else {
+                        decision.without_native_whole()
+                    };
                     if decision.probe.system_mbps > 0.0 {
                         say(report.json, &decision.rates_line());
                         say(report.json, &decision.decision_line());
-                        use_segment = decision.segmented;
+                        use_segment = decision.segmented();
+                        if decision.native_whole() {
+                            whole = true;
+                        }
                     } else {
                         eprintln!(
                             "Warning: probe: the system path could not authenticate; keeping the segmented path"

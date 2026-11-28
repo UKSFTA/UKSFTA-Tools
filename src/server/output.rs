@@ -91,8 +91,10 @@ pub struct ProbeJson {
     pub system_jobs: u8,
     pub native_one_mbps: f64,
     pub native_two_mbps: f64,
+    pub native_whole_mbps: f64,
     pub read_mbps: f64,
     pub whole_seconds: f64,
+    pub native_whole_seconds: f64,
     pub segmented_seconds: f64,
     pub decision: String,
 }
@@ -104,14 +106,17 @@ impl From<&super::native::probe::Decision> for ProbeJson {
             system_jobs: decision.probe.system_jobs,
             native_one_mbps: decision.probe.native_one_mbps,
             native_two_mbps: decision.probe.native_two_mbps,
+            native_whole_mbps: decision.probe.native_whole_mbps,
             read_mbps: decision.probe.read_mbps,
             whole_seconds: decision.whole_seconds,
+            native_whole_seconds: decision.native_whole_seconds,
             segmented_seconds: decision.segmented_seconds,
-            decision: if decision.segmented {
-                "segmented".to_string()
-            } else {
-                "whole".to_string()
-            },
+            decision: match decision.choice {
+                super::native::probe::Choice::Segmented => "segmented",
+                super::native::probe::Choice::NativeWhole => "native-whole",
+                super::native::probe::Choice::SystemBatch => "whole",
+            }
+            .to_string(),
         }
     }
 }
@@ -485,5 +490,39 @@ impl DoctorReport {
             result: if result.is_ok() { "ok" } else { "input-error" }.to_string(),
             error: result.as_ref().err().map(ToString::to_string),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::native::probe::{Decision, Probe};
+
+    fn decision(whole: f64) -> Decision {
+        Decision::decide(
+            Probe {
+                system_mbps: 100.0,
+                system_jobs: 4,
+                native_one_mbps: 1.0,
+                native_two_mbps: 1.0,
+                native_whole_mbps: whole,
+                read_mbps: 1.0,
+            },
+            1_000_000_000,
+        )
+    }
+
+    #[test]
+    fn the_probe_json_carries_the_native_whole_rate_and_the_choice() {
+        let json = serde_json::to_value(ProbeJson::from(&decision(120.0))).expect("json");
+        assert_eq!(json["native_whole_mbps"], 120.0);
+        assert_eq!(json["decision"], "native-whole");
+        assert!(json["native_whole_seconds"].as_f64().is_some());
+    }
+
+    #[test]
+    fn the_probe_json_names_the_system_batch() {
+        let json = serde_json::to_value(ProbeJson::from(&decision(50.0))).expect("json");
+        assert_eq!(json["decision"], "whole");
     }
 }
