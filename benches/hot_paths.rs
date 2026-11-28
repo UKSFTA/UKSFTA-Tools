@@ -72,6 +72,12 @@ fn readable_strings_4mib(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
+fn closure_scan_4mib(bencher: divan::Bencher) {
+    let data = pack_bytes();
+    bencher.bench(|| pbo::closure_scan(divan::black_box(data)));
+}
+
+#[divan::bench]
 fn keybind_scan_4mib(bencher: divan::Bencher) {
     let text = String::from_utf8_lossy(pack_bytes()).into_owned();
     bencher.bench(|| pbo::cba_keybind_names(divan::black_box(&text)));

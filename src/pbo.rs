@@ -1,3 +1,4 @@
+use memchr::{memchr, memchr2, memmem};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -434,33 +435,41 @@ pub struct PboClosureFacts {
 /// The result matches [`pbo_config_facts`] for these two fields. The
 /// identity-only scans are skipped, so no entry data is read beyond a
 /// stored `config.bin`: models and textures are never touched. One open
-/// and one bounded read of the front serve the entry table, the text scan
-/// and the stored config.
+/// and one bounded read of the front serve the entry table, the closure
+/// markers and the stored config.
+///
+/// The two fields come from markers over the raw window, not from the
+/// printable-run text, so no per-byte string is built for this path.
 pub fn pbo_closure_facts(path: &Path) -> PboClosureFacts {
     let Some(mut front) = PboFront::open(path, PBO_CLOSURE_PROBE, PBO_CLOSURE_CONFIG_WINDOW) else {
         return PboClosureFacts::default();
     };
-    let text = if has_closure_text(&front.buf) {
-        readable_strings(&front.buf)
-    } else {
-        String::new()
-    };
-    let facts = base_facts(&text, front.rap_facts());
+    let mut facts = closure_scan(&front.buf);
+    if let Some(rap) = front.rap_facts() {
+        merge_rap_facts(&mut facts, rap);
+    }
     PboClosureFacts {
         cfgpatches_classes: facts.cfgpatches_classes,
         required_addons: facts.required_addons,
     }
 }
 
+/// The needle that starts a class declaration.
+const CLASS_MARKER: &[u8] = b"class ";
+/// The needle that starts a dependency list.
+const REQUIRED_ADDONS_MARKER: &[u8] = b"requiredAddons";
+/// The key [`config_list`] is given for a dependency list.
+const REQUIRED_ADDONS_KEY: &str = "requiredAddons[]";
+
 /// Whether the window can carry a closure fact at all.
 ///
 /// A class only enters the scan through a `class ` statement, and an
 /// addon only through a `requiredAddons[]` key. Both are printable, so a
 /// byte search over the raw window is exact, and a binarised pack can
-/// skip the text walk.
+/// skip the marker walk.
 fn has_closure_text(data: &[u8]) -> bool {
-    data.windows(6).any(|window| window == b"class ")
-        || data.windows(16).any(|window| window == b"requiredAddons[]")
+    memmem::find(data, CLASS_MARKER).is_some()
+        || memmem::find(data, REQUIRED_ADDONS_KEY.as_bytes()).is_some()
 }
 
 /// The front of one PBO, read once.
@@ -589,6 +598,180 @@ impl PboFront {
             }
         })
     }
+}
+
+/// The two closure fields from one pass over a PBO front.
+///
+/// [`has_closure_text`] is the pre-filter: a PBO front with neither
+/// marker cannot declare a class or a dependency, so the rest of the
+/// scan is skipped.
+pub(crate) fn closure_scan(head: &[u8]) -> PboConfigFacts {
+    if !has_closure_text(head) {
+        return PboConfigFacts::default();
+    }
+    PboConfigFacts {
+        cfgpatches_classes: config_classes(head),
+        required_addons: config_required_addons(head),
+        ..PboConfigFacts::default()
+    }
+}
+
+/// Positions of the `{` and `}` bytes, in order.
+struct Braces<'a> {
+    data: &'a [u8],
+    from: usize,
+}
+
+impl<'a> Braces<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, from: 0 }
+    }
+}
+
+impl Iterator for Braces<'_> {
+    type Item = (usize, u8);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let index = memchr2(b'{', b'}', self.data.get(self.from..)?)?;
+        let position = self.from + index;
+        self.from = position + 1;
+        Some((position, self.data[position]))
+    }
+}
+
+/// Every `CfgPatches` class the config declares, in declaration order and
+/// deduplicated case-insensitively with the first spelling kept.
+///
+/// The rules are the ones [`scan_sections`] applies: a class statement one
+/// level inside a `CfgPatches` block names a class the PBO provides. Only
+/// the class markers and the braces matter for this, so the walk merges
+/// the two ordered position streams and skips the rest of the window.
+fn config_classes(head: &[u8]) -> Vec<String> {
+    let mut classes: Vec<String> = Vec::new();
+    let mut markers = memmem::find_iter(head, CLASS_MARKER);
+    let Some(mut marker) = markers.next() else {
+        return classes;
+    };
+    let mut braces = Braces::new(head);
+    let mut brace_event = braces.next();
+    let mut section = Section::Unknown;
+    let mut section_depth = 0usize;
+    let mut pending_section = Section::Unknown;
+    let mut depth = 0usize;
+
+    loop {
+        let brace_first = match brace_event {
+            Some((position, _)) => position < marker,
+            None => false,
+        };
+        if brace_first {
+            if let Some((_, byte)) = brace_event {
+                if byte == b'{' {
+                    depth += 1;
+                    if pending_section != Section::Unknown {
+                        section = std::mem::replace(&mut pending_section, Section::Unknown);
+                        section_depth = depth - 1;
+                    }
+                } else {
+                    depth = depth.saturating_sub(1);
+                    if section != Section::Unknown && depth <= section_depth {
+                        section = Section::Unknown;
+                    }
+                }
+            }
+            brace_event = braces.next();
+            continue;
+        }
+
+        if let Some(name) = class_name_at(head, marker) {
+            if name.eq_ignore_ascii_case("cfgmods") {
+                pending_section = Section::CfgMods;
+            } else if name.eq_ignore_ascii_case("cfgpatches") {
+                pending_section = Section::CfgPatches;
+            } else if section == Section::CfgPatches
+                && depth == section_depth + 1
+                && !classes.iter().any(|seen| seen.eq_ignore_ascii_case(name))
+            {
+                classes.push(name.to_string());
+            }
+        }
+
+        match markers.next() {
+            Some(position) => marker = position,
+            None => break,
+        }
+    }
+
+    classes
+}
+
+/// The name in one `class` declaration at `marker`, or None when the
+/// marker does not start a statement.
+///
+/// This is [`class_name`] over the raw window: a statement starts at the
+/// window, at a brace, or after a `;`, and only spaces may sit between
+/// that boundary and the marker.
+fn class_name_at(data: &[u8], marker: usize) -> Option<&str> {
+    let mut statement = marker;
+    while statement > 0 && data[statement - 1] == b' ' {
+        statement -= 1;
+    }
+    if let Some(&previous) = statement.checked_sub(1).and_then(|at| data.get(at)) {
+        if is_run_byte(previous) && !matches!(previous, b'{' | b'}' | b';') {
+            return None;
+        }
+    }
+
+    let mut start = marker + CLASS_MARKER.len();
+    while start < data.len() && data[start] == b' ' {
+        start += 1;
+    }
+    let mut end = start;
+    while end < data.len() {
+        if !is_run_byte(data[end]) || matches!(data[end], b' ' | b':' | b'{' | b';') {
+            break;
+        }
+        end += 1;
+    }
+    let name = std::str::from_utf8(data.get(start..end)?)
+        .ok()?
+        .trim_matches('"');
+    (!name.is_empty()).then_some(name)
+}
+
+/// Every `requiredAddons[]` entry the config declares, in declaration
+/// order and deduplicated.
+///
+/// The marker gives the start of a list. The window runs to the brace that
+/// closes it, which is the same brace [`config_list`] stops at, and only
+/// that window is projected to text, so the parse rules stay identical.
+fn config_required_addons(head: &[u8]) -> Vec<String> {
+    let mut addons: Vec<String> = Vec::new();
+    let mut from = 0usize;
+    while let Some(hit) = head
+        .get(from..)
+        .and_then(|rest| memmem::find(rest, REQUIRED_ADDONS_MARKER))
+    {
+        let at = from + hit;
+        let Some(close) = head.get(at..).and_then(|rest| memchr(b'}', rest)) else {
+            break;
+        };
+        let close = at + close;
+        let window = readable_strings(&head[at..=close]);
+        let (found, _) = config_list_step(&window, 0, REQUIRED_ADDONS_KEY);
+        match found {
+            Some(entries) => {
+                for addon in entries {
+                    if !addons.contains(&addon) {
+                        addons.push(addon);
+                    }
+                }
+                from = close + 1;
+            }
+            None => from = at + REQUIRED_ADDONS_KEY.len(),
+        }
+    }
+    addons
 }
 
 fn config_facts_with(head: &[u8], path: &Path, keybinds: KeybindSources<'_>) -> PboConfigFacts {
@@ -881,33 +1064,77 @@ fn read_capped(path: &Path, limit: u64) -> Option<Vec<u8>> {
     Some(data)
 }
 
+/// Shortest printable run kept. Shorter runs are noise.
+const RUN_MIN: usize = 4;
+/// One per byte, for the eight-byte printable test.
+const BYTE_ONES: u64 = 0x0101_0101_0101_0101;
+/// The high bit of every byte lane.
+const BYTE_HIGH: u64 = 0x8080_8080_8080_8080;
+
+/// True for a byte a printable run keeps. Braces are handled before this
+/// test, so they never reach it inside a chunk.
+const fn is_run_byte(byte: u8) -> bool {
+    byte.wrapping_sub(0x20) < 0x5f
+}
+
+/// True when all eight bytes are printable. A false "no" only sends the
+/// caller back to one byte at a time, so the carry of the second test is
+/// allowed to be conservative.
+fn all_run_bytes(chunk: &[u8]) -> bool {
+    let mut word = [0u8; 8];
+    word.copy_from_slice(chunk);
+    let value = u64::from_le_bytes(word);
+    let below = value.wrapping_sub(BYTE_ONES * 0x20) & !value & BYTE_HIGH;
+    let above = value.wrapping_add(BYTE_ONES) | value;
+    (below | above) & BYTE_HIGH == 0
+}
+
+/// The next byte at or after `from` that a run does not keep.
+fn next_non_run(data: &[u8], mut from: usize) -> usize {
+    while from + 8 <= data.len() {
+        if !all_run_bytes(&data[from..from + 8]) {
+            break;
+        }
+        from += 8;
+    }
+    while from < data.len() && is_run_byte(data[from]) {
+        from += 1;
+    }
+    from
+}
+
 /// Printable runs of at least four bytes, one per line, so the field
 /// scans can work line by line. Braces get their own line: they carry
 /// the nesting the scan needs.
 pub(crate) fn readable_strings(data: &[u8]) -> String {
-    let mut text = String::new();
-    let mut run: Vec<u8> = Vec::new();
-    for &byte in data {
-        match byte {
-            b'{' | b'}' => {
-                push_run(&mut run, &mut text);
-                text.push(byte as char);
-                text.push('\n');
-            }
-            0x20..=0x7e => run.push(byte),
-            _ => push_run(&mut run, &mut text),
-        }
+    // Braces split the input, so one search covers both the run scan and
+    // the brace lines; the runs are written in place and converted once.
+    let mut text: Vec<u8> = Vec::with_capacity(data.len() + data.len() / 8);
+    let mut rest = data;
+    while let Some(index) = memchr2(b'{', b'}', rest) {
+        push_runs(&mut text, &rest[..index]);
+        text.push(rest[index]);
+        text.push(b'\n');
+        rest = &rest[index + 1..];
     }
-    push_run(&mut run, &mut text);
-    text
+    push_runs(&mut text, rest);
+    // Only printable ASCII, braces and newlines were written.
+    String::from_utf8(text).expect("readable strings are ASCII")
 }
 
-fn push_run(run: &mut Vec<u8>, text: &mut String) {
-    if run.len() >= 4 {
-        text.push_str(&String::from_utf8_lossy(run));
-        text.push('\n');
+fn push_runs(text: &mut Vec<u8>, chunk: &[u8]) {
+    let mut start = 0usize;
+    loop {
+        let end = next_non_run(chunk, start);
+        if end - start >= RUN_MIN {
+            text.extend_from_slice(&chunk[start..end]);
+            text.push(b'\n');
+        }
+        if end >= chunk.len() {
+            return;
+        }
+        start = end + 1;
     }
-    run.clear();
 }
 
 /// Split config text into class declarations, braces, statements and
@@ -953,32 +1180,50 @@ fn set_author(slot: &mut Option<String>, value: Option<String>) {
 /// and whitespace from each entry.
 pub(crate) fn config_list(text: &str, key: &str) -> Vec<String> {
     let mut addons: Vec<String> = Vec::new();
-    let mut rest = text;
-    while let Some(index) = rest.find(key) {
-        rest = &rest[index + key.len()..];
-        let after = rest.trim_start();
-        let Some(after) = after.strip_prefix('=') else {
-            continue;
-        };
-        let after = after.trim_start();
-        let Some(after) = after.strip_prefix('{') else {
-            continue;
-        };
-        let Some((body, after_close)) = after.split_once('}') else {
-            continue;
-        };
-        for entry in body.split(',') {
-            let addon: String = entry
-                .chars()
-                .filter(|c| !c.is_whitespace() && *c != '"')
-                .collect();
-            if !addon.is_empty() && !addons.contains(&addon) {
-                addons.push(addon);
+    let mut from = 0usize;
+    while let Some(hit) = text.get(from..).and_then(|rest| rest.find(key)) {
+        let (found, resume) = config_list_step(text, from + hit, key);
+        if let Some(entries) = found {
+            for addon in entries {
+                if !addons.contains(&addon) {
+                    addons.push(addon);
+                }
             }
         }
-        rest = after_close;
+        from = resume;
     }
     addons
+}
+
+/// One `key[] = { ... }` list that starts at `index`, and the position to
+/// resume the search from: past the closing brace when a list was found,
+/// past the key when the key does not start one.
+fn config_list_step(text: &str, index: usize, key: &str) -> (Option<Vec<String>>, usize) {
+    let after_key = index + key.len();
+    let not_a_list = (None, after_key);
+    let Some(rest) = text.get(after_key..) else {
+        return not_a_list;
+    };
+    let Some(rest) = rest.trim_start().strip_prefix('=') else {
+        return not_a_list;
+    };
+    let Some(rest) = rest.trim_start().strip_prefix('{') else {
+        return not_a_list;
+    };
+    let Some((body, after_close)) = rest.split_once('}') else {
+        return not_a_list;
+    };
+    let mut entries: Vec<String> = Vec::new();
+    for entry in body.split(',') {
+        let addon: String = entry
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '"')
+            .collect();
+        if !addon.is_empty() && !entries.contains(&addon) {
+            entries.push(addon);
+        }
+    }
+    (Some(entries), text.len() - after_close.len())
 }
 
 /// Every `requiredAddons[]` entry from one config text.
@@ -2168,6 +2413,258 @@ pub(crate) mod tests {
             ["A3_Data_F", "cba_main", "stale_dep"]
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The marker scan against the printable-run scan it replaced.
+    mod scan_tests {
+        use super::super::*;
+        use super::{rap_blob, write_pbo, RapBody};
+
+        /// The per-byte printable-run scan this change replaced, kept
+        /// verbatim so the two can be compared byte for byte.
+        fn readable_strings_per_byte(data: &[u8]) -> String {
+            let mut text = String::new();
+            let mut run: Vec<u8> = Vec::new();
+            for &byte in data {
+                match byte {
+                    b'{' | b'}' => {
+                        push_run(&mut run, &mut text);
+                        text.push(byte as char);
+                        text.push('\n');
+                    }
+                    0x20..=0x7e => run.push(byte),
+                    _ => push_run(&mut run, &mut text),
+                }
+            }
+            push_run(&mut run, &mut text);
+            text
+        }
+
+        fn push_run(run: &mut Vec<u8>, text: &mut String) {
+            if run.len() >= RUN_MIN {
+                text.push_str(&String::from_utf8_lossy(run));
+                text.push('\n');
+            }
+            run.clear();
+        }
+
+        /// The closure fields the text scan produced.
+        fn closure_text_facts(text: &str) -> PboConfigFacts {
+            let mut facts = PboConfigFacts {
+                required_addons: required_addons(text),
+                ..PboConfigFacts::default()
+            };
+            scan_sections(text, &mut facts);
+            facts
+        }
+
+        /// The whole old closure path for one window and PBO.
+        fn closure_facts_per_byte(head: &[u8], path: Option<&Path>) -> PboClosureFacts {
+            let mut facts = closure_text_facts(&readable_strings_per_byte(head));
+            if let Some(rap) = path
+                .and_then(rap_from_config_entries)
+                .or_else(|| parse_rap_config(head))
+            {
+                merge_rap_facts(&mut facts, rap);
+            }
+            PboClosureFacts {
+                cfgpatches_classes: facts.cfgpatches_classes,
+                required_addons: facts.required_addons,
+            }
+        }
+
+        /// Compare both scans over one window, without the stored
+        /// `config.bin` path.
+        fn assert_same_window(head: &[u8]) {
+            let per_byte = readable_strings_per_byte(head);
+            assert_eq!(readable_strings(head), per_byte, "text differs");
+            let old = closure_text_facts(&per_byte);
+            let new = closure_scan(head);
+            assert_eq!(
+                new.cfgpatches_classes,
+                old.cfgpatches_classes,
+                "classes differ for {:?}",
+                String::from_utf8_lossy(head)
+            );
+            assert_eq!(
+                new.required_addons,
+                old.required_addons,
+                "addons differ for {:?}",
+                String::from_utf8_lossy(head)
+            );
+        }
+
+        /// Compare the whole `pbo_closure_facts` path over one PBO file.
+        fn assert_same_pbo(path: &Path) -> PboClosureFacts {
+            let head = read_capped(path, PBO_SCAN_LIMIT).unwrap_or_default();
+            let old = closure_facts_per_byte(&head, Some(path));
+            let new = pbo_closure_facts(path);
+            assert_eq!(new, old, "closure differs for {}", path.display());
+            new
+        }
+
+        fn scratch(name: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(name);
+            fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        #[test]
+        fn text_config_matches_the_per_byte_scan() {
+            let dir = scratch("uksfta-scan-text");
+            let f = dir.join("ade_core.pbo");
+            let config: &[u8] = b"class CfgMods { name = \"ADE Core\"; author = \"ADE\"; };\n\
+                class CfgPatches {\n    class ade_core {\n        units[] = {};\n\
+                requiredAddons[] = {\n            \"A3_Data_F\",\n            \"ace_common\"\n        };\n\
+                author = \"[ADE]\";\n    };\n    class ade_gear {\n        requiredAddons[] = {\"ade_core\"};\n    };\n};\n";
+            write_pbo(&f, "z\\ade\\addons\\ade_core", config);
+
+            let facts = assert_same_pbo(&f);
+            assert_eq!(facts.cfgpatches_classes, ["ade_core", "ade_gear"]);
+            assert_eq!(
+                facts.required_addons,
+                ["A3_Data_F", "ace_common", "ade_core"]
+            );
+            fs::remove_dir_all(&dir).unwrap();
+        }
+
+        #[test]
+        fn binary_config_matches_the_per_byte_scan() {
+            let dir = scratch("uksfta-scan-binary");
+            let f = dir.join("alpha.pbo");
+            let mut alpha = RapBody::new("alpha_main");
+            alpha.strings("requiredAddons[]", &["A3_Data_F", "cba_main"]);
+            let mut patches = RapBody::new("CfgPatches");
+            patches.class("alpha_main", alpha);
+            let mut root = RapBody::new("");
+            root.class("CfgPatches", patches);
+            let packed = rap_blob(&root);
+            // Printable noise before the blob: it must not add a class.
+            let mut payload = b"class CfgPatches { class noise { }; };".to_vec();
+            payload.push(0);
+            payload.extend_from_slice(&packed);
+            write_pbo(&f, "z\\alpha\\addons\\alpha_main", &payload);
+
+            let facts = assert_same_pbo(&f);
+            assert_eq!(facts.cfgpatches_classes, ["alpha_main"]);
+            assert_eq!(facts.required_addons, ["A3_Data_F", "cba_main"]);
+            fs::remove_dir_all(&dir).unwrap();
+        }
+
+        #[test]
+        fn config_past_the_window_matches_the_per_byte_scan() {
+            let dir = scratch("uksfta-scan-past-window");
+            let f = dir.join("late.pbo");
+            let mut payload = vec![0xaa_u8; PBO_SCAN_LIMIT as usize + 1024];
+            payload.extend_from_slice(
+                b"class CfgPatches { class late_main { requiredAddons[] = {\"late_dep\"}; }; };",
+            );
+            write_pbo(&f, "z\\late\\addons\\late_main", &payload);
+
+            let facts = assert_same_pbo(&f);
+            assert!(facts.cfgpatches_classes.is_empty());
+            assert!(facts.required_addons.is_empty());
+            fs::remove_dir_all(&dir).unwrap();
+        }
+
+        #[test]
+        fn mixed_binary_noise_matches_the_per_byte_scan() {
+            let mut noise = Vec::new();
+            for round in 0..8u8 {
+                noise.extend((0u8..=255).filter(|byte| !(0x20..=0x7e).contains(byte)));
+                noise.extend_from_slice(b"\x00\x01 class CfgPatches { class ");
+                noise.extend_from_slice(&[0xff, 0xfe, 0x00, round]);
+                noise.extend_from_slice(
+                    b"noise_cfg { requiredAddons[] = {\"A3_Data_F\",\r\n\"cba_main\"}; \
+                      units[] = {class Decoy}; }; };",
+                );
+                noise.extend_from_slice(&[0x7f, 0x80, 0x00]);
+            }
+            write_scratch_and_compare(&noise);
+        }
+
+        /// Write the window as the body of a PBO and compare the scans.
+        fn write_scratch_and_compare(head: &[u8]) {
+            let dir = scratch("uksfta-scan-scratch");
+            let f = dir.join("scratch.pbo");
+            write_pbo(&f, "z\\scratch\\addons\\scratch", head);
+            assert_same_window(head);
+            assert_same_pbo(&f);
+            fs::remove_dir_all(&dir).unwrap();
+        }
+
+        #[test]
+        fn empty_window_matches_the_per_byte_scan() {
+            assert_same_window(&[]);
+            assert_same_window(b"\0\0\0\0");
+            assert!(closure_scan(&[]).cfgpatches_classes.is_empty());
+            assert!(closure_scan(&[]).required_addons.is_empty());
+        }
+
+        #[test]
+        fn edge_markers_match_the_per_byte_scan() {
+            let cases: &[&[u8]] = &[
+                b"class ",
+                b"class CfgPatches",
+                b"class CfgPatches { class a {}; class b {}; };",
+                b"units[] = {class Decoy}; class CfgPatches { class Real {}; };",
+                b"class CfgPatches { class a { class Nested {}; }; };",
+                b"class CfgMods { name = \"x\"; }; class CfgPatches { class p {}; };",
+                b"requiredAddons[] = {",
+                b"requiredAddons[]={\"A\",\"B\"}; requiredAddons[] = {\"B\",\"C\"};",
+                b"text = \"requiredAddons[] = {inside}\";",
+                b"requiredAddons[] = {};",
+                b"requiredAddons[] = { \"A\",\0\0\"B\" };",
+                b"subclass CfgPatches { class a {}; };",
+                b"x class CfgPatches { class a {}; };",
+                b"class CfgPatches{class a{}};",
+                b"class \"CfgPatches\" { class a {}; };",
+                b"class CfgPatches class Other { class a {}; };",
+                b"class CfgPatches { ; class a {};; };",
+                b"class CfgPatches {\r\n    class a {\r\n        requiredAddons[] = {\"A\"};\r\n    };\r\n};",
+                b"}}class CfgPatches{class a{};}",
+                b"class CfgPatches { class a { requiredAddons[] = {\"x\"} }; };",
+                b"ssssclass CfgPatches { class a {}; };",
+            ];
+            for case in cases {
+                assert_same_window(case);
+            }
+        }
+
+        #[test]
+        fn every_byte_value_matches_the_per_byte_scan() {
+            let mut data: Vec<u8> = (0u8..=255).collect();
+            data.extend((0u8..=255).rev());
+            assert_same_window(&data);
+
+            // Run boundaries at every offset around the eight-byte test.
+            for split in 0..16usize {
+                let mut data = vec![b'a'; split];
+                data.extend_from_slice(&[0x00, b'x']);
+                data.extend_from_slice(b"class CfgPatches { class a {}; };");
+                assert_same_window(&data);
+            }
+        }
+
+        #[test]
+        fn printable_word_test_is_exact() {
+            for byte in 0u8..=255 {
+                let word = [byte; 8];
+                assert_eq!(
+                    all_run_bytes(&word),
+                    (0x20..=0x7e).contains(&byte),
+                    "byte {byte:#04x}"
+                );
+            }
+            // One non-printable byte in each lane must be found.
+            for lane in 0..8usize {
+                let mut word = [b'z'; 8];
+                word[lane] = 0x1f;
+                assert!(!all_run_bytes(&word), "lane {lane}");
+                word[lane] = 0x7f;
+                assert!(!all_run_bytes(&word), "lane {lane}");
+            }
+        }
     }
 
     /// The closure pipeline from before the shared front read: a fixed

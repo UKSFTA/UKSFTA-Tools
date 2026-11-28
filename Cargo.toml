@@ -15,6 +15,7 @@ console-subscriber = { version = "0.5.0", optional = true }
 dirs = "6"
 html-escape = "0.3"
 indicatif = "0.18"
+memchr = "2"
 openssh-sftp-client = "=0.15.12"
 reqwest = { version = "0.13", features = ["blocking"] }
 rpassword = "7.5.5"
