@@ -1251,7 +1251,7 @@ between packets. The summary digest is the digest of the send.
 
 The window for one worker is
 
-```
+```text
 max( min(requests × packet, 64 MiB, file size) / workers, packet )
 ```
 
