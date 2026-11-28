@@ -203,6 +203,19 @@ pub fn investigate(
     let use_colour = stdout_is_tty();
     println!("Untracked PBO Investigation:");
     println!("  {} PBO(s) examined", results.len());
+    if let Some(index) = manifest_index.as_ref() {
+        let mut ids: Vec<&str> = results
+            .iter()
+            .filter_map(|(_, _, origin)| origin.as_ref().map(|origin| origin.id.as_str()))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            if let Some((installed, published)) = index.update_for(id) {
+                println!("  update available: {id}: installed {installed}, published {published}");
+            }
+        }
+    }
     let mut unknown_count = 0;
     for (pbo, path, origin) in &results {
         let Some(origin) = origin else {

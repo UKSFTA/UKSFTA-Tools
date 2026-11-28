@@ -388,6 +388,9 @@ pub struct WorkshopIndex {
     pub rebuilt: usize,
     /// Time spent building the index, including any manifest reads.
     pub elapsed: std::time::Duration,
+    /// Items whose published manifest differs from the installed one:
+    /// `id -> (installed, published)`.
+    pub outdated: BTreeMap<String, (String, String)>,
 }
 
 impl WorkshopIndex {
@@ -471,6 +474,14 @@ impl WorkshopIndex {
                 exact_size: true,
             }
         }
+    }
+
+    /// The installed and published manifest ids for `id`, when the ACF
+    /// records both and they differ.
+    pub fn update_for(&self, id: &str) -> Option<(&str, &str)> {
+        self.outdated
+            .get(id)
+            .map(|(installed, published)| (installed.as_str(), published.as_str()))
     }
 
     /// The entry `id` publishes for a file called `name`. A local PBO is
@@ -627,6 +638,7 @@ pub fn build_from(acfs: &[PathBuf], depot_caches: &[PathBuf], cache_path: &Path)
     let mut stamps = BTreeMap::new();
     let mut published: Vec<(String, String)> = Vec::new();
     let mut legacy = 0usize;
+    let mut outdated: BTreeMap<String, (String, String)> = BTreeMap::new();
 
     for acf in acfs {
         if let Some(stamp) = FileStamp::read(acf) {
@@ -643,6 +655,12 @@ pub fn build_from(acfs: &[PathBuf], depot_caches: &[PathBuf], cache_path: &Path)
             if item.manifest == LEGACY_MANIFEST {
                 legacy += 1;
                 continue;
+            }
+            if !item.latest_manifest.is_empty()
+                && item.latest_manifest != item.manifest
+                && item.latest_manifest != LEGACY_MANIFEST
+            {
+                outdated.insert(id.clone(), (item.manifest.clone(), item.latest_manifest));
             }
             published.push((id, item.manifest));
         }
@@ -795,6 +813,7 @@ pub fn from_mappings(mappings: Vec<(String, Vec<ManifestFile>)>) -> WorkshopInde
         names,
         rebuilt: 0,
         elapsed: std::time::Duration::ZERO,
+        outdated: BTreeMap::new(),
     }
 }
 
@@ -1086,6 +1105,38 @@ mod tests {
             parse_manifest(&data),
             Err(ManifestError::Trailing(1))
         ));
+    }
+
+    #[test]
+    fn the_acf_names_the_installed_and_the_published_manifest() {
+        let acf = r#"
+"AppWorkshop"
+{
+	"WorkshopItemsInstalled"
+	{
+		"3549882948"
+		{
+			"size"		"27057463048"
+			"timeupdated"		"1795109392"
+			"manifest"		"5059267380163170271"
+		}
+	}
+	"WorkshopItemDetails"
+	{
+		"3549882948"
+		{
+			"manifest"		"5059267380163170271"
+			"timeupdated"		"1795109392"
+			"latest_timeupdated"		"1796000000"
+			"latest_manifest"		"5699377319592524584"
+		}
+	}
+}
+"#;
+        let items = crate::steam::parse_acf(acf);
+        let item = items.get("3549882948").expect("the item is parsed");
+        assert_eq!(item.manifest, "5059267380163170271");
+        assert_eq!(item.latest_manifest, "5699377319592524584");
     }
 
     #[test]
